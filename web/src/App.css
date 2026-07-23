@@ -1,0 +1,290 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, sans-serif;
+  background: #0f1117;
+  color: #e1e4e8;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+/* Header */
+.app-header {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #21262d;
+}
+
+.app-header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+/* Download Form */
+.download-form {
+  margin-bottom: 24px;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.url-input {
+  flex: 1;
+  padding: 10px 14px;
+  font-size: 0.9rem;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e1e4e8;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.url-input:focus {
+  border-color: #58a6ff;
+}
+
+.url-input::placeholder {
+  color: #6e7681;
+}
+
+.form-error {
+  color: #f85149;
+  font-size: 0.8rem;
+  margin-top: 6px;
+}
+
+/* Buttons */
+.btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: #238636;
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #2ea043;
+}
+
+.btn-danger {
+  background: #da3633;
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #f85149;
+}
+
+.btn-sm {
+  padding: 5px 12px;
+  font-size: 0.8rem;
+}
+
+.btn-dismiss {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 1rem;
+}
+
+/* Error Banner */
+.app-error {
+  background: #3d1214;
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  color: #f85149;
+}
+
+/* Job Sections */
+.job-section {
+  margin-bottom: 24px;
+}
+
+.job-section h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #8b949e;
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.empty-message {
+  color: #484f58;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+/* Job Card */
+.job-card {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 8px;
+}
+
+.job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.job-name {
+  font-weight: 500;
+  font-size: 0.9rem;
+  color: #f0f6fc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 70%;
+}
+
+.job-status {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+  text-transform: uppercase;
+}
+
+.status-downloading {
+  background: #0d419d;
+  color: #79c0ff;
+}
+
+.status-queued {
+  background: #341a04;
+  color: #d29922;
+}
+
+.status-completed {
+  background: #0f291e;
+  color: #3fb950;
+}
+
+.status-failed {
+  background: #3d1214;
+  color: #f85149;
+}
+
+.status-cancelled {
+  background: #1c1c1e;
+  color: #8b949e;
+}
+
+/* Progress Bar */
+.progress-bar-container {
+  width: 100%;
+  height: 6px;
+  background: #21262d;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #238636, #3fb950);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* Job Details */
+.job-details {
+  display: flex;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: #8b949e;
+}
+
+.job-speed {
+  color: #58a6ff;
+}
+
+.job-error {
+  color: #f85149;
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+}
+
+/* Job Actions */
+.job-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.job-time {
+  font-size: 0.75rem;
+  color: #484f58;
+}
+
+.btn-secondary {
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+}
+
+.btn-secondary:hover {
+  background: #30363d;
+  border-color: #484f58;
+}
+
+/* Paused status */
+.status-paused {
+  background: #2d2006;
+  color: #d29922;
+}
+
+/* Paused progress bar */
+.progress-paused {
+  background: linear-gradient(90deg, #b08800, #d29922) !important;
+}
+
+.job-paused-label {
+  color: #d29922;
+  font-weight: 500;
+}
+
+.job-eta {
+  color: #8b949e;
+}
+

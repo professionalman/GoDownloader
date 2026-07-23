@@ -1,0 +1,45 @@
+# Binaries and executables
+bin/
+*.exe
+*.exe.test
+*.dll
+*.so
+*.dylib
+server
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+downloader.db
+
+# Downloaded files directory
+downloads/*
+!downloads/.gitkeep
+
+# Node / Frontend dependencies and build outputs
+node_modules/
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE and OS metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Go test / coverage files
+*.out
+*.prof
+*.test
