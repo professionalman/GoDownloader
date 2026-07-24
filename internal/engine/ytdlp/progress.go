@@ -29,12 +29,38 @@ var (
 	mergerRe = regexp.MustCompile(`\[Merger\]|\[ffmpeg\]|\[ExtractAudio\]`)
 )
 
-// parseProgressLine parses a single line of yt-dlp output into progress info.
-// Returns nil if the line is not a progress line.
+// parseProgressLine parses structured or standard yt-dlp progress lines into progressInfo.
 func parseProgressLine(line string) *progressInfo {
 	line = strings.TrimSpace(line)
 
-	// Check for 100% completion
+	// Check for structured --progress-template output: download:percent|downloaded|total|speed|eta
+	if strings.HasPrefix(line, "download:") {
+		content := strings.TrimPrefix(line, "download:")
+		parts := strings.Split(content, "|")
+		if len(parts) >= 5 {
+			percentStr := strings.TrimSuffix(strings.TrimSpace(parts[0]), "%")
+			percent, _ := strconv.ParseFloat(percentStr, 64)
+
+			dlBytes := parseNumberOrNA(parts[1])
+			totalBytes := parseNumberOrNA(parts[2])
+			speed := parseNumberOrNA(parts[3])
+			eta := parseNumberOrNA(parts[4])
+
+			if totalBytes > 0 && dlBytes == 0 && percent > 0 {
+				dlBytes = int64(float64(totalBytes) * percent / 100.0)
+			}
+
+			return &progressInfo{
+				Percent:         percent,
+				TotalBytes:      totalBytes,
+				DownloadedBytes: dlBytes,
+				Speed:           speed,
+				ETASeconds:      eta,
+			}
+		}
+	}
+
+	// Fallback regex parsing for standard output
 	if m := completeRe.FindStringSubmatch(line); len(m) > 0 {
 		totalBytes := parseSizeString(m[1])
 		return &progressInfo{
@@ -46,7 +72,6 @@ func parseProgressLine(line string) *progressInfo {
 		}
 	}
 
-	// Check for progress line
 	if m := progressRe.FindStringSubmatch(line); len(m) > 0 {
 		percent, _ := strconv.ParseFloat(m[1], 64)
 		totalBytes := parseSizeString(m[2])
@@ -68,6 +93,22 @@ func parseProgressLine(line string) *progressInfo {
 	}
 
 	return nil
+}
+
+func parseNumberOrNA(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "NA" || s == "Unknown" || s == "~" {
+		return 0
+	}
+	val, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		fVal, errFloat := strconv.ParseFloat(s, 64)
+		if errFloat == nil {
+			return int64(fVal)
+		}
+		return 0
+	}
+	return val
 }
 
 // isPostProcessingLine returns true if the line indicates FFmpeg post-processing.

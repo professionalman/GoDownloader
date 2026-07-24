@@ -14,6 +14,10 @@ func TestParseProgressLine(t *testing.T) {
 		expected *progressInfo
 	}{
 		{
+			name: "Structured progress line",
+			line: "download:45.5%|47710208|104857600|5505024|10",
+		},
+		{
 			name: "Standard progress line",
 			line: "[download]  45.5% of 100.00MiB at  5.25MiB/s ETA 00:10",
 		},
@@ -26,14 +30,14 @@ func TestParseProgressLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := parseProgressLine(tt.line)
-			if tt.name == "Standard progress line" {
+			if tt.name == "Standard progress line" || tt.name == "Structured progress line" {
 				if got == nil {
 					t.Fatalf("expected non-nil progress info")
 				}
 				if got.Percent != 45.5 {
 					t.Errorf("expected percent 45.5, got %f", got.Percent)
 				}
-				if got.TotalBytes != 100*1024*1024 {
+				if got.TotalBytes != 104857600 {
 					t.Errorf("expected total bytes 104857600, got %d", got.TotalBytes)
 				}
 			} else {

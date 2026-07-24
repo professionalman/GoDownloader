@@ -59,7 +59,8 @@ func (e *Engine) Available() bool {
 func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {
 	// Build command arguments
 	args := []string{
-		"--newline",     // Force progress on new lines
+		"--newline", // Force progress on new lines
+		"--progress-template", "download:%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s|%(progress.eta)s",
 		"--no-playlist", // Single video only
 		"--no-overwrites",
 		"-o", downloadDir + "/%(title)s.%(ext)s",
