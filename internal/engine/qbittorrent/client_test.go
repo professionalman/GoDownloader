@@ -201,7 +201,7 @@ func TestClient_403_Reauth(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "admin", "adminadmin", 5*time.Second)
-	client.authenticated = true 
+	client.authenticated = true
 
 	ver, err := client.GetVersion(context.Background())
 	if err != nil {

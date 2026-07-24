@@ -16,11 +16,11 @@ import (
 // Manager is the central orchestrator for job lifecycle management.
 // All state transitions go through the Manager.
 type Manager struct {
-	repo        JobRepository
-	engines     EngineRegistry
-	bus         EventBus
+	repo        IJobRepository
+	engines     IEngineRegistry
+	bus         IEventBus
 	downloadDir string
-	torrentRepo TorrentRepository
+	torrentRepo ITorrentRepository
 
 	mu         sync.RWMutex
 	activeJobs map[string]*Job // id -> job (in-memory cache for active jobs)
@@ -29,7 +29,7 @@ type Manager struct {
 }
 
 // NewManager creates a new job manager.
-func NewManager(repo JobRepository, engines EngineRegistry, bus EventBus, downloadDir string, torrentRepo TorrentRepository) *Manager {
+func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, downloadDir string, torrentRepo ITorrentRepository) *Manager {
 	m := &Manager{
 		repo:        repo,
 		engines:     engines,
@@ -176,7 +176,7 @@ func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) 
 		return
 	}
 
-	analyzer, ok := eng.(MediaAnalyzer)
+	analyzer, ok := eng.(IMediaAnalyzer)
 	if !ok {
 		j.Status = StatusFailed
 		j.Error = "yt-dlp engine does not support media analysis"
@@ -332,7 +332,7 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		return
 	}
 
-	torrentEng, ok := eng.(TorrentEngine)
+	torrentEng, ok := eng.(ITorrentEngine)
 	if !ok {
 		j.Status = StatusFailed
 		j.Error = "qBittorrent engine does not support torrent operations"
@@ -400,10 +400,10 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 	// Save torrent job record
 	if m.torrentRepo != nil {
 		m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
-			JobID:             jobID,
-			InfoHash:          infoHash,
-			Name:              metadata.Name,
-			TotalSize:         metadata.TotalSize,
+			JobID:     jobID,
+			InfoHash:  infoHash,
+			Name:      metadata.Name,
+			TotalSize: metadata.TotalSize,
 		})
 
 		// Fetch and save file list
@@ -460,7 +460,7 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available"}
 	}
 
-	torrentEng, ok := eng.(TorrentEngine)
+	torrentEng, ok := eng.(ITorrentEngine)
 	if !ok {
 		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
 	}
@@ -522,7 +522,7 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrEngineError, Message: "engine not available"}
 	}
 
-	torrentEng, ok := eng.(TorrentEngine)
+	torrentEng, ok := eng.(ITorrentEngine)
 	if ok {
 		torrentEng.StopDownload(ctx, j.EngineID)
 	}
@@ -559,7 +559,7 @@ func (m *Manager) GetTorrentFiles(ctx context.Context, id string) ([]TorrentFile
 		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available"}
 	}
 
-	torrentEng, ok := eng.(TorrentEngine)
+	torrentEng, ok := eng.(ITorrentEngine)
 	if !ok {
 		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
 	}
@@ -643,7 +643,7 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 	// For torrent jobs, also remove from qBittorrent
 	if j.Type == TypeTorrent && j.EngineID != "" {
 		if eng, ok := m.engines.Get(j.Engine); ok {
-			if te, ok := eng.(TorrentEngine); ok {
+			if te, ok := eng.(ITorrentEngine); ok {
 				te.RemoveTorrent(ctx, j.EngineID, false)
 			}
 		}
@@ -784,7 +784,7 @@ func (m *Manager) GetActiveJobs() map[string]*Job {
 }
 
 // GetEngine returns the engine for a given name.
-func (m *Manager) GetEngine(name string) (Engine, bool) {
+func (m *Manager) GetEngine(name string) (IEngine, bool) {
 	return m.engines.Get(name)
 }
 

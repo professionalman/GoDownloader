@@ -14,11 +14,11 @@ import (
 
 // ytdlpJSON is the raw JSON structure from yt-dlp --dump-json.
 type ytdlpJSON struct {
-	Title     string          `json:"title"`
-	Duration  float64         `json:"duration"`
-	Thumbnail string          `json:"thumbnail"`
-	URL       string          `json:"webpage_url"`
-	Formats   []ytdlpFormat   `json:"formats"`
+	Title     string        `json:"title"`
+	Duration  float64       `json:"duration"`
+	Thumbnail string        `json:"thumbnail"`
+	URL       string        `json:"webpage_url"`
+	Formats   []ytdlpFormat `json:"formats"`
 }
 
 type ytdlpFormat struct {

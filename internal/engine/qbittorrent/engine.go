@@ -34,6 +34,11 @@ type TorrentMetadata struct {
 	Leechers  int    `json:"leechers"`
 }
 
+var (
+	_ job.IEngine        = (*Engine)(nil)
+	_ job.ITorrentEngine = (*Engine)(nil)
+)
+
 type Engine struct {
 	client *Client
 	mu     sync.RWMutex
@@ -44,9 +49,6 @@ func NewEngine(baseURL, username, password string, timeoutSecs int) *Engine {
 		client: NewClient(baseURL, username, password, time.Duration(timeoutSecs)*time.Second),
 	}
 }
-
-// Ensure Engine implements job.Engine
-var _ job.Engine = (*Engine)(nil)
 
 func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {
 	if j.EngineID == "" {
@@ -90,18 +92,18 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 	}
 
 	return &job.EngineStatus{
-		Status:             mapQBState(info.State),
-		Progress:           normalizeProgress(info.Progress),
+		Status:              mapQBState(info.State),
+		Progress:            normalizeProgress(info.Progress),
 		SpeedBytesPerSecond: info.DLSpeed,
-		CompletedBytes:     info.CompletedSize,
-		TotalBytes:         info.TotalSize,
-		ETASeconds:         normalizeETA(info.ETA),
-		UploadSpeed:        info.UPSpeed,
-		Uploaded:           info.Uploaded,
-		Ratio:              info.Ratio,
-		Seeders:            info.NumSeeds,
-		Leechers:           info.NumLeechs,
-		FileName:           info.Name,
+		CompletedBytes:      info.CompletedSize,
+		TotalBytes:          info.TotalSize,
+		ETASeconds:          normalizeETA(info.ETA),
+		UploadSpeed:         info.UPSpeed,
+		Uploaded:            info.Uploaded,
+		Ratio:               info.Ratio,
+		Seeders:             info.NumSeeds,
+		Leechers:            info.NumLeechs,
+		FileName:            info.Name,
 	}, nil
 }
 
@@ -149,37 +151,39 @@ func (e *Engine) AddTorrentFile(ctx context.Context, filePath, savePath string, 
 			if strings.TrimSpace(tag) == jobID {
 				return strings.ToLower(info.Hash), nil
 			}
-        }
+		}
 	}
 
 	return "", errors.New("torrent added but info hash not found")
 }
 
-func (e *Engine) GetFiles(ctx context.Context, infoHash string) ([]TorrentFileInfo, error) {
+func (e *Engine) GetFiles(ctx context.Context, infoHash string) ([]job.TorrentFile, error) {
 	files, err := e.client.GetTorrentFiles(ctx, infoHash)
 	if err != nil {
 		return nil, err
 	}
 
-	var result []TorrentFileInfo
+	var result []job.TorrentFile
 	for _, f := range files {
-		result = append(result, TorrentFileInfo{
+		p := mapQBPriorityToApp(f.Priority)
+		result = append(result, job.TorrentFile{
 			Index:    f.Index,
 			Path:     f.Name,
 			Size:     f.Size,
 			Progress: normalizeProgress(f.Progress),
-			Priority: mapQBPriorityToApp(f.Priority),
+			Priority: job.TorrentFilePriority(p),
+			Selected: f.Priority != qbPrioritySkip,
 		})
 	}
 	return result, nil
 }
 
-func (e *Engine) SetFilePriorities(ctx context.Context, infoHash string, priorities map[int]string) error {
+func (e *Engine) SetFilePriorities(ctx context.Context, infoHash string, selections []job.TorrentFileSelection) error {
 	// Group files by priority to batch updates
 	prioGroups := make(map[int][]int)
-	for fileID, prioStr := range priorities {
-		qbPrio := mapAppPriorityToQB(prioStr)
-		prioGroups[qbPrio] = append(prioGroups[qbPrio], fileID)
+	for _, sel := range selections {
+		qbPrio := mapAppPriorityToQB(string(sel.Priority))
+		prioGroups[qbPrio] = append(prioGroups[qbPrio], sel.Index)
 	}
 
 	for qbPrio, fileIDs := range prioGroups {
@@ -209,18 +213,21 @@ func (e *Engine) HealthCheck(ctx context.Context) error {
 	return err
 }
 
-func (e *Engine) GetTorrentMetadata(ctx context.Context, infoHash string) (*TorrentMetadata, error) {
+func (e *Engine) GetTorrentInfo(ctx context.Context, infoHash string) (*job.TorrentInfo, error) {
 	info, err := e.client.GetTorrentInfo(ctx, infoHash)
 	if err != nil {
 		return nil, err
 	}
 
-	return &TorrentMetadata{
-		Name:      info.Name,
-		InfoHash:  info.Hash,
-		TotalSize: info.TotalSize,
-		Seeders:   info.NumSeeds,
-		Leechers:  info.NumLeechs,
+	return &job.TorrentInfo{
+		Name:        info.Name,
+		InfoHash:    info.Hash,
+		TotalSize:   info.TotalSize,
+		Seeders:     info.NumSeeds,
+		Leechers:    info.NumLeechs,
+		Uploaded:    info.Uploaded,
+		UploadSpeed: info.UPSpeed,
+		Ratio:       info.Ratio,
 	}, nil
 }
 

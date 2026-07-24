@@ -10,13 +10,13 @@ import (
 )
 
 // SSEHandler serves Server-Sent Events to connected clients.
-// It subscribes to the EventBus and forwards events.
+// It subscribes to the IEventBus and forwards events.
 type SSEHandler struct {
-	bus job.EventBus
+	bus job.IEventBus
 }
 
 // NewSSEHandler creates a new SSE handler connected to the event bus.
-func NewSSEHandler(bus job.EventBus) *SSEHandler {
+func NewSSEHandler(bus job.IEventBus) *SSEHandler {
 	return &SSEHandler{bus: bus}
 }
 

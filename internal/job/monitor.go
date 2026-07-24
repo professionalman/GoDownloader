@@ -95,7 +95,7 @@ func (m *Monitor) tick(ctx context.Context) {
 
 // shouldPersist determines whether to write to DB this tick.
 // State transitions always persist. Progress updates use tiered persistence.
-func (m *Monitor) shouldPersist(jobID string, status interface{ }) bool {
+func (m *Monitor) shouldPersist(jobID string, status interface{}) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

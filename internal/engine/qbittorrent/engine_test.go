@@ -30,7 +30,7 @@ func TestEngine_AddMagnet(t *testing.T) {
 	defer ts.Close()
 
 	engine := NewEngine(ts.URL, "admin", "adminadmin", 5)
-	
+
 	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=test"
 	hash, err := engine.AddMagnet(context.Background(), magnet, "/tmp", "job-123")
 	if err != nil {
@@ -138,11 +138,11 @@ func TestEngine_SetFilePriorities(t *testing.T) {
 
 	engine := NewEngine(ts.URL, "admin", "adminadmin", 5)
 
-	prios := map[int]string{
-		0: "skip",
-		1: "skip",
+	selections := []job.TorrentFileSelection{
+		{Index: 0, Priority: job.PrioritySkip},
+		{Index: 1, Priority: job.PrioritySkip},
 	}
-	err := engine.SetFilePriorities(context.Background(), "1234", prios)
+	err := engine.SetFilePriorities(context.Background(), "1234", selections)
 	if err != nil {
 		t.Fatalf("expected SetFilePriorities to succeed, got %v", err)
 	}

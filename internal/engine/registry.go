@@ -42,25 +42,27 @@ var directExtensions = []string{
 	".bin", ".dat",
 }
 
+var _ job.IEngineRegistry = (*Registry)(nil)
+
 // Registry maps engine names to implementations and detects which engine to use.
 type Registry struct {
-	engines map[string]job.Engine
+	engines map[string]job.IEngine
 }
 
 // NewRegistry creates a new engine registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		engines: make(map[string]job.Engine),
+		engines: make(map[string]job.IEngine),
 	}
 }
 
 // Register adds an engine under the given name.
-func (r *Registry) Register(name string, eng job.Engine) {
+func (r *Registry) Register(name string, eng job.IEngine) {
 	r.engines[name] = eng
 }
 
 // Get returns the engine registered under the given name.
-func (r *Registry) Get(name string) (job.Engine, bool) {
+func (r *Registry) Get(name string) (job.IEngine, bool) {
 	eng, ok := r.engines[name]
 	return eng, ok
 }

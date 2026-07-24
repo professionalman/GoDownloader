@@ -13,7 +13,7 @@ import (
 
 // downloadState tracks an active yt-dlp download process.
 type downloadState struct {
-	cancel  context.CancelFunc
+	cancel   context.CancelFunc
 	progress progressInfo
 	mu       sync.Mutex
 	done     bool
@@ -21,7 +21,12 @@ type downloadState struct {
 	postProc bool // true when FFmpeg is post-processing
 }
 
-// Engine implements job.Engine and job.MediaAnalyzer for yt-dlp.
+var (
+	_ job.IEngine        = (*Engine)(nil)
+	_ job.IMediaAnalyzer = (*Engine)(nil)
+)
+
+// Engine implements job.IEngine and job.IMediaAnalyzer for yt-dlp.
 type Engine struct {
 	ytdlpPath  string
 	ffmpegPath string
@@ -53,8 +58,8 @@ func (e *Engine) Available() bool {
 func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {
 	// Build command arguments
 	args := []string{
-		"--newline",       // Force progress on new lines
-		"--no-playlist",   // Single video only
+		"--newline",     // Force progress on new lines
+		"--no-playlist", // Single video only
 		"--no-overwrites",
 		"-o", downloadDir + "/%(title)s.%(ext)s",
 	}

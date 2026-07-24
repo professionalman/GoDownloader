@@ -9,7 +9,9 @@ import (
 	"downloader/internal/job"
 )
 
-// Aria2Engine implements the engine.Engine interface using aria2c.
+var _ job.IEngine = (*Aria2Engine)(nil)
+
+// Aria2Engine implements the engine.IEngine interface using aria2c.
 type Aria2Engine struct {
 	client *Client
 }

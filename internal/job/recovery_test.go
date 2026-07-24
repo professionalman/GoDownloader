@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func setupRecoveryTest(t *testing.T, statusFunc func(ctx context.Context, j *Job) (*EngineStatus, error)) (*Manager, JobRepository, func()) {
+func setupRecoveryTest(t *testing.T, statusFunc func(ctx context.Context, j *Job) (*EngineStatus, error)) (*Manager, IJobRepository, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	repo := newFakeJobRepository()
@@ -27,7 +27,7 @@ func setupRecoveryTest(t *testing.T, statusFunc func(ctx context.Context, j *Job
 	return m, repo, cleanup
 }
 
-func createTestJob(t *testing.T, repo JobRepository, id string, status JobStatus, engineID string) {
+func createTestJob(t *testing.T, repo IJobRepository, id string, status JobStatus, engineID string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)

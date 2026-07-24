@@ -8,11 +8,11 @@ import (
 
 // progressInfo holds parsed progress data from yt-dlp output.
 type progressInfo struct {
-	Percent        float64
-	TotalBytes     int64
+	Percent         float64
+	TotalBytes      int64
 	DownloadedBytes int64
-	Speed          int64
-	ETASeconds     int64
+	Speed           int64
+	ETASeconds      int64
 }
 
 // Regex patterns for yt-dlp download progress lines.
@@ -38,11 +38,11 @@ func parseProgressLine(line string) *progressInfo {
 	if m := completeRe.FindStringSubmatch(line); len(m) > 0 {
 		totalBytes := parseSizeString(m[1])
 		return &progressInfo{
-			Percent:        100.0,
-			TotalBytes:     totalBytes,
+			Percent:         100.0,
+			TotalBytes:      totalBytes,
 			DownloadedBytes: totalBytes,
-			Speed:          0,
-			ETASeconds:     0,
+			Speed:           0,
+			ETASeconds:      0,
 		}
 	}
 
@@ -59,11 +59,11 @@ func parseProgressLine(line string) *progressInfo {
 		}
 
 		return &progressInfo{
-			Percent:        percent,
-			TotalBytes:     totalBytes,
+			Percent:         percent,
+			TotalBytes:      totalBytes,
 			DownloadedBytes: downloaded,
-			Speed:          speed,
-			ETASeconds:     eta,
+			Speed:           speed,
+			ETASeconds:      eta,
 		}
 	}
 

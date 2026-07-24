@@ -6,8 +6,10 @@ import (
 	"downloader/internal/job"
 )
 
+var _ job.IEventBus = (*InMemoryBus)(nil)
+
 // InMemoryBus is a simple in-memory event bus with fan-out to subscribers.
-// It implements the job.EventBus interface.
+// It implements the job.IEventBus interface.
 type InMemoryBus struct {
 	mu          sync.RWMutex
 	subscribers map[<-chan job.Event]chan job.Event

@@ -8,7 +8,13 @@ import (
 	"downloader/internal/job"
 )
 
-// SQLiteTorrentRepository implements job.TorrentRepository using SQLite.
+// ITorrentRepository defines the persistence interface for torrent-specific data.
+type ITorrentRepository = job.ITorrentRepository
+type TorrentRepository = job.ITorrentRepository
+
+var _ job.ITorrentRepository = (*SQLiteTorrentRepository)(nil)
+
+// SQLiteTorrentRepository implements job.ITorrentRepository using SQLite.
 type SQLiteTorrentRepository struct {
 	db *DB
 }

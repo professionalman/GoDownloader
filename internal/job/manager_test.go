@@ -55,7 +55,7 @@ func (f *fakeEngine) Status(ctx context.Context, j *Job) (*EngineStatus, error) 
 	return &EngineStatus{Status: StatusDownloading}, nil
 }
 
-func (f *fakeEngine) Get(name string) (Engine, bool) {
+func (f *fakeEngine) Get(name string) (IEngine, bool) {
 	return f, true
 }
 
@@ -118,11 +118,19 @@ func (f *fakeTorrentEngine) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+var (
+	_ IEngine         = (*fakeEngine)(nil)
+	_ ITorrentEngine  = (*fakeTorrentEngine)(nil)
+	_ IEngineRegistry = (*fakeEngineRegistry)(nil)
+	_ IJobRepository  = (*fakeJobRepository)(nil)
+	_ IEventBus       = (*fakeEventBus)(nil)
+)
+
 type fakeEngineRegistry struct {
-	engines map[string]Engine
+	engines map[string]IEngine
 }
 
-func (r *fakeEngineRegistry) Get(name string) (Engine, bool) {
+func (r *fakeEngineRegistry) Get(name string) (IEngine, bool) {
 	e, ok := r.engines[name]
 	return e, ok
 }
@@ -228,14 +236,14 @@ func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func(
 	repo := newFakeJobRepository()
 	fakeEng := &fakeEngine{}
 	fakeTorrentEng := &fakeTorrentEngine{fakeEngine: fakeEng}
-	
+
 	registry := &fakeEngineRegistry{
-		engines: map[string]Engine{
+		engines: map[string]IEngine{
 			"aria2":       fakeEng,
 			"qbittorrent": fakeTorrentEng,
 		},
 	}
-	
+
 	bus := newFakeEventBus()
 	downloadDir := filepath.Join(tmpDir, "downloads")
 	os.MkdirAll(downloadDir, 0755)
@@ -479,7 +487,7 @@ func TestManager_CreateMagnet(t *testing.T) {
 	if j.Status != StatusAnalyzing {
 		t.Errorf("expected StatusAnalyzing, got %s", j.Status)
 	}
-	
+
 	// Wait a moment for background metadata acquisition to finish
 	time.Sleep(1500 * time.Millisecond)
 
@@ -508,7 +516,7 @@ func TestManager_StartTorrent(t *testing.T) {
 	}
 
 	j, _ := m.Create(ctx, "magnet:?xt=urn:btih:1234abcd")
-	
+
 	time.Sleep(1500 * time.Millisecond) // await analysis
 
 	var prioritiesSet bool

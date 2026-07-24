@@ -14,8 +14,8 @@ type EngineStatus struct {
 
 	Progress float64
 
-	Error    string
-	FileName string
+	Error       string
+	FileName    string
 	UploadSpeed int64
 	Uploaded    int64
 	Ratio       float64
@@ -23,8 +23,8 @@ type EngineStatus struct {
 	Leechers    int
 }
 
-// Engine defines the interface for a download engine.
-type Engine interface {
+// IEngine defines the interface for a download engine.
+type IEngine interface {
 	// Start begins a new download and returns the engine-specific ID.
 	Start(ctx context.Context, j *Job, downloadDir string) (engineID string, err error)
 
@@ -41,24 +41,24 @@ type Engine interface {
 	Status(ctx context.Context, j *Job) (*EngineStatus, error)
 }
 
-// MediaAnalyzer is optionally implemented by engines that can extract media metadata.
-type MediaAnalyzer interface {
+// IMediaAnalyzer is optionally implemented by engines that can extract media metadata.
+type IMediaAnalyzer interface {
 	// Analyze extracts media information from a URL without downloading.
 	Analyze(ctx context.Context, url string) (*MediaInfo, error)
 }
 
-// EngineRegistry manages available download engines and URL routing.
-type EngineRegistry interface {
+// IEngineRegistry manages available download engines and URL routing.
+type IEngineRegistry interface {
 	// Get returns the engine registered under the given name.
-	Get(name string) (Engine, bool)
+	Get(name string) (IEngine, bool)
 
 	// Detect determines which engine should handle the given URL.
 	Detect(url string) string
 }
 
-// TorrentEngine extends Engine with torrent-specific operations.
-type TorrentEngine interface {
-	Engine
+// ITorrentEngine extends IEngine with torrent-specific operations.
+type ITorrentEngine interface {
+	IEngine
 
 	// AddMagnet adds a magnet URI and returns the info hash.
 	AddMagnet(ctx context.Context, magnet, savePath, jobID string) (infoHash string, err error)

@@ -6,12 +6,12 @@ import "time"
 type JobStatus string
 
 const (
-	StatusQueued      JobStatus = "queued"
-	StatusDownloading JobStatus = "downloading"
-	StatusPaused      JobStatus = "paused"
-	StatusCompleted   JobStatus = "completed"
-	StatusFailed      JobStatus = "failed"
-	StatusCancelled   JobStatus = "cancelled"
+	StatusQueued            JobStatus = "queued"
+	StatusDownloading       JobStatus = "downloading"
+	StatusPaused            JobStatus = "paused"
+	StatusCompleted         JobStatus = "completed"
+	StatusFailed            JobStatus = "failed"
+	StatusCancelled         JobStatus = "cancelled"
 	StatusAnalyzing         JobStatus = "analyzing"
 	StatusProcessing        JobStatus = "processing"
 	StatusAwaitingSelection JobStatus = "awaiting_selection"

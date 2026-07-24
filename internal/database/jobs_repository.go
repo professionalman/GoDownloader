@@ -9,16 +9,13 @@ import (
 	"downloader/internal/job"
 )
 
-// JobRepository defines the persistence interface for jobs.
-type JobRepository interface {
-	Create(ctx context.Context, j *job.Job) error
-	Update(ctx context.Context, j *job.Job) error
-	GetByID(ctx context.Context, id string) (*job.Job, error)
-	List(ctx context.Context) ([]job.Job, error)
-	ListRecoverable(ctx context.Context) ([]job.Job, error)
-}
+// IJobRepository defines the persistence interface for jobs.
+type IJobRepository = job.IJobRepository
+type JobRepository = job.IJobRepository
 
-// SQLiteJobRepository implements JobRepository using SQLite.
+var _ job.IJobRepository = (*SQLiteJobRepository)(nil)
+
+// SQLiteJobRepository implements job.IJobRepository using SQLite.
 type SQLiteJobRepository struct {
 	db *DB
 }

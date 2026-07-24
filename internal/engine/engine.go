@@ -5,12 +5,18 @@ import "downloader/internal/job"
 // EngineStatus holds the normalized status returned by a download engine.
 type EngineStatus = job.EngineStatus
 
-// Engine defines the interface for a download engine.
-type Engine = job.Engine
+// IEngine defines the interface for a download engine.
+type IEngine = job.IEngine
+type Engine = job.IEngine
 
-// MediaAnalyzer is optionally implemented by engines that can extract media metadata.
-type MediaAnalyzer = job.MediaAnalyzer
+// IMediaAnalyzer is optionally implemented by engines that can extract media metadata.
+type IMediaAnalyzer = job.IMediaAnalyzer
+type MediaAnalyzer = job.IMediaAnalyzer
 
-// EngineRegistry manages available download engines and URL routing.
-type EngineRegistry = job.EngineRegistry
+// IEngineRegistry manages available download engines and URL routing.
+type IEngineRegistry = job.IEngineRegistry
+type EngineRegistry = job.IEngineRegistry
 
+// ITorrentEngine extends IEngine with torrent-specific operations.
+type ITorrentEngine = job.ITorrentEngine
+type TorrentEngine = job.ITorrentEngine
