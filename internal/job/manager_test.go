@@ -260,6 +260,7 @@ type fakeTorrentRepository struct {
 	jobRepo      IJobRepository
 	torrentJobs  map[string]*TorrentJobRecord
 	torrentFiles map[string][]TorrentFileRecord
+	getActiveErr error
 }
 
 func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
@@ -316,6 +317,9 @@ func (f *fakeTorrentRepository) GetTorrentJobByInfoHash(ctx context.Context, inf
 func (f *fakeTorrentRepository) GetActiveTorrentJobByInfoHash(ctx context.Context, infoHash string) (*TorrentJobRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getActiveErr != nil {
+		return nil, f.getActiveErr
+	}
 	for _, rec := range f.torrentJobs {
 		if rec.InfoHash == infoHash {
 			if f.jobRepo != nil {
@@ -1283,5 +1287,193 @@ func TestManager_UpdateJobFromEngine_RemoveTorrentFailure(t *testing.T) {
 	}
 	if got.Error == "" {
 		t.Error("expected error message when RemoveTorrent fails")
+	}
+}
+
+func TestManager_DuplicateTorrentCanBeRetried(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var removeCalled bool
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalled = true
+		return nil
+	}
+	hash := "7777777777abcdef1234567890abcdef12345678"
+	fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+		return hash, nil
+	}
+
+	tmp1, _ := os.CreateTemp("", "retry1-*.torrent")
+	tmp1.WriteString("content1")
+	tmpPath1 := tmp1.Name()
+	tmp1.Close()
+
+	// 1. Create Job A from .torrent
+	jA, err := m.CreateTorrentFromFile(ctx, tmpPath1)
+	if err != nil {
+		t.Fatalf("CreateTorrentFromFile jA failed: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	gotJA, _ := m.repo.GetByID(ctx, jA.ID)
+	if gotJA.Status != StatusAwaitingSelection {
+		t.Fatalf("expected Job A to reach StatusAwaitingSelection, got %s", gotJA.Status)
+	}
+
+	// 2. Create Job B from equivalent .torrent (same hash)
+	tmp2, _ := os.CreateTemp("", "retry2-*.torrent")
+	tmp2.WriteString("content2")
+	tmpPath2 := tmp2.Name()
+	tmp2.Close()
+
+	jB, err := m.CreateTorrentFromFile(ctx, tmpPath2)
+	if err != nil {
+		t.Fatalf("CreateTorrentFromFile jB failed: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	// 3. Verify Job B becomes FAILED while Job A remains unchanged & RemoveTorrent NOT called
+	gotJBAfterFail, _ := m.repo.GetByID(ctx, jB.ID)
+	if gotJBAfterFail.Status != StatusFailed {
+		t.Fatalf("expected duplicate Job B to be StatusFailed, got %s", gotJBAfterFail.Status)
+	}
+	if removeCalled {
+		t.Error("RemoveTorrent must NOT be called when duplicate is rejected")
+	}
+
+	// Verify Job B has TorrentJobRecord and its persisted file exists
+	recB, err := m.torrentRepo.GetTorrentJob(ctx, jB.ID)
+	if err != nil || recB == nil {
+		t.Fatalf("expected TorrentJobRecord for duplicate Job B, got err=%v rec=%v", err, recB)
+	}
+	if recB.TorrentFilePath == "" {
+		t.Error("expected Job B to have persisted TorrentFilePath")
+	}
+	if _, err := os.Stat(recB.TorrentFilePath); os.IsNotExist(err) {
+		t.Errorf("expected Job B's .torrent file at %s to exist on disk", recB.TorrentFilePath)
+	}
+
+	// 4. Mark Job A as terminal (COMPLETED)
+	gotJA.Status = StatusCompleted
+	m.repo.Update(ctx, gotJA)
+
+	// 5. Retry Job B
+	var testMu sync.Mutex
+	var addTorrentFileReceivedPath string
+	var addMagnetCalled bool
+	fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+		testMu.Lock()
+		addTorrentFileReceivedPath = path
+		testMu.Unlock()
+		return hash, nil
+	}
+	fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+		testMu.Lock()
+		addMagnetCalled = true
+		testMu.Unlock()
+		return hash, nil
+	}
+
+	retriedJB, err := m.Retry(ctx, jB.ID)
+	if err != nil {
+		t.Fatalf("Retry Job B failed: %v", err)
+	}
+	if retriedJB.Status != StatusAnalyzing {
+		t.Errorf("expected Job B status to transition to StatusAnalyzing on Retry, got %s", retriedJB.Status)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	// 6. Verify AddTorrentFile received preserved path, AddMagnet was NOT called, Job B reaches StatusAwaitingSelection
+	testMu.Lock()
+	gotPath := addTorrentFileReceivedPath
+	gotMagnetCalled := addMagnetCalled
+	testMu.Unlock()
+
+	if gotMagnetCalled {
+		t.Error("Retry must NOT call AddMagnet for a .torrent job")
+	}
+	if gotPath != recB.TorrentFilePath {
+		t.Errorf("expected AddTorrentFile to receive preserved path %s, got %s", recB.TorrentFilePath, gotPath)
+	}
+
+	gotJBFinal, _ := m.repo.GetByID(ctx, jB.ID)
+	if gotJBFinal.Status != StatusAwaitingSelection {
+		t.Errorf("expected retried Job B to reach StatusAwaitingSelection, got %s", gotJBFinal.Status)
+	}
+}
+
+func TestManager_ActiveLookupFailure_MagnetPreCheck(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var addMagnetCalled bool
+	fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+		addMagnetCalled = true
+		return "hash123", nil
+	}
+
+	mockRepo, ok := m.torrentRepo.(*fakeTorrentRepository)
+	if !ok {
+		t.Fatal("expected fakeTorrentRepository")
+	}
+	mockRepo.getActiveErr = fmt.Errorf("db disk error")
+
+	magnet := "magnet:?xt=urn:btih:8888888888abcdef1234567890abcdef12345678"
+	_, err := m.Create(ctx, magnet)
+	if err == nil {
+		t.Error("expected magnet creation to fail when active lookup fails")
+	}
+	if addMagnetCalled {
+		t.Error("AddMagnet must NOT be called when ownership lookup fails during pre-check")
+	}
+}
+
+func TestManager_ActiveLookupFailure_PostAdd(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var removeCalled bool
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalled = true
+		return nil
+	}
+	hash := "9999999999abcdef1234567890abcdef12345678"
+	fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+		return hash, nil
+	}
+
+	tmp, _ := os.CreateTemp("", "failpost-*.torrent")
+	tmp.WriteString("content")
+	tmpPath := tmp.Name()
+	tmp.Close()
+
+	mockRepo := m.torrentRepo.(*fakeTorrentRepository)
+	mockRepo.getActiveErr = fmt.Errorf("db connection timeout")
+
+	j, err := m.CreateTorrentFromFile(ctx, tmpPath)
+	if err != nil {
+		t.Fatalf("CreateTorrentFromFile failed: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	gotJ, _ := m.repo.GetByID(ctx, j.ID)
+	if gotJ.Status != StatusFailed {
+		t.Errorf("expected job to be StatusFailed when post-add ownership lookup fails, got %s", gotJ.Status)
+	}
+	if gotJ.Error == "" || !strings.Contains(gotJ.Error, "failed to verify torrent ownership") {
+		t.Errorf("expected actionable error message, got %q", gotJ.Error)
+	}
+	if removeCalled {
+		t.Error("RemoveTorrent must NOT be called when ownership cannot be verified")
+	}
+
+	rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+	if err != nil || rec == nil {
+		t.Errorf("expected TorrentJobRecord to be saved on post-add lookup failure, got err=%v rec=%v", err, rec)
 	}
 }
