@@ -5,8 +5,10 @@ import (
 	"time"
 )
 
-// validTransitions defines allowed state transitions for normal user and engine lifecycle actions.
-// Note: Startup recovery (m.recoverJob) reconciles non-terminal database state with external daemon status.
+// State machine transition policies:
+// - User-command transitions: validated using ValidateTransition before execution.
+// - Engine/status reconciliation: controlled centrally by UpdateJobFromEngine during live monitoring.
+// - Startup recovery reconciliation: controlled by recoverJob, directly reconciling persisted database state against external daemon status.
 var validTransitions = map[JobStatus][]JobStatus{
 	StatusQueued:            {StatusDownloading, StatusAnalyzing, StatusCancelled, StatusFailed},
 	StatusDownloading:       {StatusPaused, StatusFailed, StatusCompleted, StatusCancelled, StatusProcessing, StatusSeeding},

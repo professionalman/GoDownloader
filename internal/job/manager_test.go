@@ -76,6 +76,17 @@ type fakeTorrentEngine struct {
 	stopDownloadFunc   func(hash string) error
 	removeTorrentFunc  func(hash string, deleteFiles bool) error
 	getTorrentInfoFunc func(hash string) (*TorrentInfo, error)
+	statusFunc         func(ctx context.Context, j *Job) (*EngineStatus, error)
+}
+
+func (f *fakeTorrentEngine) Status(ctx context.Context, j *Job) (*EngineStatus, error) {
+	if f.statusFunc != nil {
+		return f.statusFunc(ctx, j)
+	}
+	if f.fakeEngine != nil && f.fakeEngine.statusFunc != nil {
+		return f.fakeEngine.statusFunc(ctx, j)
+	}
+	return &EngineStatus{Status: StatusDownloading}, nil
 }
 
 func (f *fakeTorrentEngine) AddMagnet(ctx context.Context, magnet, savePath, jobID string) (string, error) {
@@ -873,6 +884,113 @@ func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
 	}
 }
 
+func TestManager_DuplicateInfoHashCombinations(t *testing.T) {
+	t.Run("same torrent file twice is rejected", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+			return "1234567890abcdef1234567890abcdef12345678", nil
+		}
+
+		tmp1, _ := os.CreateTemp("", "dup1-*.torrent")
+		tmp1.WriteString("content1")
+		tmpPath1 := tmp1.Name()
+		tmp1.Close()
+
+		j1, err := m.CreateTorrentFromFile(ctx, tmpPath1)
+		if err != nil {
+			t.Fatalf("first CreateTorrentFromFile failed: %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond) // await analysis & metadata save
+
+		tmp2, _ := os.CreateTemp("", "dup2-*.torrent")
+		tmp2.WriteString("content2")
+		tmpPath2 := tmp2.Name()
+		tmp2.Close()
+
+		j2, err := m.CreateTorrentFromFile(ctx, tmpPath2)
+		if err != nil {
+			t.Fatalf("second CreateTorrentFromFile failed: %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond) // await analysis
+
+		gotJ2, _ := m.repo.GetByID(ctx, j2.ID)
+		if gotJ2.Status != StatusFailed {
+			t.Errorf("expected duplicate torrent file job to be marked StatusFailed, got %s", gotJ2.Status)
+		}
+		_ = j1
+	})
+
+	t.Run("magnet first then equivalent torrent file is rejected", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			return "1234567890abcdef1234567890abcdef12345678", nil
+		}
+		fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+			return "1234567890abcdef1234567890abcdef12345678", nil
+		}
+
+		magnet := "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678"
+		j1, err := m.Create(ctx, magnet)
+		if err != nil {
+			t.Fatalf("Create magnet failed: %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+
+		tmp, _ := os.CreateTemp("", "dup-*.torrent")
+		tmp.WriteString("content")
+		tmpPath := tmp.Name()
+		tmp.Close()
+
+		j2, err := m.CreateTorrentFromFile(ctx, tmpPath)
+		if err != nil {
+			t.Fatalf("CreateTorrentFromFile failed: %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+
+		gotJ2, _ := m.repo.GetByID(ctx, j2.ID)
+		if gotJ2.Status != StatusFailed {
+			t.Errorf("expected duplicate torrent file after magnet to be marked StatusFailed, got %s", gotJ2.Status)
+		}
+		_ = j1
+	})
+
+	t.Run("failed historical job allows re-adding same info hash", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			return "1234567890abcdef1234567890abcdef12345678", nil
+		}
+
+		magnet := "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678"
+		j1, _ := m.Create(ctx, magnet)
+		time.Sleep(1500 * time.Millisecond)
+
+		// Mark j1 as StatusFailed
+		j1.Status = StatusFailed
+		m.repo.Update(ctx, j1)
+
+		// Now creating second job with same magnet should succeed
+		j2, err := m.Create(ctx, magnet)
+		if err != nil {
+			t.Fatalf("expected creating magnet after historical failure to succeed, got %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+
+		gotJ2, _ := m.repo.GetByID(ctx, j2.ID)
+		if gotJ2.Status != StatusAwaitingSelection {
+			t.Errorf("expected re-added job to reach StatusAwaitingSelection, got %s", gotJ2.Status)
+		}
+	})
+}
+
 func TestManager_UpdateJobFromEngine_SeedingPolicy(t *testing.T) {
 	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
 	defer cleanup()
@@ -962,5 +1080,40 @@ func TestManager_StopSeeding_ErrorHandling(t *testing.T) {
 	got, _ := m.Get(ctx, j.ID)
 	if got.Status != StatusSeeding {
 		t.Errorf("expected job status to remain SEEDING after failure, got %s", got.Status)
+	}
+}
+
+func TestManager_UpdateJobFromEngine_RemoveTorrentFailure(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		return fmt.Errorf("daemon connection reset")
+	}
+
+	j := &Job{
+		ID:                "job-remove-fail",
+		Status:            StatusDownloading,
+		Type:              TypeTorrent,
+		Engine:            "qbittorrent",
+		EngineID:          "hash-fail-1",
+		SeedAfterComplete: false,
+	}
+	m.repo.Create(ctx, j)
+	m.addActive(j)
+
+	statusSeeding := &EngineStatus{
+		Status:      StatusSeeding,
+		UploadSpeed: 100,
+	}
+	m.UpdateJobFromEngine(ctx, j, statusSeeding, true)
+
+	got, _ := m.Get(ctx, "job-remove-fail")
+	if got.Status != StatusFailed {
+		t.Errorf("expected StatusFailed when RemoveTorrent fails, got %s", got.Status)
+	}
+	if got.Error == "" {
+		t.Error("expected error message when RemoveTorrent fails")
 	}
 }

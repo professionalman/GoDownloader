@@ -449,6 +449,24 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 	j.UpdatedAt = time.Now()
 	m.repo.Update(ctx, j)
 
+	// Authoritative duplicate check: verify if another active job owns this infoHash
+	if m.torrentRepo != nil && infoHash != "" {
+		rec, _ := m.torrentRepo.GetTorrentJobByInfoHash(ctx, infoHash)
+		if rec != nil && rec.JobID != jobID {
+			existingJob, _ := m.repo.GetByID(ctx, rec.JobID)
+			if existingJob != nil && existingJob.Status != StatusFailed && existingJob.Status != StatusCancelled {
+				log.Printf("acquireTorrentMetadata: duplicate info hash %s detected for job %s (already managed by %s)", infoHash, jobID, rec.JobID)
+				torrentEng.RemoveTorrent(ctx, infoHash, false)
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+		}
+	}
+
 	// Poll for metadata with cancellation support & file readiness validation
 	var metadata *TorrentInfo
 	ticker := time.NewTicker(1 * time.Second)
@@ -991,7 +1009,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			// If seedAfterComplete = false, remove torrent from qBittorrent
 			if eng, ok := m.engines.Get(j.Engine); ok {
 				if te, ok := eng.(ITorrentEngine); ok {
-					te.RemoveTorrent(ctx, j.EngineID, false)
+					if err := te.RemoveTorrent(ctx, j.EngineID, false); err != nil {
+						log.Printf("UpdateJobFromEngine: failed to remove torrent %s from daemon: %v", j.EngineID, err)
+						j.Status = StatusFailed
+						j.Error = fmt.Sprintf("failed to remove completed torrent from daemon: %v", err)
+						j.UpdatedAt = time.Now()
+						m.repo.Update(ctx, j)
+						m.removeActive(j.ID)
+						m.publish(EventJobFailed, j)
+						return
+					}
 				}
 			}
 		}
@@ -1055,7 +1082,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			// If seedAfterComplete = false, stop/remove torrent from qBittorrent and mark completed
 			if eng, ok := m.engines.Get(j.Engine); ok {
 				if te, ok := eng.(ITorrentEngine); ok {
-					te.RemoveTorrent(ctx, j.EngineID, false)
+					if err := te.RemoveTorrent(ctx, j.EngineID, false); err != nil {
+						log.Printf("UpdateJobFromEngine: failed to remove seeding torrent %s from daemon: %v", j.EngineID, err)
+						j.Status = StatusFailed
+						j.Error = fmt.Sprintf("failed to remove completed torrent from daemon: %v", err)
+						j.UpdatedAt = time.Now()
+						m.repo.Update(ctx, j)
+						m.removeActive(j.ID)
+						m.publish(EventJobFailed, j)
+						return
+					}
 				}
 			}
 			j.Status = StatusCompleted
