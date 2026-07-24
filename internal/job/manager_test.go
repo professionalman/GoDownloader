@@ -804,9 +804,12 @@ func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
+	var addedMu sync.Mutex
 	var addedFilePath string
 	fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+		addedMu.Lock()
 		addedFilePath = path
+		addedMu.Unlock()
 		return "hash-retry-1", nil
 	}
 
@@ -845,7 +848,10 @@ func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
 	m.repo.Update(ctx, j)
 
 	// 5. Call Retry()
+	addedMu.Lock()
 	addedFilePath = ""
+	addedMu.Unlock()
+
 	retriedJ, err := m.Retry(ctx, j.ID)
 	if err != nil {
 		t.Fatalf("Retry failed: %v", err)
@@ -858,8 +864,12 @@ func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	// 6. Verify AddTorrentFile received the persisted DATA_DIR path
-	if addedFilePath != rec.TorrentFilePath {
-		t.Errorf("expected AddTorrentFile to receive persisted path %s, got %s", rec.TorrentFilePath, addedFilePath)
+	addedMu.Lock()
+	gotPath := addedFilePath
+	addedMu.Unlock()
+
+	if gotPath != rec.TorrentFilePath {
+		t.Errorf("expected AddTorrentFile to receive persisted path %s, got %s", rec.TorrentFilePath, gotPath)
 	}
 }
 
