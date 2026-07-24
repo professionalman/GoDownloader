@@ -299,3 +299,95 @@ func TestRepository_MediaJobPersistence(t *testing.T) {
 		t.Errorf("expected format 18, got %v", got.MediaInfo.Formats)
 	}
 }
+
+func TestRepository_GetActiveTorrentJobByInfoHash(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	jobRepo := NewSQLiteJobRepository(db)
+	torrentRepo := NewSQLiteTorrentRepository(db)
+	ctx := context.Background()
+
+	hash := "1234567890abcdef1234567890abcdef12345678"
+
+	t.Run("one active job -> returned", func(t *testing.T) {
+		now := time.Now().Truncate(time.Second)
+		j := &job.Job{
+			ID: "active-1", Source: "magnet:?xt=urn:btih:" + hash, Name: "torrent-1",
+			Status: job.StatusDownloading, Type: job.TypeTorrent, Engine: "qbittorrent",
+			CreatedAt: now, UpdatedAt: now,
+		}
+		jobRepo.Create(ctx, j)
+		torrentRepo.CreateTorrentJob(ctx, &job.TorrentJobRecord{
+			JobID: "active-1", InfoHash: hash, Name: "torrent-1",
+		})
+
+		got, err := torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hash)
+		if err != nil {
+			t.Fatalf("GetActiveTorrentJobByInfoHash failed: %v", err)
+		}
+		if got == nil || got.JobID != "active-1" {
+			t.Errorf("expected active-1, got %v", got)
+		}
+	})
+
+	t.Run("failed old + active new -> active new returned", func(t *testing.T) {
+		now := time.Now().Truncate(time.Second)
+		hash2 := "2222222222abcdef1234567890abcdef12345678"
+
+		// Old failed job
+		jFailed := &job.Job{
+			ID: "failed-old", Source: "magnet:?xt=urn:btih:" + hash2, Name: "torrent-2",
+			Status: job.StatusFailed, Type: job.TypeTorrent, Engine: "qbittorrent",
+			CreatedAt: now, UpdatedAt: now,
+		}
+		jobRepo.Create(ctx, jFailed)
+		torrentRepo.CreateTorrentJob(ctx, &job.TorrentJobRecord{
+			JobID: "failed-old", InfoHash: hash2, Name: "torrent-2",
+		})
+
+		// New active job
+		jActive := &job.Job{
+			ID: "active-new", Source: "magnet:?xt=urn:btih:" + hash2, Name: "torrent-2",
+			Status: job.StatusDownloading, Type: job.TypeTorrent, Engine: "qbittorrent",
+			CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+		}
+		jobRepo.Create(ctx, jActive)
+		torrentRepo.CreateTorrentJob(ctx, &job.TorrentJobRecord{
+			JobID: "active-new", InfoHash: hash2, Name: "torrent-2",
+		})
+
+		got, err := torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hash2)
+		if err != nil {
+			t.Fatalf("GetActiveTorrentJobByInfoHash failed: %v", err)
+		}
+		if got == nil || got.JobID != "active-new" {
+			t.Errorf("expected active-new returned, got %v", got)
+		}
+	})
+
+	t.Run("terminal jobs only -> returns nil", func(t *testing.T) {
+		now := time.Now().Truncate(time.Second)
+		hashTerm := "3333333333abcdef1234567890abcdef12345678"
+
+		for _, status := range []job.JobStatus{job.StatusFailed, job.StatusCompleted, job.StatusCancelled} {
+			id := "term-" + string(status)
+			j := &job.Job{
+				ID: id, Source: "magnet:?xt=urn:btih:" + hashTerm, Name: "torrent-term",
+				Status: status, Type: job.TypeTorrent, Engine: "qbittorrent",
+				CreatedAt: now, UpdatedAt: now,
+			}
+			jobRepo.Create(ctx, j)
+			torrentRepo.CreateTorrentJob(ctx, &job.TorrentJobRecord{
+				JobID: id, InfoHash: hashTerm, Name: "torrent-term",
+			})
+		}
+
+		got, err := torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hashTerm)
+		if err != nil {
+			t.Fatalf("GetActiveTorrentJobByInfoHash failed: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil for terminal jobs only, got %v", got)
+		}
+	})
+}

@@ -461,3 +461,72 @@ func TestRecovery_Torrent_MissingQB(t *testing.T) {
 		t.Errorf("expected StatusFailed for missing torrent in qB, got %s", got.Status)
 	}
 }
+
+func TestRecovery_Torrent_Seeding_RemoveTorrentFailure(t *testing.T) {
+	m, _, bus, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	sub := bus.Subscribe()
+	defer bus.Unsubscribe(sub)
+
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		return fmt.Errorf("qBittorrent API timeout")
+	}
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:      StatusSeeding,
+			TotalBytes:  1000,
+			Progress:    100.0,
+			UploadSpeed: 500,
+		}, nil
+	}
+
+	j := &Job{
+		ID:        "torrent-seed-fail",
+		Source:    "magnet:?xt=urn:btih:hash-seed-fail",
+		Name:      "seeding-torrent-fail",
+		Status:    StatusSeeding,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-seed-fail",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+	m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+		JobID:             "torrent-seed-fail",
+		InfoHash:          "hash-seed-fail",
+		SeedAfterComplete: false,
+	})
+
+	m.recover(ctx)
+
+	got, _ := m.Get(ctx, "torrent-seed-fail")
+	if got.Status == StatusCompleted {
+		t.Error("job MUST NOT be marked StatusCompleted when RemoveTorrent fails during recovery")
+	}
+	if got.Status != StatusFailed {
+		t.Errorf("expected StatusFailed for RemoveTorrent failure during recovery, got %s", got.Status)
+	}
+	if got.Error == "" {
+		t.Error("expected error message for RemoveTorrent failure during recovery")
+	}
+
+	var failedEventReceived bool
+selectLoop:
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Type == EventJobFailed && ev.Job.ID == "torrent-seed-fail" {
+				failedEventReceived = true
+				break selectLoop
+			}
+		default:
+			break selectLoop
+		}
+	}
+	if !failedEventReceived {
+		t.Error("expected EventJobFailed to be published when RemoveTorrent fails during recovery")
+	}
+}

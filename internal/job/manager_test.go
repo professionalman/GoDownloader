@@ -257,12 +257,14 @@ func (f *fakeEventBus) Unsubscribe(ch <-chan Event) {
 
 type fakeTorrentRepository struct {
 	mu           sync.Mutex
+	jobRepo      IJobRepository
 	torrentJobs  map[string]*TorrentJobRecord
 	torrentFiles map[string][]TorrentFileRecord
 }
 
-func newFakeTorrentRepository() *fakeTorrentRepository {
+func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
 	return &fakeTorrentRepository{
+		jobRepo:      jobRepo,
 		torrentJobs:  make(map[string]*TorrentJobRecord),
 		torrentFiles: make(map[string][]TorrentFileRecord),
 	}
@@ -311,6 +313,24 @@ func (f *fakeTorrentRepository) GetTorrentJobByInfoHash(ctx context.Context, inf
 	return nil, nil
 }
 
+func (f *fakeTorrentRepository) GetActiveTorrentJobByInfoHash(ctx context.Context, infoHash string) (*TorrentJobRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, rec := range f.torrentJobs {
+		if rec.InfoHash == infoHash {
+			if f.jobRepo != nil {
+				j, _ := f.jobRepo.GetByID(ctx, rec.JobID)
+				if j != nil && j.Status != StatusFailed && j.Status != StatusCancelled && j.Status != StatusCompleted {
+					return rec, nil
+				}
+			} else {
+				return rec, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (f *fakeTorrentRepository) SaveTorrentFiles(ctx context.Context, jobID string, files []TorrentFileRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -337,7 +357,7 @@ func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func(
 	t.Helper()
 	tmpDir := t.TempDir()
 	repo := newFakeJobRepository()
-	torrentRepo := newFakeTorrentRepository()
+	torrentRepo := newFakeTorrentRepository(repo)
 	fakeEng := &fakeEngine{}
 	fakeTorrentEng := &fakeTorrentEngine{fakeEngine: fakeEng}
 
@@ -885,11 +905,58 @@ func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
 }
 
 func TestManager_DuplicateInfoHashCombinations(t *testing.T) {
-	t.Run("same torrent file twice is rejected", func(t *testing.T) {
+	t.Run("Test A: same magnet twice", func(t *testing.T) {
 		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
 		defer cleanup()
 		ctx := context.Background()
 
+		var removeCalled bool
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		}
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			return "1111111111abcdef1234567890abcdef12345678", nil
+		}
+
+		magnet := "magnet:?xt=urn:btih:1111111111abcdef1234567890abcdef12345678"
+		j1, err := m.Create(ctx, magnet)
+		if err != nil {
+			t.Fatalf("first magnet create failed: %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+
+		gotJ1, _ := m.repo.GetByID(ctx, j1.ID)
+		if gotJ1.Status != StatusAwaitingSelection {
+			t.Fatalf("expected Job A to be StatusAwaitingSelection, got %s", gotJ1.Status)
+		}
+
+		// Attempt duplicate magnet creation
+		_, err = m.Create(ctx, magnet)
+		if err == nil {
+			t.Error("expected second magnet creation to fail pre-check with error")
+		}
+
+		// Assert Job A is untouched and RemoveTorrent was NOT called
+		gotJ1After, _ := m.repo.GetByID(ctx, j1.ID)
+		if gotJ1After.Status != StatusAwaitingSelection {
+			t.Errorf("expected Job A to remain StatusAwaitingSelection, got %s", gotJ1After.Status)
+		}
+		if removeCalled {
+			t.Error("RemoveTorrent must NOT be called when duplicate is rejected")
+		}
+	})
+
+	t.Run("Test B: same torrent file twice", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var removeCalled bool
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		}
 		fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
 			return "1234567890abcdef1234567890abcdef12345678", nil
 		}
@@ -916,18 +983,30 @@ func TestManager_DuplicateInfoHashCombinations(t *testing.T) {
 		}
 		time.Sleep(1500 * time.Millisecond) // await analysis
 
+		gotJ1, _ := m.repo.GetByID(ctx, j1.ID)
+		if gotJ1.Status != StatusAwaitingSelection {
+			t.Errorf("expected Job A to remain StatusAwaitingSelection, got %s", gotJ1.Status)
+		}
+
 		gotJ2, _ := m.repo.GetByID(ctx, j2.ID)
 		if gotJ2.Status != StatusFailed {
 			t.Errorf("expected duplicate torrent file job to be marked StatusFailed, got %s", gotJ2.Status)
 		}
-		_ = j1
+		if removeCalled {
+			t.Error("RemoveTorrent must NOT be called when duplicate torrent file is rejected")
+		}
 	})
 
-	t.Run("magnet first then equivalent torrent file is rejected", func(t *testing.T) {
+	t.Run("Test C: magnet then equivalent torrent file", func(t *testing.T) {
 		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
 		defer cleanup()
 		ctx := context.Background()
 
+		var removeCalled bool
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		}
 		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
 			return "1234567890abcdef1234567890abcdef12345678", nil
 		}
@@ -953,34 +1032,123 @@ func TestManager_DuplicateInfoHashCombinations(t *testing.T) {
 		}
 		time.Sleep(1500 * time.Millisecond)
 
+		gotJ1, _ := m.repo.GetByID(ctx, j1.ID)
+		if gotJ1.Status != StatusAwaitingSelection {
+			t.Errorf("expected Job A (magnet) to remain StatusAwaitingSelection, got %s", gotJ1.Status)
+		}
+
 		gotJ2, _ := m.repo.GetByID(ctx, j2.ID)
 		if gotJ2.Status != StatusFailed {
 			t.Errorf("expected duplicate torrent file after magnet to be marked StatusFailed, got %s", gotJ2.Status)
 		}
-		_ = j1
+		if removeCalled {
+			t.Error("RemoveTorrent must NOT be called when duplicate torrent file is rejected")
+		}
 	})
 
-	t.Run("failed historical job allows re-adding same info hash", func(t *testing.T) {
+	t.Run("Test D: torrent file then equivalent magnet", func(t *testing.T) {
 		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
 		defer cleanup()
 		ctx := context.Background()
 
+		var removeCalled bool
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		}
+		fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+			return "4444444444abcdef1234567890abcdef12345678", nil
+		}
 		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
-			return "1234567890abcdef1234567890abcdef12345678", nil
+			return "4444444444abcdef1234567890abcdef12345678", nil
 		}
 
-		magnet := "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678"
+		tmp, _ := os.CreateTemp("", "dup-*.torrent")
+		tmp.WriteString("content")
+		tmpPath := tmp.Name()
+		tmp.Close()
+
+		j1, err := m.CreateTorrentFromFile(ctx, tmpPath)
+		if err != nil {
+			t.Fatalf("CreateTorrentFromFile failed: %v", err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+
+		magnet := "magnet:?xt=urn:btih:4444444444abcdef1234567890abcdef12345678"
+		_, err = m.Create(ctx, magnet)
+		if err == nil {
+			t.Error("expected magnet creation after torrent file to fail pre-check with error")
+		}
+
+		gotJ1, _ := m.repo.GetByID(ctx, j1.ID)
+		if gotJ1.Status != StatusAwaitingSelection {
+			t.Errorf("expected Job A (torrent file) to remain StatusAwaitingSelection, got %s", gotJ1.Status)
+		}
+		if removeCalled {
+			t.Error("RemoveTorrent must NOT be called when duplicate magnet is rejected")
+		}
+	})
+
+	t.Run("Test E: failed historical + active current Job", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		hash := "5555555555abcdef1234567890abcdef12345678"
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			return hash, nil
+		}
+
+		magnet := "magnet:?xt=urn:btih:" + hash
+
+		// Historical failed job A
+		jA, _ := m.Create(ctx, magnet)
+		time.Sleep(1500 * time.Millisecond)
+		jA.Status = StatusFailed
+		m.repo.Update(ctx, jA)
+
+		// Active current job B
+		jB, _ := m.Create(ctx, magnet)
+		time.Sleep(1500 * time.Millisecond)
+		gotJB, _ := m.repo.GetByID(ctx, jB.ID)
+		if gotJB.Status != StatusAwaitingSelection {
+			t.Fatalf("expected Job B to be StatusAwaitingSelection, got %s", gotJB.Status)
+		}
+
+		// Attempt Job C with same hash -> must be rejected
+		_, err := m.Create(ctx, magnet)
+		if err == nil {
+			t.Error("expected Job C to be rejected because Job B is active")
+		}
+
+		gotJBAfter, _ := m.repo.GetByID(ctx, jB.ID)
+		if gotJBAfter.Status != StatusAwaitingSelection {
+			t.Errorf("expected Job B to remain StatusAwaitingSelection, got %s", gotJBAfter.Status)
+		}
+	})
+
+	t.Run("Test F & G: failed or completed historical job allows re-adding", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		hash := "6666666666abcdef1234567890abcdef12345678"
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			return hash, nil
+		}
+
+		magnet := "magnet:?xt=urn:btih:" + hash
 		j1, _ := m.Create(ctx, magnet)
 		time.Sleep(1500 * time.Millisecond)
 
-		// Mark j1 as StatusFailed
-		j1.Status = StatusFailed
+		// Mark j1 as StatusCompleted
+		j1.Status = StatusCompleted
 		m.repo.Update(ctx, j1)
 
 		// Now creating second job with same magnet should succeed
 		j2, err := m.Create(ctx, magnet)
 		if err != nil {
-			t.Fatalf("expected creating magnet after historical failure to succeed, got %v", err)
+			t.Fatalf("expected creating magnet after historical completion to succeed, got %v", err)
 		}
 		time.Sleep(1500 * time.Millisecond)
 
