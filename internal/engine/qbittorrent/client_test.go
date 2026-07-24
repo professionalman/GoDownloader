@@ -218,3 +218,90 @@ func TestClient_403_Reauth(t *testing.T) {
 		t.Errorf("expected 2 request calls (1st failed, 2nd success), got %d", requestCount)
 	}
 }
+
+func TestClient_ValidateCompatibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		version     string
+		apiVersion  string
+		authFail    bool
+		expectError bool
+	}{
+		{
+			name:        "4.x version rejected",
+			version:     "v4.6.3",
+			apiVersion:  "2.9.3",
+			expectError: true,
+		},
+		{
+			name:        "5.0.0 version accepted",
+			version:     "v5.0.0",
+			apiVersion:  "2.9.3",
+			expectError: false,
+		},
+		{
+			name:        "5.x version accepted",
+			version:     "5.1.2",
+			apiVersion:  "2.10.0",
+			expectError: false,
+		},
+		{
+			name:        "Malformed version rejected",
+			version:     "invalid_ver",
+			apiVersion:  "2.9.3",
+			expectError: true,
+		},
+		{
+			name:        "API version retrieval failure rejected",
+			version:     "5.0.0",
+			apiVersion:  "",
+			expectError: true,
+		},
+		{
+			name:        "Authentication failure rejected",
+			authFail:    true,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.authFail {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				if r.URL.Path == "/api/v2/auth/login" {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte("Ok."))
+					return
+				}
+				if r.URL.Path == "/api/v2/app/version" {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(tt.version))
+					return
+				}
+				if r.URL.Path == "/api/v2/app/webapiVersion" {
+					if tt.apiVersion == "" {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(tt.apiVersion))
+					return
+				}
+			}))
+			defer ts.Close()
+
+			client := NewClient(ts.URL, "admin", "adminadmin", 5*time.Second)
+			err := client.ValidateCompatibility(context.Background())
+
+			if tt.expectError && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}

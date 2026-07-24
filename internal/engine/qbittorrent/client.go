@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +165,46 @@ func (c *Client) GetAPIVersion(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return string(body), nil
+}
+
+// ValidateCompatibility checks if qBittorrent version is >= 5.0 and Web API version is >= 2.0.
+func (c *Client) ValidateCompatibility(ctx context.Context) error {
+	vStr, err := c.GetVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("qBittorrent connection failed: %w", err)
+	}
+
+	cleanVer := strings.TrimPrefix(strings.TrimSpace(vStr), "v")
+	parts := strings.Split(cleanVer, ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return fmt.Errorf("malformed qBittorrent version string: %q", vStr)
+	}
+
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return fmt.Errorf("malformed qBittorrent version string: %q", vStr)
+	}
+
+	if major < 5 {
+		return fmt.Errorf("unsupported qBittorrent version %s: version must be >= 5.0", vStr)
+	}
+
+	apiVersion, err := c.GetAPIVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve qBittorrent Web API version: %w", err)
+	}
+	apiVersion = strings.TrimSpace(apiVersion)
+	if apiVersion == "" {
+		return fmt.Errorf("failed to retrieve qBittorrent Web API version: empty version response")
+	}
+
+	apiParts := strings.Split(apiVersion, ".")
+	apiMajor, err := strconv.Atoi(apiParts[0])
+	if err != nil || apiMajor < 2 {
+		return fmt.Errorf("unsupported qBittorrent Web API version %s: API version must be >= 2.0", apiVersion)
+	}
+
+	return nil
 }
 
 func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category string, tags []string, stopped bool) error {

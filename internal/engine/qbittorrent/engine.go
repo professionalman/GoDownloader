@@ -209,8 +209,7 @@ func (e *Engine) RemoveTorrent(ctx context.Context, infoHash string, deleteFiles
 }
 
 func (e *Engine) HealthCheck(ctx context.Context) error {
-	_, err := e.client.GetVersion(ctx)
-	return err
+	return e.client.ValidateCompatibility(ctx)
 }
 
 func (e *Engine) GetTorrentInfo(ctx context.Context, infoHash string) (*job.TorrentInfo, error) {
