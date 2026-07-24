@@ -40,6 +40,7 @@ type ITorrentRepository interface {
 	UpdateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error
 	DeleteTorrentJob(ctx context.Context, jobID string) error
 	GetTorrentJobByInfoHash(ctx context.Context, infoHash string) (*TorrentJobRecord, error)
+	GetActiveTorrentJobByInfoHash(ctx context.Context, infoHash string) (*TorrentJobRecord, error)
 	SaveTorrentFiles(ctx context.Context, jobID string, files []TorrentFileRecord) error
 	GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error)
 	UpdateTorrentFileSelections(ctx context.Context, jobID string, selections []TorrentFileRecord) error

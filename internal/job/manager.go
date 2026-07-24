@@ -332,12 +332,9 @@ func (m *Manager) createTorrentJobWithID(ctx context.Context, jobID, source, tor
 
 	// Check for duplicate info hash if source is a magnet link
 	if hash, err := ExtractMagnetHash(source); err == nil && hash != "" && m.torrentRepo != nil {
-		rec, _ := m.torrentRepo.GetTorrentJobByInfoHash(ctx, hash)
+		rec, _ := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hash)
 		if rec != nil {
-			existingJob, _ := m.repo.GetByID(ctx, rec.JobID)
-			if existingJob != nil && existingJob.Status != StatusFailed && existingJob.Status != StatusCancelled {
-				return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("a torrent with info hash %s is already managed by job %s", hash, rec.JobID)}
-			}
+			return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("a torrent with info hash %s is already managed by job %s", hash, rec.JobID)}
 		}
 	}
 
@@ -451,19 +448,20 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 
 	// Authoritative duplicate check: verify if another active job owns this infoHash
 	if m.torrentRepo != nil && infoHash != "" {
-		rec, _ := m.torrentRepo.GetTorrentJobByInfoHash(ctx, infoHash)
+		rec, _ := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, infoHash)
 		if rec != nil && rec.JobID != jobID {
-			existingJob, _ := m.repo.GetByID(ctx, rec.JobID)
-			if existingJob != nil && existingJob.Status != StatusFailed && existingJob.Status != StatusCancelled {
-				log.Printf("acquireTorrentMetadata: duplicate info hash %s detected for job %s (already managed by %s)", infoHash, jobID, rec.JobID)
-				torrentEng.RemoveTorrent(ctx, infoHash, false)
-				j.Status = StatusFailed
-				j.Error = fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				m.publish(EventJobFailed, j)
-				return
+			log.Printf("acquireTorrentMetadata: duplicate info hash %s detected for job %s (already managed by active job %s)", infoHash, jobID, rec.JobID)
+			// DO NOT call RemoveTorrent(infoHash) because qBittorrent deduplicates by infoHash!
+			// Calling RemoveTorrent against shared infoHash would delete the original active job's torrent.
+			if torrentFilePath != "" {
+				os.Remove(torrentFilePath)
 			}
+			j.Status = StatusFailed
+			j.Error = fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobFailed, j)
+			return
 		}
 	}
 

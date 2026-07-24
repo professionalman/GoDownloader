@@ -10,7 +10,6 @@ import (
 
 // ITorrentRepository defines the persistence interface for torrent-specific data.
 type ITorrentRepository = job.ITorrentRepository
-type TorrentRepository = job.ITorrentRepository
 
 var _ job.ITorrentRepository = (*SQLiteTorrentRepository)(nil)
 
@@ -90,7 +89,7 @@ func (r *SQLiteTorrentRepository) DeleteTorrentJob(ctx context.Context, jobID st
 // GetTorrentJobByInfoHash finds a torrent job by its info hash.
 func (r *SQLiteTorrentRepository) GetTorrentJobByInfoHash(ctx context.Context, infoHash string) (*job.TorrentJobRecord, error) {
 	query := `SELECT job_id, info_hash, name, total_size, seed_after_complete, torrent_file_path
-		FROM torrent_jobs WHERE info_hash = ?`
+		FROM torrent_jobs WHERE job_id IN (SELECT job_id FROM torrent_jobs WHERE info_hash = ?) ORDER BY rowid DESC LIMIT 1`
 	var rec job.TorrentJobRecord
 	var seedInt int
 	err := r.db.conn.QueryRowContext(ctx, query, infoHash).Scan(
@@ -99,7 +98,29 @@ func (r *SQLiteTorrentRepository) GetTorrentJobByInfoHash(ctx context.Context, i
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get torrent job by hash: %w", err)
+		return nil, fmt.Errorf("get torrent job: %w", err)
+	}
+	rec.SeedAfterComplete = seedInt != 0
+	return &rec, nil
+}
+
+// GetActiveTorrentJobByInfoHash finds an active/non-terminal torrent job by its info hash.
+func (r *SQLiteTorrentRepository) GetActiveTorrentJobByInfoHash(ctx context.Context, infoHash string) (*job.TorrentJobRecord, error) {
+	query := `SELECT tj.job_id, tj.info_hash, tj.name, tj.total_size, tj.seed_after_complete, tj.torrent_file_path
+		FROM torrent_jobs tj
+		JOIN jobs j ON j.id = tj.job_id
+		WHERE tj.info_hash = ?
+		  AND j.status NOT IN ('failed', 'cancelled', 'completed')
+		LIMIT 1`
+	var rec job.TorrentJobRecord
+	var seedInt int
+	err := r.db.conn.QueryRowContext(ctx, query, infoHash).Scan(
+		&rec.JobID, &rec.InfoHash, &rec.Name, &rec.TotalSize, &seedInt, &rec.TorrentFilePath)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get active torrent job by info hash: %w", err)
 	}
 	rec.SeedAfterComplete = seedInt != 0
 	return &rec, nil
