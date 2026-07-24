@@ -23,6 +23,9 @@ func (m *Manager) recover(ctx context.Context) {
 
 	for i := range jobs {
 		j := &jobs[i]
+		if j.Type == TypeTorrent {
+			m.hydrateJob(ctx, j)
+		}
 		m.recoverJob(ctx, j)
 	}
 }
@@ -135,6 +138,23 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 	case StatusDownloading, StatusQueued, StatusSeeding:
 		// Case 1: Engine still knows the download and it's active
 		log.Printf("recovery: job %s is still active in engine, reattaching", j.ID)
+
+		if j.Type == TypeTorrent && status.Status == StatusSeeding && !j.SeedAfterComplete {
+			log.Printf("recovery: torrent job %s is seeding in engine but seedAfterComplete=false; removing from daemon and completing", j.ID)
+			if te, ok := eng.(ITorrentEngine); ok {
+				if err := te.RemoveTorrent(ctx, j.EngineID, false); err != nil {
+					log.Printf("recovery warning: failed to remove torrent %s from daemon: %v", j.EngineID, err)
+				}
+			}
+			j.Status = StatusCompleted
+			j.Progress = 100
+			j.SpeedBytesPerSecond = 0
+			j.ETASeconds = 0
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobCompleted, j)
+			return
+		}
 		j.Status = status.Status
 		j.TotalBytes = status.TotalBytes
 		j.CompletedBytes = status.CompletedBytes

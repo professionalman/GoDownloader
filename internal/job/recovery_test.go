@@ -213,3 +213,251 @@ func TestRecovery_MediaJobFailsOnRestart(t *testing.T) {
 		t.Error("expected error message for interrupted media job")
 	}
 }
+
+func TestRecovery_Torrent_AwaitingSelection_SurvivesRestart(t *testing.T) {
+	m, fakeEng, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var statusCalled bool
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		statusCalled = true
+		return &EngineStatus{Status: StatusAwaitingSelection}, nil
+	}
+
+	j := &Job{
+		ID:        "torrent-awaiting-1",
+		Source:    "magnet:?xt=urn:btih:hash-await-1",
+		Name:      "test-torrent",
+		Status:    StatusAwaitingSelection,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-await-1",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+
+	m.recover(ctx)
+
+	got, _ := m.repo.GetByID(ctx, "torrent-awaiting-1")
+	if got.Status != StatusAwaitingSelection {
+		t.Errorf("expected AwaitingSelection to survive restart, got %s", got.Status)
+	}
+	if !statusCalled {
+		t.Error("expected engine Status check during awaiting_selection recovery")
+	}
+	_ = fakeEng
+}
+
+func TestRecovery_Torrent_Downloading_Reattaches(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:         StatusDownloading,
+			TotalBytes:     1000,
+			CompletedBytes: 500,
+			Progress:       50.0,
+		}, nil
+	}
+
+	j := &Job{
+		ID:        "torrent-dl-1",
+		Source:    "magnet:?xt=urn:btih:hash-dl-1",
+		Name:      "downloading-torrent",
+		Status:    StatusDownloading,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-dl-1",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+
+	m.recover(ctx)
+
+	got, _ := m.Get(ctx, "torrent-dl-1")
+	if got.Status != StatusDownloading {
+		t.Errorf("expected StatusDownloading after recovery, got %s", got.Status)
+	}
+	active := m.GetActiveJobs()
+	if _, ok := active["torrent-dl-1"]; !ok {
+		t.Error("expected recovering downloading torrent to be active")
+	}
+}
+
+func TestRecovery_Torrent_Paused_Reattaches(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:         StatusPaused,
+			TotalBytes:     1000,
+			CompletedBytes: 200,
+			Progress:       20.0,
+		}, nil
+	}
+
+	j := &Job{
+		ID:        "torrent-pause-1",
+		Source:    "magnet:?xt=urn:btih:hash-pause-1",
+		Name:      "paused-torrent",
+		Status:    StatusPaused,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-pause-1",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+
+	m.recover(ctx)
+
+	got, _ := m.Get(ctx, "torrent-pause-1")
+	if got.Status != StatusPaused {
+		t.Errorf("expected StatusPaused after recovery, got %s", got.Status)
+	}
+}
+
+func TestRecovery_Torrent_Seeding_SeedAfterCompleteTrue(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var removeCalled bool
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalled = true
+		return nil
+	}
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:      StatusSeeding,
+			TotalBytes:  1000,
+			Progress:    100.0,
+			UploadSpeed: 500,
+		}, nil
+	}
+
+	j := &Job{
+		ID:        "torrent-seed-true",
+		Source:    "magnet:?xt=urn:btih:hash-seed-true",
+		Name:      "seeding-torrent-true",
+		Status:    StatusSeeding,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-seed-true",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+	m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+		JobID:             "torrent-seed-true",
+		InfoHash:          "hash-seed-true",
+		SeedAfterComplete: true,
+	})
+
+	m.recover(ctx)
+
+	got, _ := m.Get(ctx, "torrent-seed-true")
+	if got.Status != StatusSeeding {
+		t.Errorf("expected StatusSeeding for seedAfterComplete=true, got %s", got.Status)
+	}
+	if !got.SeedAfterComplete {
+		t.Error("expected SeedAfterComplete to be hydrated as true")
+	}
+	if removeCalled {
+		t.Error("RemoveTorrent should NOT be called for seedAfterComplete=true during recovery")
+	}
+
+	// Next engine update should keep it seeding
+	m.UpdateJobFromEngine(ctx, got, &EngineStatus{Status: StatusSeeding, UploadSpeed: 600}, true)
+	if got.Status != StatusSeeding {
+		t.Errorf("expected job to remain StatusSeeding on update, got %s", got.Status)
+	}
+	if removeCalled {
+		t.Error("RemoveTorrent should NOT be called on subsequent status update")
+	}
+}
+
+func TestRecovery_Torrent_Seeding_SeedAfterCompleteFalse(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var removeCalled bool
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalled = true
+		return nil
+	}
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:      StatusSeeding,
+			TotalBytes:  1000,
+			Progress:    100.0,
+			UploadSpeed: 500,
+		}, nil
+	}
+
+	j := &Job{
+		ID:        "torrent-seed-false",
+		Source:    "magnet:?xt=urn:btih:hash-seed-false",
+		Name:      "seeding-torrent-false",
+		Status:    StatusSeeding,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-seed-false",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+	m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+		JobID:             "torrent-seed-false",
+		InfoHash:          "hash-seed-false",
+		SeedAfterComplete: false,
+	})
+
+	m.recover(ctx)
+
+	got, _ := m.Get(ctx, "torrent-seed-false")
+	if got.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted for seedAfterComplete=false during recovery, got %s", got.Status)
+	}
+	if !removeCalled {
+		t.Error("expected RemoveTorrent(false) to be called for seedAfterComplete=false during recovery")
+	}
+}
+
+func TestRecovery_Torrent_MissingQB(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return nil, fmt.Errorf("torrent not found in qBittorrent")
+	}
+
+	j := &Job{
+		ID:        "torrent-missing-1",
+		Source:    "magnet:?xt=urn:btih:hash-missing-1",
+		Name:      "missing-torrent",
+		Status:    StatusDownloading,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-missing-1",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+
+	m.recover(ctx)
+
+	got, _ := m.Get(ctx, "torrent-missing-1")
+	if got.Status != StatusFailed {
+		t.Errorf("expected StatusFailed for missing torrent in qB, got %s", got.Status)
+	}
+}
