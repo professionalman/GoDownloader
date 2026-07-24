@@ -87,3 +87,8 @@ type ITorrentEngine interface {
 	// HealthCheck verifies the engine is reachable and operational.
 	HealthCheck(ctx context.Context) error
 }
+
+// IShutdownableEngine is optionally implemented by engines that require cleanup on backend shutdown.
+type IShutdownableEngine interface {
+	Shutdown()
+}

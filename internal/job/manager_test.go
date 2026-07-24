@@ -261,6 +261,8 @@ type fakeTorrentRepository struct {
 	torrentJobs  map[string]*TorrentJobRecord
 	torrentFiles map[string][]TorrentFileRecord
 	getActiveErr error
+	getErr       error
+	createErr    error
 }
 
 func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
@@ -274,6 +276,9 @@ func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
 func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return f.createErr
+	}
 	f.torrentJobs[rec.JobID] = rec
 	return nil
 }
@@ -281,6 +286,9 @@ func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *Torre
 func (f *fakeTorrentRepository) GetTorrentJob(ctx context.Context, jobID string) (*TorrentJobRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	rec, ok := f.torrentJobs[jobID]
 	if !ok {
 		return nil, fmt.Errorf("not found")
@@ -1476,4 +1484,258 @@ func TestManager_ActiveLookupFailure_PostAdd(t *testing.T) {
 	if err != nil || rec == nil {
 		t.Errorf("expected TorrentJobRecord to be saved on post-add lookup failure, got err=%v rec=%v", err, rec)
 	}
+}
+
+func TestExtractMagnetHash(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+		wantErr  bool
+	}{
+		{
+			name:     "40-char lowercase hex",
+			input:    "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678&dn=test",
+			expected: "1234567890abcdef1234567890abcdef12345678",
+			wantErr:  false,
+		},
+		{
+			name:     "40-char uppercase hex",
+			input:    "magnet:?xt=URN:BTIH:1234567890ABCDEF1234567890ABCDEF12345678&dn=test",
+			expected: "1234567890abcdef1234567890abcdef12345678",
+			wantErr:  false,
+		},
+		{
+			name:     "32-char Base32",
+			input:    "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&dn=test",
+			expected: "0000000000000000000000000000000000000000",
+			wantErr:  false,
+		},
+		{
+			name:    "invalid 40-char non-hex",
+			input:   "magnet:?xt=urn:btih:1234567890GBCDEF1234567890ABCDEF12345678",
+			wantErr: true,
+		},
+		{
+			name:    "invalid base32 chars",
+			input:   "magnet:?xt=urn:btih:11111111111111111111111111111111",
+			wantErr: true,
+		},
+		{
+			name:    "missing btih",
+			input:   "magnet:?xt=urn:other:1234",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExtractMagnetHash(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ExtractMagnetHash(%q) err = %v, wantErr = %v", tt.input, err, tt.wantErr)
+			}
+			if got != tt.expected {
+				t.Errorf("ExtractMagnetHash(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestManager_CancelEngineFailure(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	j := &Job{
+		ID:        "job_cancel_fail",
+		Source:    "https://example.com/file.zip",
+		Status:    StatusDownloading,
+		Engine:    "qbittorrent",
+		EngineID:  "hash123",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+	m.addActive(j)
+
+	fakeTorrent.cancelFunc = func(ctx context.Context, j *Job) error {
+		return fmt.Errorf("qBittorrent connection reset")
+	}
+
+	_, err := m.Cancel(ctx, j.ID)
+	if err == nil {
+		t.Fatal("expected Cancel to return error when engine cancel fails")
+	}
+
+	gotJ, _ := m.repo.GetByID(ctx, j.ID)
+	if gotJ.Status == StatusCancelled {
+		t.Errorf("job must NOT be marked StatusCancelled when engine cancel fails, got status %s", gotJ.Status)
+	}
+}
+
+func TestManager_TorrentRetry_FailSafely(t *testing.T) {
+	t.Run("GetTorrentJob error", func(t *testing.T) {
+		m, _, _, cleanup, _ := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		j := &Job{
+			ID:        "job_retry_err",
+			Source:    "torrent://local/job_retry_err.torrent",
+			Type:      TypeTorrent,
+			Status:    StatusFailed,
+			Engine:    "qbittorrent",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		m.repo.Create(ctx, j)
+
+		mockRepo := m.torrentRepo.(*fakeTorrentRepository)
+		mockRepo.getErr = fmt.Errorf("db connection closed")
+
+		_, err := m.Retry(ctx, j.ID)
+		if err == nil {
+			t.Error("expected Retry to fail when GetTorrentJob returns DB error")
+		}
+	})
+
+	t.Run("Record missing for torrent source", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var addMagnetCalled bool
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			addMagnetCalled = true
+			return "hash", nil
+		}
+
+		j := &Job{
+			ID:        "job_no_rec",
+			Source:    "torrent://local/job_no_rec.torrent",
+			Type:      TypeTorrent,
+			Status:    StatusFailed,
+			Engine:    "qbittorrent",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		m.repo.Create(ctx, j)
+
+		_, err := m.Retry(ctx, j.ID)
+		if err == nil {
+			t.Error("expected Retry to fail when TorrentJobRecord is missing")
+		}
+		if addMagnetCalled {
+			t.Error("AddMagnet must NOT be called on retry when record is missing")
+		}
+	})
+
+	t.Run("File missing on disk for torrent source", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var addMagnetCalled bool
+		fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+			addMagnetCalled = true
+			return "hash", nil
+		}
+
+		j := &Job{
+			ID:        "job_file_del",
+			Source:    "torrent://local/job_file_del.torrent",
+			Type:      TypeTorrent,
+			Status:    StatusFailed,
+			Engine:    "qbittorrent",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		m.repo.Create(ctx, j)
+		m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+			JobID:           j.ID,
+			TorrentFilePath: "C:/non_existent_dir/missing.torrent",
+		})
+
+		_, err := m.Retry(ctx, j.ID)
+		if err == nil {
+			t.Error("expected Retry to fail when metainfo file is missing from disk")
+		}
+		if addMagnetCalled {
+			t.Error("AddMagnet must NOT be called on retry when file is missing from disk")
+		}
+	})
+}
+
+func TestManager_SeedPolicyGuard(t *testing.T) {
+	t.Run("Seed=true + already SEEDING -> RemoveTorrent NOT called", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var removeCalled bool
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		}
+
+		j := &Job{
+			ID:                "job_seed_guard",
+			Type:              TypeTorrent,
+			Status:            StatusSeeding,
+			SeedAfterComplete: true,
+			Engine:            "qbittorrent",
+			EngineID:          "hash_seed_guard",
+		}
+		m.repo.Create(ctx, j)
+
+		status := &EngineStatus{
+			Status:   StatusCompleted,
+			Progress: 100,
+		}
+
+		m.UpdateJobFromEngine(ctx, j, status, true)
+		if removeCalled {
+			t.Error("RemoveTorrent must NOT be called when SeedAfterComplete is true")
+		}
+		gotJ, _ := m.repo.GetByID(ctx, j.ID)
+		if gotJ.Status != StatusSeeding {
+			t.Errorf("expected job to remain StatusSeeding, got %s", gotJ.Status)
+		}
+	})
+
+	t.Run("Seed=false + completion -> RemoveTorrent called -> COMPLETED", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var removeCalled bool
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		}
+
+		j := &Job{
+			ID:                "job_no_seed",
+			Type:              TypeTorrent,
+			Status:            StatusDownloading,
+			SeedAfterComplete: false,
+			Engine:            "qbittorrent",
+			EngineID:          "hash_no_seed",
+		}
+		m.repo.Create(ctx, j)
+
+		status := &EngineStatus{
+			Status:   StatusCompleted,
+			Progress: 100,
+		}
+
+		m.UpdateJobFromEngine(ctx, j, status, true)
+		if !removeCalled {
+			t.Error("RemoveTorrent MUST be called when SeedAfterComplete is false on completion")
+		}
+		gotJ, _ := m.repo.GetByID(ctx, j.ID)
+		if gotJ.Status != StatusCompleted {
+			t.Errorf("expected job to transition to StatusCompleted, got %s", gotJ.Status)
+		}
+	})
 }

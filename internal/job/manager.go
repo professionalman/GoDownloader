@@ -62,10 +62,30 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 	m.monitor.Start(ctx)
 }
 
-// Stop stops background tasks.
+// Stop stops background tasks, cancels active background analysis/metadata tasks, and shuts down subprocess engines.
 func (m *Manager) Stop() {
 	if m.monitor != nil {
 		m.monitor.Stop()
+	}
+
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.activeCancels))
+	for id, cancel := range m.activeCancels {
+		if cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+		delete(m.activeCancels, id)
+	}
+	m.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+
+	if eng, ok := m.engines.Get("ytdlp"); ok {
+		if sEng, ok := eng.(IShutdownableEngine); ok {
+			sEng.Shutdown()
+		}
 	}
 }
 
@@ -425,6 +445,15 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		return
 	}
 
+	if (strings.HasPrefix(source, "torrent://") || filepath.Ext(source) == ".torrent") && torrentFilePath == "" {
+		j.Status = StatusFailed
+		j.Error = "torrent metainfo file path missing; cannot acquire metadata"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
 	// Add torrent to qBittorrent (stopped)
 	var infoHash string
 	if torrentFilePath != "" {
@@ -455,11 +484,13 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		if err != nil {
 			log.Printf("acquireTorrentMetadata: active job lookup failed for job %s (infoHash=%s): %v", jobID, infoHash, err)
 			// Ownership lookup failed due to DB error. Fail closed without calling RemoveTorrent to prevent deleting an existing active torrent.
-			m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+			if createErr := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
 				JobID:           jobID,
 				InfoHash:        infoHash,
 				TorrentFilePath: torrentFilePath,
-			})
+			}); createErr != nil {
+				log.Printf("acquireTorrentMetadata: failed to save torrent record for job %s: %v", jobID, createErr)
+			}
 			j.Status = StatusFailed
 			j.Error = fmt.Sprintf("failed to verify torrent ownership: %v", err)
 			j.UpdatedAt = time.Now()
@@ -471,13 +502,17 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			log.Printf("acquireTorrentMetadata: duplicate info hash %s detected for job %s (already managed by active job %s)", infoHash, jobID, rec.JobID)
 			// DO NOT call RemoveTorrent(infoHash) because qBittorrent deduplicates by infoHash!
 			// DO NOT delete torrentFilePath! Preserve new job's .torrent file and TorrentJobRecord so Retry() remains possible after original job completes.
-			m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+			errTxt := fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
+			if createErr := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
 				JobID:           jobID,
 				InfoHash:        infoHash,
 				TorrentFilePath: torrentFilePath,
-			})
+			}); createErr != nil {
+				log.Printf("acquireTorrentMetadata: failed to preserve torrent retry metadata for job %s: %v", jobID, createErr)
+				errTxt = fmt.Sprintf("%s (failed to preserve retry metadata: %v)", errTxt, createErr)
+			}
 			j.Status = StatusFailed
-			j.Error = fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
+			j.Error = errTxt
 			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
 			m.publish(EventJobFailed, j)
@@ -829,12 +864,15 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 	// Trigger any active background task (e.g. analysis/metadata polling)
 	m.triggerCancel(id)
 
-	// Try to cancel in engine (ignore errors for idempotency)
+	// If job has an EngineID, cancel in engine and enforce success
 	if j.EngineID != "" {
-		if eng, ok := m.engines.Get(j.Engine); ok {
-			if err := eng.Cancel(ctx, j); err != nil {
-				log.Printf("warning: engine cancel failed for job %s: %v", id, err)
-			}
+		eng, ok := m.engines.Get(j.Engine)
+		if !ok {
+			return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine %q not available for cancellation", j.Engine)}
+		}
+		if err := eng.Cancel(ctx, j); err != nil {
+			log.Printf("engine cancel failed for job %s: %v", id, err)
+			return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine cancel failed: %v", err)}
 		}
 	}
 
@@ -887,6 +925,26 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 
 	// For torrent jobs, restart metadata acquisition
 	if j.Type == TypeTorrent {
+		torrentFilePath := ""
+		if m.torrentRepo != nil {
+			rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+			if err != nil {
+				return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to load torrent metadata: %v", err)}
+			}
+			if rec != nil {
+				torrentFilePath = rec.TorrentFilePath
+			}
+		}
+
+		if strings.HasPrefix(j.Source, "torrent://") || filepath.Ext(j.Source) == ".torrent" {
+			if torrentFilePath == "" {
+				return nil, &AppError{Code: ErrInvalidJobState, Message: "torrent metainfo record missing; retry not possible"}
+			}
+			if _, err := os.Stat(torrentFilePath); os.IsNotExist(err) {
+				return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("torrent metainfo file no longer exists at %s; retry not possible", torrentFilePath)}
+			}
+		}
+
 		j.Status = StatusAnalyzing
 		j.Name = "Fetching metadata..."
 		j.TorrentInfo = nil
@@ -894,14 +952,6 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobUpdated, j)
-
-		torrentFilePath := ""
-		if m.torrentRepo != nil {
-			rec, _ := m.torrentRepo.GetTorrentJob(ctx, j.ID)
-			if rec != nil {
-				torrentFilePath = rec.TorrentFilePath
-			}
-		}
 
 		go m.acquireTorrentMetadata(j.ID, j.Source, torrentFilePath)
 		return j, nil
@@ -1014,14 +1064,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 	case StatusCompleted:
 		// For torrent jobs, handle seeding or removal
 		if j.Type == TypeTorrent {
-			if j.SeedAfterComplete && prevStatus == StatusDownloading {
-				j.Status = StatusSeeding
-				j.Progress = 100
-				j.SpeedBytesPerSecond = status.UploadSpeed
-				j.ETASeconds = 0
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				m.publish(EventJobUpdated, j)
+			if j.SeedAfterComplete {
+				if prevStatus != StatusSeeding {
+					j.Status = StatusSeeding
+					j.Progress = 100
+					j.SpeedBytesPerSecond = status.UploadSpeed
+					j.ETASeconds = 0
+					j.UpdatedAt = time.Now()
+					m.repo.Update(ctx, j)
+					m.publish(EventJobUpdated, j)
+				}
 				return
 			}
 			// If seedAfterComplete = false, remove torrent from qBittorrent
