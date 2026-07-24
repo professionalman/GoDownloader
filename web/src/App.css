@@ -208,6 +208,120 @@ body {
   color: #8b949e;
 }
 
+.status-analyzing {
+  background: #2b1d0c;
+  color: #f0b72f;
+}
+
+.status-processing {
+  background: #1f1d38;
+  color: #a5d6ff;
+}
+
+.job-name-area {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  max-width: 70%;
+}
+
+.job-thumbnail {
+  width: 48px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.job-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.job-engine-badge {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  background: #21262d;
+  color: #a5d6ff;
+  border-radius: 4px;
+}
+
+.job-analyzing, .job-analyzing-ready {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #161b22;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  color: #d29922;
+}
+
+.analyzing-spinner {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.job-processing {
+  margin-bottom: 8px;
+}
+
+.progress-processing {
+  background: linear-gradient(90deg, #1f6beb, #58a6ff) !important;
+}
+
+.processing-label {
+  color: #58a6ff;
+  font-weight: 500;
+}
+
+/* Format Selector Modal */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 600px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  color: #e1e4e8;
+}
+
+.format-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}
+
+.format-table th, .format-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid #21262d;
+  font-size: 0.85rem;
+}
+
 /* Progress Bar */
 .progress-bar-container {
   width: 100%;

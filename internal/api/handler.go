@@ -14,6 +14,10 @@ type createJobRequest struct {
 	Source string `json:"source"`
 }
 
+type selectFormatRequest struct {
+	FormatID string `json:"formatId"`
+}
+
 // apiError is the consistent error response format.
 type apiError struct {
 	Error errorBody `json:"error"`
@@ -132,6 +136,30 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 
 	j, err := h.manager.Cancel(r.Context(), id)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, j)
+}
+
+// SelectFormat handles POST /api/v1/jobs/{id}/format
+func (h *Handler) SelectFormat(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	var req selectFormatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	if req.FormatID == "" {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "formatId is required")
+		return
+	}
+
+	j, err := h.manager.SelectFormat(r.Context(), id, req.FormatID)
 	if err != nil {
 		writeAppError(w, err)
 		return

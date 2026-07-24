@@ -240,3 +240,62 @@ func TestRepository_Persistence(t *testing.T) {
 		}
 	}
 }
+
+func TestRepository_MediaJobPersistence(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := NewSQLiteJobRepository(db)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	info := &job.MediaInfo{
+		Title:     "Test Video",
+		Duration:  120,
+		Thumbnail: "https://example.com/thumb.jpg",
+		URL:       "https://youtube.com/watch?v=123",
+		Formats: []job.MediaFormat{
+			{FormatID: "18", Extension: "mp4", Resolution: "640x360", Quality: "360p"},
+		},
+		SelectedFmt: "18",
+	}
+
+	mediaJob := &job.Job{
+		ID:        "media-1",
+		Source:    "https://youtube.com/watch?v=123",
+		Name:      "Test Video",
+		Status:    job.StatusDownloading,
+		Type:      job.TypeMedia,
+		Engine:    "ytdlp",
+		MediaInfo: info,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := repo.Create(ctx, mediaJob); err != nil {
+		t.Fatalf("Create media job failed: %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, "media-1")
+	if err != nil {
+		t.Fatalf("GetByID failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected media job, got nil")
+	}
+
+	if got.Type != job.TypeMedia {
+		t.Errorf("expected type 'media', got %s", got.Type)
+	}
+
+	if got.MediaInfo == nil {
+		t.Fatal("expected MediaInfo to be persisted, got nil")
+	}
+
+	if got.MediaInfo.Title != "Test Video" {
+		t.Errorf("expected title 'Test Video', got %s", got.MediaInfo.Title)
+	}
+
+	if len(got.MediaInfo.Formats) != 1 || got.MediaInfo.Formats[0].FormatID != "18" {
+		t.Errorf("expected format 18, got %v", got.MediaInfo.Formats)
+	}
+}

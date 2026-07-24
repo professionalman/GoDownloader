@@ -9,11 +9,13 @@ interface JobListProps {
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
   onOpenFolder: () => void;
+  onSelectFormat: (id: string) => void;
 }
 
-export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onResume, onRetry, onOpenFolder }) => {
+export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onResume, onRetry, onOpenFolder, onSelectFormat }) => {
   const activeJobs = jobs.filter(
     (j) => j.status === 'downloading' || j.status === 'queued' || j.status === 'paused'
+      || j.status === 'analyzing' || j.status === 'processing'
   );
   const completedJobs = jobs.filter(
     (j) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled'
@@ -33,6 +35,7 @@ export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onRes
               onCancel={onCancel}
               onPause={onPause}
               onResume={onResume}
+              onSelectFormat={onSelectFormat}
             />
           ))
         )}

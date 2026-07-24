@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"downloader/internal/job"
@@ -28,28 +29,46 @@ func NewSQLiteJobRepository(db *DB) *SQLiteJobRepository {
 }
 
 const jobColumns = `id, source, name, status, total_bytes, completed_bytes, progress,
-	speed_bytes_per_second, eta_seconds, error, engine, engine_id, created_at, updated_at`
+	speed_bytes_per_second, eta_seconds, error, engine, engine_id, type, media_info, created_at, updated_at`
 
 func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	var j job.Job
+	var mediaInfoJSON string
 	err := scanner.Scan(
 		&j.ID, &j.Source, &j.Name, &j.Status,
 		&j.TotalBytes, &j.CompletedBytes, &j.Progress,
 		&j.SpeedBytesPerSecond, &j.ETASeconds,
 		&j.Error, &j.Engine, &j.EngineID,
+		&j.Type, &mediaInfoJSON,
 		&j.CreatedAt, &j.UpdatedAt,
 	)
-	return j, err
+	if err != nil {
+		return j, err
+	}
+	if mediaInfoJSON != "" {
+		var info job.MediaInfo
+		if jsonErr := json.Unmarshal([]byte(mediaInfoJSON), &info); jsonErr == nil {
+			j.MediaInfo = &info
+		}
+	}
+	return j, nil
 }
 
 // Create inserts a new job into the database.
 func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
-	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
+	mediaInfoJSON := ""
+	if j.MediaInfo != nil {
+		if data, err := json.Marshal(j.MediaInfo); err == nil {
+			mediaInfoJSON = string(data)
+		}
+	}
+	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.ID, j.Source, j.Name, j.Status,
 		j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds,
 		j.Error, j.Engine, j.EngineID,
+		j.Type, mediaInfoJSON,
 		j.CreatedAt, j.UpdatedAt,
 	)
 	if err != nil {
@@ -60,14 +79,22 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 
 // Update updates an existing job in the database.
 func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
+	mediaInfoJSON := ""
+	if j.MediaInfo != nil {
+		if data, err := json.Marshal(j.MediaInfo); err == nil {
+			mediaInfoJSON = string(data)
+		}
+	}
 	query := `UPDATE jobs SET
 		source=?, name=?, status=?, total_bytes=?, completed_bytes=?, progress=?,
 		speed_bytes_per_second=?, eta_seconds=?, error=?, engine=?, engine_id=?,
+		type=?, media_info=?,
 		updated_at=?
 		WHERE id=?`
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.Source, j.Name, j.Status, j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds, j.Error, j.Engine, j.EngineID,
+		j.Type, mediaInfoJSON,
 		j.UpdatedAt, j.ID,
 	)
 	if err != nil {
@@ -112,7 +139,7 @@ func (r *SQLiteJobRepository) List(ctx context.Context) ([]job.Job, error) {
 // ListRecoverable returns all jobs that should be recovered on startup.
 // These are jobs with non-terminal, non-failed statuses.
 func (r *SQLiteJobRepository) ListRecoverable(ctx context.Context) ([]job.Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status IN ('queued', 'downloading', 'paused') ORDER BY created_at ASC`, jobColumns)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status IN ('queued', 'downloading', 'paused', 'analyzing', 'processing') ORDER BY created_at ASC`, jobColumns)
 	rows, err := r.db.conn.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list recoverable jobs: %w", err)

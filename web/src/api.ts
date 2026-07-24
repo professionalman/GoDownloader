@@ -50,6 +50,15 @@ export async function cancelJob(id: string): Promise<Job> {
   return handleResponse<Job>(res);
 }
 
+export async function selectFormat(jobId: string, formatId: string): Promise<Job> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/format`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formatId }),
+  });
+  return handleResponse<Job>(res);
+}
+
 export function connectSSE(onEvent: (eventType: string, job: Job) => void): EventSource {
   const es = new EventSource(`${API_BASE}/events`);
 

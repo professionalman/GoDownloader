@@ -8,6 +8,7 @@ interface JobCardProps {
   onResume?: (id: string) => void;
   onRetry?: (id: string) => void;
   onOpenFolder?: () => void;
+  onSelectFormat?: (id: string) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -35,20 +36,71 @@ function formatETA(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
-export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResume, onRetry, onOpenFolder }) => {
+export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResume, onRetry, onOpenFolder, onSelectFormat }) => {
   const isDownloading = job.status === 'downloading';
   const isQueued = job.status === 'queued';
   const isPaused = job.status === 'paused';
   const isCompleted = job.status === 'completed';
   const isFailed = job.status === 'failed';
+  const isAnalyzing = job.status === 'analyzing';
+  const isProcessing = job.status === 'processing';
   const isActive = isDownloading || isQueued;
+  const isMediaJob = job.type === 'media';
+
+  // Analysis is complete when mediaInfo has formats
+  const analysisReady = isAnalyzing && job.mediaInfo && job.mediaInfo.formats && job.mediaInfo.formats.length > 0;
 
   return (
     <div className={`job-card job-${job.status}`}>
       <div className="job-header">
-        <span className="job-name" title={job.source}>{job.name || 'Untitled'}</span>
-        <span className={`job-status status-${job.status}`}>{job.status}</span>
+        <div className="job-name-area">
+          {isMediaJob && job.mediaInfo?.thumbnail && (
+            <img
+              src={job.mediaInfo.thumbnail}
+              alt=""
+              className="job-thumbnail"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+          )}
+          <span className="job-name" title={job.source}>{job.name || 'Untitled'}</span>
+        </div>
+        <div className="job-badges">
+          {isMediaJob && <span className="job-engine-badge">🎬 Media</span>}
+          <span className={`job-status status-${job.status}`}>{job.status}</span>
+        </div>
       </div>
+
+      {/* Analyzing state */}
+      {isAnalyzing && !analysisReady && (
+        <div className="job-analyzing">
+          <span className="analyzing-spinner">⟳</span>
+          <span>Analyzing media...</span>
+        </div>
+      )}
+
+      {/* Analysis complete — show select format button */}
+      {analysisReady && onSelectFormat && (
+        <div className="job-analyzing-ready">
+          <span className="analyzing-ready-text">
+            {job.mediaInfo!.formats.length} formats available
+          </span>
+          <button className="btn btn-primary btn-sm" onClick={() => onSelectFormat(job.id)}>
+            🎬 Select Format
+          </button>
+        </div>
+      )}
+
+      {/* Processing state (FFmpeg) */}
+      {isProcessing && (
+        <div className="job-processing">
+          <div className="progress-bar-container">
+            <div className="progress-bar-fill progress-processing" style={{ width: '100%' }} />
+          </div>
+          <div className="job-details">
+            <span className="processing-label">⚙ Processing (FFmpeg merging)...</span>
+          </div>
+        </div>
+      )}
 
       {/* Progress bar for downloading, queued, and paused jobs */}
       {(isActive || isPaused) && (
@@ -90,7 +142,7 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
 
       {/* Actions */}
       <div className="job-actions">
-        {isDownloading && onPause && (
+        {isDownloading && onPause && job.type !== 'media' && (
           <button className="btn btn-secondary btn-sm" onClick={() => onPause(job.id)}>
             ⏸ Pause
           </button>
@@ -100,7 +152,7 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
             ▶ Resume
           </button>
         )}
-        {(isActive || isPaused) && onCancel && (
+        {(isActive || isPaused || isAnalyzing || isProcessing) && onCancel && (
           <button className="btn btn-danger btn-sm" onClick={() => onCancel(job.id)}>
             ✕ Cancel
           </button>

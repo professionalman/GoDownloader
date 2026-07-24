@@ -181,3 +181,35 @@ func TestRecovery_EngineUnavailable(t *testing.T) {
 		t.Errorf("expected failed, got %s", got.Status)
 	}
 }
+
+func TestRecovery_MediaJobFailsOnRestart(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	mediaJob := &Job{
+		ID:        "media-recover-1",
+		Source:    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		Name:      "test media",
+		Status:    StatusDownloading,
+		Type:      TypeMedia,
+		Engine:    "ytdlp",
+		EngineID:  "media-recover-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.Create(ctx, mediaJob); err != nil {
+		t.Fatalf("failed to create media job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	got, _ := repo.GetByID(ctx, "media-recover-1")
+	if got.Status != StatusFailed {
+		t.Errorf("expected media job to be marked failed on restart, got %s", got.Status)
+	}
+	if got.Error == "" {
+		t.Error("expected error message for interrupted media job")
+	}
+}

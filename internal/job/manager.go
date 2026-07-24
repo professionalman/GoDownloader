@@ -16,7 +16,7 @@ import (
 // All state transitions go through the Manager.
 type Manager struct {
 	repo        JobRepository
-	engine      Engine
+	engines     EngineRegistry
 	bus         EventBus
 	downloadDir string
 
@@ -27,10 +27,10 @@ type Manager struct {
 }
 
 // NewManager creates a new job manager.
-func NewManager(repo JobRepository, eng Engine, bus EventBus, downloadDir string) *Manager {
+func NewManager(repo JobRepository, engines EngineRegistry, bus EventBus, downloadDir string) *Manager {
 	m := &Manager{
 		repo:        repo,
-		engine:      eng,
+		engines:     engines,
 		bus:         bus,
 		downloadDir: downloadDir,
 		activeJobs:  make(map[string]*Job),
@@ -56,7 +56,8 @@ func (m *Manager) Stop() {
 	}
 }
 
-// Create validates the URL, creates a job, starts the engine download.
+// Create validates the URL, creates a job, and starts the engine download.
+// For media URLs (yt-dlp), the job enters "analyzing" state first.
 func (m *Manager) Create(ctx context.Context, source string) (*Job, error) {
 	// Validate URL
 	u, err := url.ParseRequestURI(source)
@@ -66,6 +67,9 @@ func (m *Manager) Create(ctx context.Context, source string) (*Job, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, &AppError{Code: ErrInvalidURL, Message: "only HTTP and HTTPS URLs are supported"}
 	}
+
+	// Detect engine
+	engineName := m.engines.Detect(source)
 
 	// Extract filename from URL
 	name := path.Base(u.Path)
@@ -79,18 +83,51 @@ func (m *Manager) Create(ctx context.Context, source string) (*Job, error) {
 		Source:    source,
 		Name:      name,
 		Status:    StatusQueued,
-		Engine:    "aria2",
+		Type:      TypeDownload,
+		Engine:    engineName,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+
+	// For media engine, set type and start analysis
+	if engineName == "ytdlp" {
+		j.Type = TypeMedia
+		j.Status = StatusAnalyzing
+		j.Name = "Analyzing..."
+
+		// Persist
+		if err := m.repo.Create(ctx, j); err != nil {
+			return nil, fmt.Errorf("persist job: %w", err)
+		}
+
+		m.publish(EventJobCreated, j)
+
+		// Run analysis in background
+		go m.analyzeMedia(ctx, j.ID, source)
+
+		return j, nil
+	}
+
+	// Standard download flow (aria2)
+	j.Type = TypeDownload
 
 	// Persist
 	if err := m.repo.Create(ctx, j); err != nil {
 		return nil, fmt.Errorf("persist job: %w", err)
 	}
 
+	eng, ok := m.engines.Get(engineName)
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = fmt.Sprintf("engine %q not available", engineName)
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return j, nil
+	}
+
 	// Start engine download
-	engineID, err := m.engine.Start(ctx, j, m.downloadDir)
+	engineID, err := eng.Start(ctx, j, m.downloadDir)
 	if err != nil {
 		j.Status = StatusFailed
 		j.Error = fmt.Sprintf("Failed to start download: %v", err)
@@ -111,6 +148,126 @@ func (m *Manager) Create(ctx context.Context, source string) (*Job, error) {
 	return j, nil
 }
 
+// analyzeMedia runs yt-dlp analysis in the background and updates the job.
+func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) {
+	ctx := context.Background() // Use background context so analysis survives request context
+
+	j, err := m.repo.GetByID(ctx, jobID)
+	if err != nil || j == nil {
+		log.Printf("analyzeMedia: job %s not found", jobID)
+		return
+	}
+
+	eng, ok := m.engines.Get("ytdlp")
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = "yt-dlp engine not available"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
+	analyzer, ok := eng.(MediaAnalyzer)
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = "yt-dlp engine does not support media analysis"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
+	info, err := analyzer.Analyze(ctx, source)
+	if err != nil {
+		j.Status = StatusFailed
+		j.Error = fmt.Sprintf("Media analysis failed: %v", err)
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
+	// Update job with analysis results
+	j.MediaInfo = info
+	if info.Title != "" {
+		j.Name = info.Title
+	}
+	j.UpdatedAt = time.Now()
+	m.repo.Update(ctx, j)
+	m.publish(EventJobUpdated, j)
+
+	log.Printf("analyzeMedia: job %s analyzed successfully: %s (%d formats)", jobID, info.Title, len(info.Formats))
+}
+
+// SelectFormat selects a format for a media job and starts the download.
+func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, error) {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if j.Type != TypeMedia {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "format selection is only available for media jobs"}
+	}
+
+	if j.Status != StatusAnalyzing {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot select format for a %s job", j.Status)}
+	}
+
+	if j.MediaInfo == nil {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "media analysis not complete yet"}
+	}
+
+	// Validate format ID exists
+	validFormat := false
+	for _, f := range j.MediaInfo.Formats {
+		if f.FormatID == formatID {
+			validFormat = true
+			break
+		}
+	}
+	if !validFormat {
+		return nil, &AppError{Code: ErrInvalidRequest, Message: "invalid format ID"}
+	}
+
+	// Set selected format
+	j.MediaInfo.SelectedFmt = formatID
+
+	// Transition to downloading
+	j.Status = StatusDownloading
+	j.UpdatedAt = time.Now()
+
+	eng, ok := m.engines.Get("ytdlp")
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = "yt-dlp engine not available"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return j, nil
+	}
+
+	engineID, err := eng.Start(ctx, j, m.downloadDir)
+	if err != nil {
+		j.Status = StatusFailed
+		j.Error = fmt.Sprintf("Failed to start download: %v", err)
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return j, nil
+	}
+
+	j.EngineID = engineID
+	j.UpdatedAt = time.Now()
+	m.repo.Update(ctx, j)
+
+	m.addActive(j)
+	m.publish(EventJobUpdated, j)
+
+	return j, nil
+}
+
 // Pause pauses an active download.
 func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
@@ -122,7 +279,12 @@ func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot pause a %s job", j.Status)}
 	}
 
-	if err := m.engine.Pause(ctx, j); err != nil {
+	eng, ok := m.engines.Get(j.Engine)
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine %q not available", j.Engine)}
+	}
+
+	if err := eng.Pause(ctx, j); err != nil {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine pause failed: %v", err)}
 	}
 
@@ -149,7 +311,12 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot resume a %s job", j.Status)}
 	}
 
-	if err := m.engine.Resume(ctx, j); err != nil {
+	eng, ok := m.engines.Get(j.Engine)
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine %q not available", j.Engine)}
+	}
+
+	if err := eng.Resume(ctx, j); err != nil {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine resume failed: %v", err)}
 	}
 
@@ -176,8 +343,10 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 
 	// Try to cancel in engine (ignore errors for idempotency)
 	if j.EngineID != "" {
-		if err := m.engine.Cancel(ctx, j); err != nil {
-			log.Printf("warning: engine cancel failed for job %s: %v", id, err)
+		if eng, ok := m.engines.Get(j.Engine); ok {
+			if err := eng.Cancel(ctx, j); err != nil {
+				log.Printf("warning: engine cancel failed for job %s: %v", id, err)
+			}
 		}
 	}
 
@@ -215,8 +384,32 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 
 	m.repo.Update(ctx, j)
 
+	// For media jobs, restart analysis
+	if j.Type == TypeMedia {
+		j.Status = StatusAnalyzing
+		j.Name = "Analyzing..."
+		j.MediaInfo = nil
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobUpdated, j)
+
+		go m.analyzeMedia(ctx, j.ID, j.Source)
+		return j, nil
+	}
+
+	// Standard download retry
+	eng, ok := m.engines.Get(j.Engine)
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = fmt.Sprintf("engine %q not available", j.Engine)
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return j, nil
+	}
+
 	// Start fresh engine execution
-	engineID, err := m.engine.Start(ctx, j, m.downloadDir)
+	engineID, err := eng.Start(ctx, j, m.downloadDir)
 	if err != nil {
 		j.Status = StatusFailed
 		j.Error = fmt.Sprintf("Failed to start download: %v", err)
@@ -258,6 +451,11 @@ func (m *Manager) GetActiveJobs() map[string]*Job {
 		snapshot[k] = &jobCopy
 	}
 	return snapshot
+}
+
+// GetEngine returns the engine for a given name.
+func (m *Manager) GetEngine(name string) (Engine, bool) {
+	return m.engines.Get(name)
 }
 
 // UpdateJobFromEngine updates a job with engine status and persists/publishes.
@@ -314,6 +512,17 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
 			m.removeActive(j.ID)
+			m.publish(EventJobUpdated, j)
+		}
+		return
+
+	case StatusProcessing:
+		if prevStatus != StatusProcessing {
+			j.Status = StatusProcessing
+			j.SpeedBytesPerSecond = 0
+			j.ETASeconds = 0
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
 			m.publish(EventJobUpdated, j)
 		}
 		return

@@ -54,6 +54,14 @@ func (f *fakeEngine) Status(ctx context.Context, j *Job) (*EngineStatus, error) 
 	return &EngineStatus{Status: StatusDownloading}, nil
 }
 
+func (f *fakeEngine) Get(name string) (Engine, bool) {
+	return f, true
+}
+
+func (f *fakeEngine) Detect(url string) string {
+	return "aria2"
+}
+
 type fakeJobRepository struct {
 	mu   sync.Mutex
 	jobs map[string]*Job

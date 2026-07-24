@@ -28,7 +28,20 @@ func (m *Manager) recover(ctx context.Context) {
 }
 
 func (m *Manager) recoverJob(ctx context.Context, j *Job) {
-	log.Printf("recovery: recovering job %s (status=%s, engineID=%s)", j.ID, j.Status, j.EngineID)
+	log.Printf("recovery: recovering job %s (status=%s, engine=%s, engineID=%s)", j.ID, j.Status, j.Engine, j.EngineID)
+
+	// Media subprocesses do not survive backend restart
+	if j.Type == TypeMedia || j.Engine == "ytdlp" {
+		log.Printf("recovery: media job %s was in status %s during restart, marking failed", j.ID, j.Status)
+		j.Status = StatusFailed
+		j.Error = "Media download was interrupted by application restart. Retry the job."
+		j.SpeedBytesPerSecond = 0
+		j.ETASeconds = 0
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
 
 	// Case 4: No engine ID — cannot recover
 	if j.EngineID == "" {
@@ -43,8 +56,22 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		return
 	}
 
+	// Look up engine by name
+	eng, ok := m.engines.Get(j.Engine)
+	if !ok {
+		log.Printf("recovery: engine %q not available for job %s, marking failed", j.Engine, j.ID)
+		j.Status = StatusFailed
+		j.Error = "Download engine not available."
+		j.SpeedBytesPerSecond = 0
+		j.ETASeconds = 0
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
 	// Query engine for current status
-	status, err := m.engine.Status(ctx, j)
+	status, err := eng.Status(ctx, j)
 	if err != nil {
 		// Case 5: Engine unavailable or GID unknown
 		log.Printf("recovery: engine status failed for job %s: %v", j.ID, err)

@@ -35,3 +35,18 @@ type Engine interface {
 	// Status retrieves the current status of a download.
 	Status(ctx context.Context, j *Job) (*EngineStatus, error)
 }
+
+// MediaAnalyzer is optionally implemented by engines that can extract media metadata.
+type MediaAnalyzer interface {
+	// Analyze extracts media information from a URL without downloading.
+	Analyze(ctx context.Context, url string) (*MediaInfo, error)
+}
+
+// EngineRegistry manages available download engines and URL routing.
+type EngineRegistry interface {
+	// Get returns the engine registered under the given name.
+	Get(name string) (Engine, bool)
+
+	// Detect determines which engine should handle the given URL.
+	Detect(url string) string
+}

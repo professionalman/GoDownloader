@@ -12,6 +12,8 @@ type Config struct {
 	Aria2RPCURL string
 	Aria2Secret string
 	WebDir      string
+	YtdlpPath   string
+	FFmpegPath  string
 }
 
 // New creates a Config populated from environment variables with sensible defaults.
@@ -29,6 +31,8 @@ func New() *Config {
 		Aria2RPCURL: getEnv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc"),
 		Aria2Secret: getEnv("ARIA2_SECRET", ""),
 		WebDir:      getEnv("WEB_DIR", "./web/dist"),
+		YtdlpPath:   getEnv("YTDLP_PATH", "yt-dlp"),
+		FFmpegPath:  getEnv("FFMPEG_PATH", ""),
 	}
 }
 

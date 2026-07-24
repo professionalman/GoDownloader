@@ -37,7 +37,7 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, disabled }
         <input
           type="text"
           className="url-input"
-          placeholder="Paste direct download URL..."
+          placeholder="Paste URL — direct downloads or media links (YouTube, etc.)..."
           value={url}
           onChange={(e) => { setUrl(e.target.value); setError(''); }}
           disabled={disabled}

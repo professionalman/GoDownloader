@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { DownloadForm } from './components/DownloadForm';
 import { JobList } from './components/JobList';
+import { FormatSelector } from './components/FormatSelector';
 import type { Job } from './types';
-import { getJobs, createJob, cancelJob, pauseJob, resumeJob, retryJob, connectSSE, openFolder } from './api';
+import { getJobs, createJob, cancelJob, pauseJob, resumeJob, retryJob, connectSSE, openFolder, selectFormat } from './api';
 import './App.css';
 
 function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [formatJobId, setFormatJobId] = useState<string | null>(null);
 
   // Fetch jobs on mount
   useEffect(() => {
@@ -84,10 +86,26 @@ function App() {
     }
   }, []);
 
+  const handleSelectFormat = useCallback((id: string) => {
+    setFormatJobId(id);
+  }, []);
+
+  const handleFormatSelected = useCallback(async (jobId: string, formatId: string) => {
+    try {
+      const updated = await selectFormat(jobId, formatId);
+      setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to select format');
+    }
+  }, []);
+
+  const formatJob = formatJobId ? jobs.find((j) => j.id === formatJobId) : null;
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>⬇ Local Downloader</h1>
+        <h1>⬇ GoDownloader</h1>
+        <span className="app-version">v0.3</span>
       </header>
 
       <main className="app-main">
@@ -107,8 +125,18 @@ function App() {
           onResume={handleResume}
           onRetry={handleRetry}
           onOpenFolder={openFolder}
+          onSelectFormat={handleSelectFormat}
         />
       </main>
+
+      {/* Format Selector Modal */}
+      {formatJob && (
+        <FormatSelector
+          job={formatJob}
+          onSelect={handleFormatSelected}
+          onClose={() => setFormatJobId(null)}
+        />
+      )}
     </div>
   );
 }

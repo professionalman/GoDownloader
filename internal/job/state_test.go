@@ -10,12 +10,20 @@ func TestValidateTransition_Valid(t *testing.T) {
 		from, to JobStatus
 	}{
 		{StatusQueued, StatusDownloading},
+		{StatusQueued, StatusAnalyzing},
 		{StatusQueued, StatusCancelled},
 		{StatusQueued, StatusFailed},
+		{StatusAnalyzing, StatusDownloading},
+		{StatusAnalyzing, StatusFailed},
+		{StatusAnalyzing, StatusCancelled},
 		{StatusDownloading, StatusPaused},
 		{StatusDownloading, StatusFailed},
 		{StatusDownloading, StatusCompleted},
 		{StatusDownloading, StatusCancelled},
+		{StatusDownloading, StatusProcessing},
+		{StatusProcessing, StatusCompleted},
+		{StatusProcessing, StatusFailed},
+		{StatusProcessing, StatusCancelled},
 		{StatusPaused, StatusDownloading},
 		{StatusPaused, StatusCancelled},
 		{StatusFailed, StatusQueued},
@@ -98,6 +106,9 @@ func TestIsActive(t *testing.T) {
 	if !IsActive(StatusDownloading) {
 		t.Errorf("expected downloading to be active")
 	}
+	if !IsActive(StatusProcessing) {
+		t.Errorf("expected processing to be active")
+	}
 	if IsActive(StatusPaused) {
 		t.Errorf("expected paused to NOT be active")
 	}
@@ -115,6 +126,9 @@ func TestIsRecoverable(t *testing.T) {
 	}
 	if !IsRecoverable(StatusPaused) {
 		t.Errorf("expected paused to be recoverable")
+	}
+	if !IsRecoverable(StatusAnalyzing) {
+		t.Errorf("expected analyzing to be recoverable")
 	}
 	if IsRecoverable(StatusCompleted) {
 		t.Errorf("expected completed to NOT be recoverable")

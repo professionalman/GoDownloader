@@ -27,6 +27,7 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/jobs/{id}/resume", h.ResumeJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/retry", h.RetryJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/cancel", h.CancelJob).Methods("POST")
+	api.HandleFunc("/jobs/{id}/format", h.SelectFormat).Methods("POST")
 	api.Handle("/events", sseHandler).Methods("GET")
 
 	// Config endpoint

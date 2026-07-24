@@ -51,6 +51,8 @@ func (db *DB) migrate() error {
 		error TEXT NOT NULL DEFAULT '',
 		engine TEXT NOT NULL DEFAULT 'aria2',
 		engine_id TEXT NOT NULL DEFAULT '',
+		type TEXT NOT NULL DEFAULT 'download',
+		media_info TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);`
@@ -60,6 +62,8 @@ func (db *DB) migrate() error {
 
 	// Migrate from V0.1 schema if needed
 	db.migrateFromV01()
+
+	db.migrateToV03()
 
 	return nil
 }
@@ -122,6 +126,42 @@ func (db *DB) migrateFromV01() {
 
 	// Convert uppercase statuses to lowercase (V0.1 → V0.2)
 	db.conn.Exec("UPDATE jobs SET status = LOWER(status) WHERE status != LOWER(status)")
+}
+
+// migrateToV03 adds V0.3 media download columns.
+func (db *DB) migrateToV03() {
+	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	hasType := false
+	hasMediaInfo := false
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		switch name {
+		case "type":
+			hasType = true
+		case "media_info":
+			hasMediaInfo = true
+		}
+	}
+
+	if !hasType {
+		db.conn.Exec("ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'download'")
+	}
+	if !hasMediaInfo {
+		db.conn.Exec("ALTER TABLE jobs ADD COLUMN media_info TEXT NOT NULL DEFAULT ''")
+	}
 }
 
 // Conn returns the underlying sql.DB connection.

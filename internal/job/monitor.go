@@ -74,7 +74,13 @@ func (m *Monitor) tick(ctx context.Context) {
 			continue
 		}
 
-		status, err := m.manager.engine.Status(ctx, j)
+		eng, ok := m.manager.GetEngine(j.Engine)
+		if !ok {
+			log.Printf("monitor: engine %q not available for job %s", j.Engine, j.ID)
+			continue
+		}
+
+		status, err := eng.Status(ctx, j)
 		if err != nil {
 			log.Printf("monitor: failed to get status for job %s: %v", j.ID, err)
 			continue

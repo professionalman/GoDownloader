@@ -7,10 +7,12 @@ import (
 
 // validTransitions defines allowed state transitions.
 var validTransitions = map[JobStatus][]JobStatus{
-	StatusQueued:      {StatusDownloading, StatusCancelled, StatusFailed},
-	StatusDownloading: {StatusPaused, StatusFailed, StatusCompleted, StatusCancelled},
+	StatusQueued:      {StatusDownloading, StatusAnalyzing, StatusCancelled, StatusFailed},
+	StatusDownloading: {StatusPaused, StatusFailed, StatusCompleted, StatusCancelled, StatusProcessing},
 	StatusPaused:      {StatusDownloading, StatusCancelled},
 	StatusFailed:      {StatusQueued},
+	StatusAnalyzing:   {StatusDownloading, StatusFailed, StatusCancelled},
+	StatusProcessing:  {StatusCompleted, StatusFailed, StatusCancelled},
 	// completed and cancelled are terminal
 }
 
@@ -45,10 +47,10 @@ func IsTerminal(s JobStatus) bool {
 
 // IsActive returns true if the job is actively downloading.
 func IsActive(s JobStatus) bool {
-	return s == StatusDownloading
+	return s == StatusDownloading || s == StatusProcessing
 }
 
 // IsRecoverable returns true if the job should be recovered on restart.
 func IsRecoverable(s JobStatus) bool {
-	return s == StatusQueued || s == StatusDownloading || s == StatusPaused
+	return s == StatusQueued || s == StatusDownloading || s == StatusPaused || s == StatusAnalyzing
 }
