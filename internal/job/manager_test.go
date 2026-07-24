@@ -862,3 +862,95 @@ func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
 		t.Errorf("expected AddTorrentFile to receive persisted path %s, got %s", rec.TorrentFilePath, addedFilePath)
 	}
 }
+
+func TestManager_UpdateJobFromEngine_SeedingPolicy(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var removeCalled bool
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalled = true
+		return nil
+	}
+
+	// 1. seedAfterComplete = false + engine StatusSeeding -> COMPLETED + RemoveTorrent called
+	j1 := &Job{
+		ID:                "job-seed-false",
+		Status:            StatusDownloading,
+		Type:              TypeTorrent,
+		Engine:            "qbittorrent",
+		EngineID:          "hash1",
+		SeedAfterComplete: false,
+	}
+	m.repo.Create(ctx, j1)
+	m.addActive(j1)
+
+	statusSeeding := &EngineStatus{
+		Status:      StatusSeeding,
+		UploadSpeed: 500,
+	}
+	m.UpdateJobFromEngine(ctx, j1, statusSeeding, true)
+
+	if j1.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted for seedAfterComplete=false, got %s", j1.Status)
+	}
+	if !removeCalled {
+		t.Error("expected RemoveTorrent to be called for seedAfterComplete=false")
+	}
+
+	// 2. seedAfterComplete = true + engine StatusSeeding -> SEEDING + torrent remains
+	removeCalled = false
+	j2 := &Job{
+		ID:                "job-seed-true",
+		Status:            StatusDownloading,
+		Type:              TypeTorrent,
+		Engine:            "qbittorrent",
+		EngineID:          "hash2",
+		SeedAfterComplete: true,
+	}
+	m.repo.Create(ctx, j2)
+	m.addActive(j2)
+
+	m.UpdateJobFromEngine(ctx, j2, statusSeeding, true)
+
+	if j2.Status != StatusSeeding {
+		t.Errorf("expected StatusSeeding for seedAfterComplete=true, got %s", j2.Status)
+	}
+	if removeCalled {
+		t.Error("RemoveTorrent should NOT be called for seedAfterComplete=true")
+	}
+}
+
+func TestManager_StopSeeding_ErrorHandling(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	j := &Job{
+		ID:        "job-seeding-fail",
+		Status:    StatusSeeding,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-fail",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+	m.addActive(j)
+
+	// Simulate StopDownload failure
+	fakeTorrent.stopDownloadFunc = func(hash string) error {
+		return fmt.Errorf("rpc error")
+	}
+
+	_, err := m.StopSeeding(ctx, j.ID)
+	if err == nil {
+		t.Error("expected error from StopSeeding when StopDownload fails, got nil")
+	}
+
+	got, _ := m.Get(ctx, j.ID)
+	if got.Status != StatusSeeding {
+		t.Errorf("expected job status to remain SEEDING after failure, got %s", got.Status)
+	}
+}

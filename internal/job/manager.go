@@ -666,9 +666,15 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 	}
 
 	torrentEng, ok := eng.(ITorrentEngine)
-	if ok {
-		torrentEng.StopDownload(ctx, j.EngineID)
-		torrentEng.RemoveTorrent(ctx, j.EngineID, false)
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
+	}
+
+	if err := torrentEng.StopDownload(ctx, j.EngineID); err != nil {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to stop torrent seeding: %v", err)}
+	}
+	if err := torrentEng.RemoveTorrent(ctx, j.EngineID, false); err != nil {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to remove torrent from daemon: %v", err)}
 	}
 
 	j.Status = StatusCompleted
@@ -1045,6 +1051,24 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		return
 
 	case StatusSeeding:
+		if !j.SeedAfterComplete {
+			// If seedAfterComplete = false, stop/remove torrent from qBittorrent and mark completed
+			if eng, ok := m.engines.Get(j.Engine); ok {
+				if te, ok := eng.(ITorrentEngine); ok {
+					te.RemoveTorrent(ctx, j.EngineID, false)
+				}
+			}
+			j.Status = StatusCompleted
+			j.Progress = 100
+			j.SpeedBytesPerSecond = 0
+			j.ETASeconds = 0
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.removeActive(j.ID)
+			m.publish(EventJobCompleted, j)
+			return
+		}
+
 		if prevStatus != StatusSeeding {
 			j.Status = StatusSeeding
 			j.Progress = 100
