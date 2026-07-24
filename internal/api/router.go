@@ -51,12 +51,12 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	spa := spaHandler{staticPath: cfg.WebDir, indexPath: "index.html"}
 	r.PathPrefix("/").Handler(spa)
 
-	// CORS
+	// CORS - local same-origin & local dev origins only
 	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   []string{"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8080", "http://127.0.0.1:8080"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"*"},
-		AllowCredentials: false,
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: true,
 	})
 
 	return c.Handler(r)

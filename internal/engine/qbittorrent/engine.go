@@ -231,22 +231,5 @@ func (e *Engine) GetTorrentInfo(ctx context.Context, infoHash string) (*job.Torr
 }
 
 func extractMagnetHash(magnet string) (string, error) {
-	// Simple extraction for urn:btih:
-	const prefix = "urn:btih:"
-	idx := strings.Index(magnet, prefix)
-	if idx == -1 {
-		return "", errors.New("invalid magnet link: missing btih")
-	}
-
-	hashPart := magnet[idx+len(prefix):]
-	ampIdx := strings.Index(hashPart, "&")
-	if ampIdx != -1 {
-		hashPart = hashPart[:ampIdx]
-	}
-
-	if len(hashPart) == 40 || len(hashPart) == 32 {
-		return hashPart, nil
-	}
-
-	return "", errors.New("invalid info hash length in magnet link")
+	return job.ExtractMagnetHash(magnet)
 }

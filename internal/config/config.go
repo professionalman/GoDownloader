@@ -45,7 +45,7 @@ func New() *Config {
 	}
 
 	return &Config{
-		ListenAddr:   getEnv("LISTEN_ADDR", ":8080"),
+		ListenAddr:   getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
 		DownloadDir:  absDir,
 		Aria2RPCURL:  getEnv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc"),
 		Aria2Secret:  getEnv("ARIA2_SECRET", ""),

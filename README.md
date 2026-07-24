@@ -165,7 +165,7 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LISTEN_ADDR` | `:8080` | Server listen address |
+| `LISTEN_ADDR` | `127.0.0.1:8080` | Server listen address (loopback only) |
 | `DOWNLOAD_DIR` | `./downloads` | Destination folder for completed downloads |
 | `DATA_DIR` | `./data` | Application data folder for stored `.torrent` files |
 | `ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` | aria2 RPC endpoint |
