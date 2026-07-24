@@ -798,3 +798,67 @@ func TestManager_CreateTorrentFromFile_PersistedStorage(t *testing.T) {
 		t.Errorf("expected persisted file %s to exist", persistedPath)
 	}
 }
+
+func TestManager_TorrentRetryWithPersistedFile(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var addedFilePath string
+	fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+		addedFilePath = path
+		return "hash-retry-1", nil
+	}
+
+	// 1. Create .torrent job
+	tmpFile, err := os.CreateTemp("", "test-retry-*.torrent")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	tmpFile.WriteString("dummy torrent payload for retry")
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
+	j, err := m.CreateTorrentFromFile(ctx, tmpPath)
+	if err != nil {
+		t.Fatalf("CreateTorrentFromFile failed: %v", err)
+	}
+
+	// 2. Wait for metadata acquisition
+	time.Sleep(1500 * time.Millisecond)
+
+	// 3. Assert TorrentJobRecord has TorrentFilePath set and file exists
+	rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+	if err != nil || rec == nil {
+		t.Fatalf("expected TorrentJobRecord to exist, got err %v", err)
+	}
+	if rec.TorrentFilePath == "" {
+		t.Fatal("expected TorrentFilePath to be non-empty in TorrentJobRecord")
+	}
+	if _, err := os.Stat(rec.TorrentFilePath); os.IsNotExist(err) {
+		t.Fatalf("expected persisted torrent file at %s to exist", rec.TorrentFilePath)
+	}
+
+	// 4. Simulate FAILED status
+	j.Status = StatusFailed
+	j.Error = "Simulated network failure"
+	m.repo.Update(ctx, j)
+
+	// 5. Call Retry()
+	addedFilePath = ""
+	retriedJ, err := m.Retry(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("Retry failed: %v", err)
+	}
+	if retriedJ.Status != StatusAnalyzing {
+		t.Errorf("expected StatusAnalyzing after retry, got %s", retriedJ.Status)
+	}
+
+	// Wait for retry acquireTorrentMetadata
+	time.Sleep(1500 * time.Millisecond)
+
+	// 6. Verify AddTorrentFile received the persisted DATA_DIR path
+	if addedFilePath != rec.TorrentFilePath {
+		t.Errorf("expected AddTorrentFile to receive persisted path %s, got %s", rec.TorrentFilePath, addedFilePath)
+	}
+}

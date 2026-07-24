@@ -517,10 +517,11 @@ loop:
 	// Save torrent job record
 	if m.torrentRepo != nil {
 		m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
-			JobID:     jobID,
-			InfoHash:  infoHash,
-			Name:      metadata.Name,
-			TotalSize: metadata.TotalSize,
+			JobID:           jobID,
+			InfoHash:        infoHash,
+			Name:            metadata.Name,
+			TotalSize:       metadata.TotalSize,
+			TorrentFilePath: torrentFilePath,
 		})
 
 		// Fetch and save file list
