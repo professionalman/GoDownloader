@@ -484,15 +484,17 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		if err != nil {
 			log.Printf("acquireTorrentMetadata: active job lookup failed for job %s (infoHash=%s): %v", jobID, infoHash, err)
 			// Ownership lookup failed due to DB error. Fail closed without calling RemoveTorrent to prevent deleting an existing active torrent.
+			errText := fmt.Sprintf("failed to verify torrent ownership: %v", err)
 			if createErr := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
 				JobID:           jobID,
 				InfoHash:        infoHash,
 				TorrentFilePath: torrentFilePath,
 			}); createErr != nil {
 				log.Printf("acquireTorrentMetadata: failed to save torrent record for job %s: %v", jobID, createErr)
+				errText = fmt.Sprintf("%s; failed to preserve torrent retry metadata: %v", errText, createErr)
 			}
 			j.Status = StatusFailed
-			j.Error = fmt.Sprintf("failed to verify torrent ownership: %v", err)
+			j.Error = errText
 			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
 			m.publish(EventJobFailed, j)
@@ -531,10 +533,7 @@ loop:
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("acquireTorrentMetadata: job %s cancelled during polling", jobID)
-			if infoHash != "" {
-				torrentEng.RemoveTorrent(context.Background(), infoHash, false)
-			}
+			log.Printf("acquireTorrentMetadata: job %s background task cancelled", jobID)
 			return
 		case <-timeoutCh:
 			break loop
@@ -542,9 +541,6 @@ loop:
 			current, err := m.repo.GetByID(ctx, jobID)
 			if err != nil || current == nil || current.Status == StatusCancelled {
 				log.Printf("acquireTorrentMetadata: job %s cancelled in DB", jobID)
-				if infoHash != "" {
-					torrentEng.RemoveTorrent(context.Background(), infoHash, false)
-				}
 				return
 			}
 
@@ -573,7 +569,6 @@ loop:
 	current, err := m.repo.GetByID(ctx, jobID)
 	if err != nil || current == nil || current.Status == StatusCancelled {
 		log.Printf("acquireTorrentMetadata: job %s was cancelled before completion", jobID)
-		torrentEng.RemoveTorrent(ctx, infoHash, false)
 		return
 	}
 
@@ -861,10 +856,7 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot cancel a %s job", j.Status)}
 	}
 
-	// Trigger any active background task (e.g. analysis/metadata polling)
-	m.triggerCancel(id)
-
-	// If job has an EngineID, cancel in engine and enforce success
+	// If job has an EngineID, cancel in engine first and enforce success
 	if j.EngineID != "" {
 		eng, ok := m.engines.Get(j.Engine)
 		if !ok {
@@ -875,6 +867,9 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 			return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine cancel failed: %v", err)}
 		}
 	}
+
+	// Trigger local background task cancellation AFTER successful engine cancellation (or if no EngineID exists)
+	m.triggerCancel(id)
 
 	j.Status = StatusCancelled
 	j.SpeedBytesPerSecond = 0

@@ -79,6 +79,16 @@ type fakeTorrentEngine struct {
 	statusFunc         func(ctx context.Context, j *Job) (*EngineStatus, error)
 }
 
+func (f *fakeTorrentEngine) Cancel(ctx context.Context, j *Job) error {
+	if f.cancelFunc != nil {
+		return f.cancelFunc(ctx, j)
+	}
+	if f.removeTorrentFunc != nil && j.EngineID != "" {
+		return f.removeTorrentFunc(j.EngineID, false)
+	}
+	return nil
+}
+
 func (f *fakeTorrentEngine) Status(ctx context.Context, j *Job) (*EngineStatus, error) {
 	if f.statusFunc != nil {
 		return f.statusFunc(ctx, j)
@@ -1736,6 +1746,149 @@ func TestManager_SeedPolicyGuard(t *testing.T) {
 		gotJ, _ := m.repo.GetByID(ctx, j.ID)
 		if gotJ.Status != StatusCompleted {
 			t.Errorf("expected job to transition to StatusCompleted, got %s", gotJ.Status)
+		}
+	})
+}
+
+func TestManager_StopPreservesDaemonTorrent(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var removeCalls int
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalls++
+		return nil
+	}
+
+	j := &Job{
+		ID:        "job_stop_test",
+		Source:    "magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+		Status:    StatusAnalyzing,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "1111111111111111111111111111111111111111",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+
+	var cancelCalled bool
+	m.registerCancel(j.ID, func() {
+		cancelCalled = true
+	})
+
+	// Perform backend shutdown
+	m.Stop()
+
+	if !cancelCalled {
+		t.Error("expected Manager.Stop() to invoke local cancel callback")
+	}
+	if removeCalls != 0 {
+		t.Errorf("RemoveTorrent must NOT be called on backend shutdown, got %d calls", removeCalls)
+	}
+
+	gotJ, _ := m.repo.GetByID(ctx, j.ID)
+	if gotJ.Status != StatusAnalyzing {
+		t.Errorf("expected job status to remain StatusAnalyzing on backend shutdown, got %s", gotJ.Status)
+	}
+}
+
+func TestManager_CancelOrderingAndErrorHandling(t *testing.T) {
+	t.Run("Engine cancel failure does not trigger local cancel or mark job cancelled", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var removeCalls int
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			removeCalls++
+			return fmt.Errorf("qBittorrent API error")
+		}
+
+		j := &Job{
+			ID:        "job_order_fail",
+			Source:    "magnet:?xt=urn:btih:2222222222222222222222222222222222222222",
+			Status:    StatusDownloading,
+			Type:      TypeTorrent,
+			Engine:    "qbittorrent",
+			EngineID:  "2222222222222222222222222222222222222222",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		m.repo.Create(ctx, j)
+		m.addActive(j)
+
+		var localCancelCalled bool
+		m.registerCancel(j.ID, func() {
+			localCancelCalled = true
+		})
+
+		_, err := m.Cancel(ctx, j.ID)
+		if err == nil {
+			t.Fatal("expected Cancel to fail when engine cancel returns error")
+		}
+		if localCancelCalled {
+			t.Error("local cancel callback must NOT be triggered when engine cancel fails")
+		}
+		if removeCalls != 1 {
+			t.Errorf("expected RemoveTorrent to be attempted exactly once, got %d", removeCalls)
+		}
+
+		gotJ, _ := m.repo.GetByID(ctx, j.ID)
+		if gotJ.Status != StatusDownloading {
+			t.Errorf("expected job status to remain StatusDownloading, got %s", gotJ.Status)
+		}
+	})
+
+	t.Run("Successful cancel invokes engine cancel FIRST then local cancel", func(t *testing.T) {
+		m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		var sequence []string
+		var mu sync.Mutex
+
+		fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+			mu.Lock()
+			sequence = append(sequence, "engine")
+			mu.Unlock()
+			return nil
+		}
+
+		j := &Job{
+			ID:        "job_order_succ",
+			Source:    "magnet:?xt=urn:btih:3333333333333333333333333333333333333333",
+			Status:    StatusDownloading,
+			Type:      TypeTorrent,
+			Engine:    "qbittorrent",
+			EngineID:  "3333333333333333333333333333333333333333",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		m.repo.Create(ctx, j)
+		m.addActive(j)
+
+		m.registerCancel(j.ID, func() {
+			mu.Lock()
+			sequence = append(sequence, "local")
+			mu.Unlock()
+		})
+
+		canceledJ, err := m.Cancel(ctx, j.ID)
+		if err != nil {
+			t.Fatalf("expected Cancel to succeed, got %v", err)
+		}
+		if canceledJ.Status != StatusCancelled {
+			t.Errorf("expected status StatusCancelled, got %s", canceledJ.Status)
+		}
+
+		mu.Lock()
+		gotSeq := append([]string(nil), sequence...)
+		mu.Unlock()
+
+		if len(gotSeq) != 2 || gotSeq[0] != "engine" || gotSeq[1] != "local" {
+			t.Errorf("expected sequence [engine, local], got %v", gotSeq)
 		}
 	})
 }

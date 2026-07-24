@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -398,19 +399,116 @@ func TestSQLite_Migrations(t *testing.T) {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(dir)
-	dbPath := filepath.Join(dir, "test_migrations.db")
 
-	// 1. Fresh DB
-	db, err := New(dbPath)
-	if err != nil {
-		t.Fatalf("New() fresh database failed: %v", err)
-	}
-	db.Close()
+	t.Run("Fresh and Reopen DB", func(t *testing.T) {
+		dbPath := filepath.Join(dir, "fresh.db")
+		db, err := New(dbPath)
+		if err != nil {
+			t.Fatalf("New() fresh database failed: %v", err)
+		}
+		db.Close()
 
-	// 2. Reopen existing current DB
-	db, err = New(dbPath)
-	if err != nil {
-		t.Fatalf("New() reopening existing database failed: %v", err)
-	}
-	db.Close()
+		db, err = New(dbPath)
+		if err != nil {
+			t.Fatalf("New() reopening existing database failed: %v", err)
+		}
+		db.Close()
+	})
+
+	t.Run("Migrate V0.1-like schema", func(t *testing.T) {
+		dbPath := filepath.Join(dir, "v01.db")
+		conn, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			t.Fatalf("failed to open v01 db: %v", err)
+		}
+		// Create V0.1 table with legacy columns: aria2_gid, speed, uppercase status
+		v01Table := `CREATE TABLE jobs (
+			id TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'DOWNLOADING',
+			total_bytes INTEGER NOT NULL DEFAULT 0,
+			completed_bytes INTEGER NOT NULL DEFAULT 0,
+			progress REAL NOT NULL DEFAULT 0,
+			speed INTEGER NOT NULL DEFAULT 1024,
+			error TEXT NOT NULL DEFAULT '',
+			aria2_gid TEXT NOT NULL DEFAULT 'gid-v01-123',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);`
+		if _, err := conn.Exec(v01Table); err != nil {
+			t.Fatalf("failed to create V0.1 table: %v", err)
+		}
+		conn.Exec(`INSERT INTO jobs (id, source, name, status, speed, aria2_gid, created_at, updated_at) 
+			VALUES ('job-1', 'http://example.com/file', 'file', 'DOWNLOADING', 1024, 'gid-123', datetime('now'), datetime('now'))`)
+		conn.Close()
+
+		db, err := New(dbPath)
+		if err != nil {
+			t.Fatalf("New() migrate V0.1 DB failed: %v", err)
+		}
+		defer db.Close()
+
+		j, err := db.GetJob("job-1")
+		if err != nil || j == nil {
+			t.Fatalf("failed to read migrated V0.1 job: %v", err)
+		}
+		if j.EngineID != "gid-123" {
+			t.Errorf("expected engine_id 'gid-123', got %q", j.EngineID)
+		}
+		if j.SpeedBytesPerSecond != 1024 {
+			t.Errorf("expected speed_bytes_per_second 1024, got %d", j.SpeedBytesPerSecond)
+		}
+		if j.Status != job.StatusDownloading {
+			t.Errorf("expected status 'downloading', got %s", j.Status)
+		}
+	})
+
+	t.Run("Migrate V0.3-like schema", func(t *testing.T) {
+		dbPath := filepath.Join(dir, "v03.db")
+		conn, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			t.Fatalf("failed to open v03 db: %v", err)
+		}
+		v03Table := `CREATE TABLE jobs (
+			id TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			total_bytes INTEGER NOT NULL DEFAULT 0,
+			completed_bytes INTEGER NOT NULL DEFAULT 0,
+			progress REAL NOT NULL DEFAULT 0,
+			speed_bytes_per_second INTEGER NOT NULL DEFAULT 0,
+			eta_seconds INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			engine TEXT NOT NULL DEFAULT 'aria2',
+			engine_id TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL DEFAULT 'download',
+			media_info TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);`
+		if _, err := conn.Exec(v03Table); err != nil {
+			t.Fatalf("failed to create V0.3 table: %v", err)
+		}
+		conn.Close()
+
+		db, err := New(dbPath)
+		if err != nil {
+			t.Fatalf("New() migrate V0.3 DB failed: %v", err)
+		}
+		defer db.Close()
+
+		// Verify torrent tables & index exist
+		var count int
+		err = db.conn.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('torrent_jobs', 'torrent_files')").Scan(&count)
+		if err != nil || count != 2 {
+			t.Errorf("expected 2 torrent tables after V0.4 migration, got count %d, err=%v", count, err)
+		}
+		var idxCount int
+		err = db.conn.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_torrent_jobs_info_hash'").Scan(&idxCount)
+		if err != nil || idxCount != 1 {
+			t.Errorf("expected idx_torrent_jobs_info_hash index after V0.4 migration, got count %d, err=%v", idxCount, err)
+		}
+	})
 }
