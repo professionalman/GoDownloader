@@ -19,7 +19,7 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
       return;
     }
     
-    if (trimmed.startsWith('magnet:?xt=urn:btih:')) {
+    if (trimmed.toLowerCase().startsWith('magnet:')) {
       // Valid magnet
     } else {
       try {

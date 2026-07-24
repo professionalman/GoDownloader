@@ -80,7 +80,7 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
       {isAnalyzing && !analysisReady && (
         <div className="job-analyzing">
           <span className="analyzing-spinner">⟳</span>
-          <span>Analyzing media...</span>
+          <span>{isTorrentJob ? 'Fetching torrent metadata...' : 'Analyzing media...'}</span>
         </div>
       )}
 
