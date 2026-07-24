@@ -332,7 +332,10 @@ func (m *Manager) createTorrentJobWithID(ctx context.Context, jobID, source, tor
 
 	// Check for duplicate info hash if source is a magnet link
 	if hash, err := ExtractMagnetHash(source); err == nil && hash != "" && m.torrentRepo != nil {
-		rec, _ := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hash)
+		rec, err := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hash)
+		if err != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to verify torrent ownership: %v", err)}
+		}
 		if rec != nil {
 			return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("a torrent with info hash %s is already managed by job %s", hash, rec.JobID)}
 		}
@@ -448,14 +451,31 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 
 	// Authoritative duplicate check: verify if another active job owns this infoHash
 	if m.torrentRepo != nil && infoHash != "" {
-		rec, _ := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, infoHash)
+		rec, err := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, infoHash)
+		if err != nil {
+			log.Printf("acquireTorrentMetadata: active job lookup failed for job %s (infoHash=%s): %v", jobID, infoHash, err)
+			// Ownership lookup failed due to DB error. Fail closed without calling RemoveTorrent to prevent deleting an existing active torrent.
+			m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+				JobID:           jobID,
+				InfoHash:        infoHash,
+				TorrentFilePath: torrentFilePath,
+			})
+			j.Status = StatusFailed
+			j.Error = fmt.Sprintf("failed to verify torrent ownership: %v", err)
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobFailed, j)
+			return
+		}
 		if rec != nil && rec.JobID != jobID {
 			log.Printf("acquireTorrentMetadata: duplicate info hash %s detected for job %s (already managed by active job %s)", infoHash, jobID, rec.JobID)
 			// DO NOT call RemoveTorrent(infoHash) because qBittorrent deduplicates by infoHash!
-			// Calling RemoveTorrent against shared infoHash would delete the original active job's torrent.
-			if torrentFilePath != "" {
-				os.Remove(torrentFilePath)
-			}
+			// DO NOT delete torrentFilePath! Preserve new job's .torrent file and TorrentJobRecord so Retry() remains possible after original job completes.
+			m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+				JobID:           jobID,
+				InfoHash:        infoHash,
+				TorrentFilePath: torrentFilePath,
+			})
 			j.Status = StatusFailed
 			j.Error = fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
 			j.UpdatedAt = time.Now()
