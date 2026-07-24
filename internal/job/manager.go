@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type Manager struct {
 	engines     EngineRegistry
 	bus         EventBus
 	downloadDir string
+	torrentRepo TorrentRepository
 
 	mu         sync.RWMutex
 	activeJobs map[string]*Job // id -> job (in-memory cache for active jobs)
@@ -27,12 +29,13 @@ type Manager struct {
 }
 
 // NewManager creates a new job manager.
-func NewManager(repo JobRepository, engines EngineRegistry, bus EventBus, downloadDir string) *Manager {
+func NewManager(repo JobRepository, engines EngineRegistry, bus EventBus, downloadDir string, torrentRepo TorrentRepository) *Manager {
 	m := &Manager{
 		repo:        repo,
 		engines:     engines,
 		bus:         bus,
 		downloadDir: downloadDir,
+		torrentRepo: torrentRepo,
 		activeJobs:  make(map[string]*Job),
 	}
 	return m
@@ -59,6 +62,11 @@ func (m *Manager) Stop() {
 // Create validates the URL, creates a job, and starts the engine download.
 // For media URLs (yt-dlp), the job enters "analyzing" state first.
 func (m *Manager) Create(ctx context.Context, source string) (*Job, error) {
+	// Handle magnet URIs
+	if strings.HasPrefix(strings.ToLower(source), "magnet:") {
+		return m.createTorrentJob(ctx, source, "")
+	}
+
 	// Validate URL
 	u, err := url.ParseRequestURI(source)
 	if err != nil {
@@ -268,6 +276,297 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, 
 	return j, nil
 }
 
+// createTorrentJob creates a new torrent download job.
+func (m *Manager) createTorrentJob(ctx context.Context, source, torrentFilePath string) (*Job, error) {
+	engineName := m.engines.Detect(source)
+	if engineName != "qbittorrent" {
+		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available for torrent downloads"}
+	}
+
+	now := time.Now()
+	j := &Job{
+		ID:        "job_" + uuid.New().String()[:8],
+		Source:    source,
+		Name:      "Fetching metadata...",
+		Status:    StatusAnalyzing,
+		Type:      TypeTorrent,
+		Engine:    engineName,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := m.repo.Create(ctx, j); err != nil {
+		return nil, fmt.Errorf("persist job: %w", err)
+	}
+
+	m.publish(EventJobCreated, j)
+
+	// Run metadata acquisition in background
+	go m.acquireTorrentMetadata(j.ID, source, torrentFilePath)
+
+	return j, nil
+}
+
+// CreateTorrentFromFile creates a torrent job from an uploaded .torrent file.
+func (m *Manager) CreateTorrentFromFile(ctx context.Context, torrentFilePath string) (*Job, error) {
+	return m.createTorrentJob(ctx, "torrent://"+torrentFilePath, torrentFilePath)
+}
+
+// acquireTorrentMetadata adds the torrent to qBittorrent and polls for metadata.
+func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) {
+	ctx := context.Background()
+
+	j, err := m.repo.GetByID(ctx, jobID)
+	if err != nil || j == nil {
+		log.Printf("acquireTorrentMetadata: job %s not found", jobID)
+		return
+	}
+
+	eng, ok := m.engines.Get("qbittorrent")
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = "qBittorrent engine not available"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
+	torrentEng, ok := eng.(TorrentEngine)
+	if !ok {
+		j.Status = StatusFailed
+		j.Error = "qBittorrent engine does not support torrent operations"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
+	// Add torrent to qBittorrent (stopped)
+	var infoHash string
+	if torrentFilePath != "" {
+		infoHash, err = torrentEng.AddTorrentFile(ctx, torrentFilePath, m.downloadDir, jobID)
+	} else {
+		infoHash, err = torrentEng.AddMagnet(ctx, source, m.downloadDir, jobID)
+	}
+	if err != nil {
+		j.Status = StatusFailed
+		j.Error = fmt.Sprintf("Failed to add torrent: %v", err)
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		return
+	}
+
+	j.EngineID = infoHash
+	j.UpdatedAt = time.Now()
+	m.repo.Update(ctx, j)
+
+	// Poll for metadata (torrent name, file list)
+	// qBittorrent fetches metadata from peers for magnet links
+	var metadata *TorrentInfo
+	for attempt := 0; attempt < 120; attempt++ { // ~2 minutes timeout
+		time.Sleep(1 * time.Second)
+
+		info, err := torrentEng.GetTorrentInfo(ctx, infoHash)
+		if err != nil {
+			continue
+		}
+		if info != nil && info.Name != "" && info.Name != infoHash {
+			metadata = info
+			break
+		}
+	}
+
+	if metadata == nil {
+		j.Status = StatusFailed
+		j.Error = "Timed out waiting for torrent metadata from peers"
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobFailed, j)
+		// Clean up from qBittorrent
+		torrentEng.RemoveTorrent(ctx, infoHash, false)
+		return
+	}
+
+	// Save torrent info
+	j.Name = metadata.Name
+	j.TorrentInfo = metadata
+	j.TotalBytes = metadata.TotalSize
+	j.Status = StatusAwaitingSelection
+	j.UpdatedAt = time.Now()
+	m.repo.Update(ctx, j)
+
+	// Save torrent job record
+	if m.torrentRepo != nil {
+		m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+			JobID:             jobID,
+			InfoHash:          infoHash,
+			Name:              metadata.Name,
+			TotalSize:         metadata.TotalSize,
+		})
+
+		// Fetch and save file list
+		files, err := torrentEng.GetFiles(ctx, infoHash)
+		if err == nil && len(files) > 0 {
+			var records []TorrentFileRecord
+			for _, f := range files {
+				records = append(records, TorrentFileRecord{
+					JobID:     jobID,
+					FileIndex: f.Index,
+					Path:      f.Path,
+					Size:      f.Size,
+					Selected:  true,
+					Priority:  string(PriorityNormal),
+				})
+			}
+			m.torrentRepo.SaveTorrentFiles(ctx, jobID, records)
+		}
+	}
+
+	m.publish(EventJobUpdated, j)
+	log.Printf("acquireTorrentMetadata: job %s metadata acquired: %s (%d files)", jobID, metadata.Name, 0)
+}
+
+// StartTorrent starts a torrent download after file selection.
+func (m *Manager) StartTorrent(ctx context.Context, id string, selections []TorrentFileSelection, seedAfterComplete bool) (*Job, error) {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if j.Type != TypeTorrent {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "torrent operations are only available for torrent jobs"}
+	}
+
+	if j.Status != StatusAwaitingSelection {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot start torrent from %s state", j.Status)}
+	}
+
+	// Validate at least one file is selected
+	hasSelected := false
+	for _, s := range selections {
+		if s.Priority != PrioritySkip {
+			hasSelected = true
+			break
+		}
+	}
+	if !hasSelected {
+		return nil, &AppError{Code: ErrNoFilesSelected, Message: "at least one file must be selected"}
+	}
+
+	eng, ok := m.engines.Get("qbittorrent")
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available"}
+	}
+
+	torrentEng, ok := eng.(TorrentEngine)
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
+	}
+
+	// Apply file priorities
+	if err := torrentEng.SetFilePriorities(ctx, j.EngineID, selections); err != nil {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
+	}
+
+	// Start the torrent
+	if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to start torrent: %v", err)}
+	}
+
+	j.SeedAfterComplete = seedAfterComplete
+	j.Status = StatusDownloading
+	j.UpdatedAt = time.Now()
+	m.repo.Update(ctx, j)
+
+	// Save selections to DB
+	if m.torrentRepo != nil {
+		var records []TorrentFileRecord
+		for _, s := range selections {
+			records = append(records, TorrentFileRecord{
+				FileIndex: s.Index,
+				Selected:  s.Priority != PrioritySkip,
+				Priority:  string(s.Priority),
+			})
+		}
+		m.torrentRepo.UpdateTorrentFileSelections(ctx, id, records)
+
+		// Update seed preference
+		rec, _ := m.torrentRepo.GetTorrentJob(ctx, id)
+		if rec != nil {
+			rec.SeedAfterComplete = seedAfterComplete
+			m.torrentRepo.UpdateTorrentJob(ctx, rec)
+		}
+	}
+
+	m.addActive(j)
+	m.publish(EventJobUpdated, j)
+
+	return j, nil
+}
+
+// StopSeeding stops seeding a completed torrent and marks it completed.
+func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if j.Status != StatusSeeding {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot stop seeding a %s job", j.Status)}
+	}
+
+	eng, ok := m.engines.Get(j.Engine)
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "engine not available"}
+	}
+
+	torrentEng, ok := eng.(TorrentEngine)
+	if ok {
+		torrentEng.StopDownload(ctx, j.EngineID)
+	}
+
+	j.Status = StatusCompleted
+	j.Progress = 100
+	j.SpeedBytesPerSecond = 0
+	j.ETASeconds = 0
+	j.UpdatedAt = time.Now()
+	m.repo.Update(ctx, j)
+	m.removeActive(j.ID)
+	m.publish(EventJobCompleted, j)
+
+	return j, nil
+}
+
+// GetTorrentFiles returns the file list for a torrent job.
+func (m *Manager) GetTorrentFiles(ctx context.Context, id string) ([]TorrentFile, error) {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if j.Type != TypeTorrent {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "not a torrent job"}
+	}
+
+	if j.EngineID == "" {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "torrent metadata not yet available"}
+	}
+
+	eng, ok := m.engines.Get("qbittorrent")
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available"}
+	}
+
+	torrentEng, ok := eng.(TorrentEngine)
+	if !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
+	}
+
+	return torrentEng.GetFiles(ctx, j.EngineID)
+}
+
 // Pause pauses an active download.
 func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
@@ -341,6 +640,15 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot cancel a %s job", j.Status)}
 	}
 
+	// For torrent jobs, also remove from qBittorrent
+	if j.Type == TypeTorrent && j.EngineID != "" {
+		if eng, ok := m.engines.Get(j.Engine); ok {
+			if te, ok := eng.(TorrentEngine); ok {
+				te.RemoveTorrent(ctx, j.EngineID, false)
+			}
+		}
+	}
+
 	// Try to cancel in engine (ignore errors for idempotency)
 	if j.EngineID != "" {
 		if eng, ok := m.engines.Get(j.Engine); ok {
@@ -394,6 +702,28 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		m.publish(EventJobUpdated, j)
 
 		go m.analyzeMedia(ctx, j.ID, j.Source)
+		return j, nil
+	}
+
+	// For torrent jobs, restart metadata acquisition
+	if j.Type == TypeTorrent {
+		j.Status = StatusAnalyzing
+		j.Name = "Fetching metadata..."
+		j.TorrentInfo = nil
+		j.EngineID = ""
+		j.UpdatedAt = time.Now()
+		m.repo.Update(ctx, j)
+		m.publish(EventJobUpdated, j)
+
+		torrentFilePath := ""
+		if m.torrentRepo != nil {
+			rec, _ := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+			if rec != nil {
+				torrentFilePath = rec.TorrentFilePath
+			}
+		}
+
+		go m.acquireTorrentMetadata(j.ID, j.Source, torrentFilePath)
 		return j, nil
 	}
 
@@ -473,6 +803,18 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 
 	switch status.Status {
 	case StatusCompleted:
+		// For torrent jobs with seed-after-complete, transition to seeding instead
+		if j.Type == TypeTorrent && j.SeedAfterComplete && prevStatus == StatusDownloading {
+			j.Status = StatusSeeding
+			j.Progress = 100
+			j.SpeedBytesPerSecond = status.UploadSpeed
+			j.ETASeconds = 0
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobUpdated, j)
+			return
+		}
+		// Normal completion
 		j.Status = StatusCompleted
 		j.Progress = 100
 		j.SpeedBytesPerSecond = 0
@@ -523,6 +865,37 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			j.ETASeconds = 0
 			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
+			m.publish(EventJobUpdated, j)
+		}
+		return
+
+	case StatusSeeding:
+		if prevStatus != StatusSeeding {
+			j.Status = StatusSeeding
+			j.Progress = 100
+			j.SpeedBytesPerSecond = status.UploadSpeed
+			j.ETASeconds = 0
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			// Keep in activeJobs for monitoring
+			m.publish(EventJobUpdated, j)
+		} else {
+			// Update upload stats while seeding
+			if j.TorrentInfo != nil {
+				j.TorrentInfo.UploadSpeed = status.UploadSpeed
+				j.TorrentInfo.Uploaded = status.Uploaded
+				j.TorrentInfo.Ratio = status.Ratio
+				j.TorrentInfo.Seeders = status.Seeders
+				j.TorrentInfo.Leechers = status.Leechers
+			}
+			j.SpeedBytesPerSecond = status.UploadSpeed
+			j.UpdatedAt = time.Now()
+			if persistNow {
+				m.repo.Update(ctx, j)
+			}
+			m.mu.Lock()
+			m.activeJobs[j.ID] = j
+			m.mu.Unlock()
 			m.publish(EventJobUpdated, j)
 		}
 		return

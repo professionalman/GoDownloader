@@ -27,6 +27,12 @@ func TestValidateTransition_Valid(t *testing.T) {
 		{StatusPaused, StatusDownloading},
 		{StatusPaused, StatusCancelled},
 		{StatusFailed, StatusQueued},
+		{StatusAnalyzing, StatusAwaitingSelection},
+		{StatusAwaitingSelection, StatusDownloading},
+		{StatusAwaitingSelection, StatusCancelled},
+		{StatusDownloading, StatusSeeding},
+		{StatusSeeding, StatusCompleted},
+		{StatusSeeding, StatusFailed},
 	}
 
 	for _, tt := range valid {
@@ -45,6 +51,8 @@ func TestValidateTransition_Invalid(t *testing.T) {
 		{StatusCancelled, StatusDownloading},
 		{StatusCancelled, StatusPaused},
 		{StatusQueued, StatusCompleted},
+		{StatusAwaitingSelection, StatusCompleted},
+		{StatusSeeding, StatusDownloading},
 	}
 
 	for _, tt := range invalid {
@@ -115,6 +123,9 @@ func TestIsActive(t *testing.T) {
 	if IsActive(StatusQueued) {
 		t.Errorf("expected queued to NOT be active")
 	}
+	if !IsActive(StatusSeeding) {
+		t.Errorf("expected seeding to be active")
+	}
 }
 
 func TestIsRecoverable(t *testing.T) {
@@ -129,6 +140,12 @@ func TestIsRecoverable(t *testing.T) {
 	}
 	if !IsRecoverable(StatusAnalyzing) {
 		t.Errorf("expected analyzing to be recoverable")
+	}
+	if !IsRecoverable(StatusAwaitingSelection) {
+		t.Errorf("expected awaiting selection to be recoverable")
+	}
+	if !IsRecoverable(StatusSeeding) {
+		t.Errorf("expected seeding to be recoverable")
 	}
 	if IsRecoverable(StatusCompleted) {
 		t.Errorf("expected completed to NOT be recoverable")

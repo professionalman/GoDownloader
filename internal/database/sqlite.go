@@ -64,6 +64,7 @@ func (db *DB) migrate() error {
 	db.migrateFromV01()
 
 	db.migrateToV03()
+	db.migrateToV04()
 
 	return nil
 }
@@ -162,6 +163,34 @@ func (db *DB) migrateToV03() {
 	if !hasMediaInfo {
 		db.conn.Exec("ALTER TABLE jobs ADD COLUMN media_info TEXT NOT NULL DEFAULT ''")
 	}
+}
+
+func (db *DB) migrateToV04() {
+	// Create torrent_jobs table
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS torrent_jobs (
+		job_id TEXT PRIMARY KEY,
+		info_hash TEXT NOT NULL DEFAULT '',
+		name TEXT NOT NULL DEFAULT '',
+		total_size INTEGER NOT NULL DEFAULT 0,
+		seed_after_complete INTEGER NOT NULL DEFAULT 0,
+		torrent_file_path TEXT NOT NULL DEFAULT '',
+		FOREIGN KEY (job_id) REFERENCES jobs(id)
+	)`)
+
+	// Create torrent_files table
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS torrent_files (
+		job_id TEXT NOT NULL,
+		file_index INTEGER NOT NULL,
+		path TEXT NOT NULL DEFAULT '',
+		size INTEGER NOT NULL DEFAULT 0,
+		selected INTEGER NOT NULL DEFAULT 1,
+		priority TEXT NOT NULL DEFAULT 'normal',
+		PRIMARY KEY (job_id, file_index),
+		FOREIGN KEY (job_id) REFERENCES jobs(id)
+	)`)
+
+	// Add index for looking up torrent jobs by info_hash
+	db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_torrent_jobs_info_hash ON torrent_jobs(info_hash)`)
 }
 
 // Conn returns the underlying sql.DB connection.

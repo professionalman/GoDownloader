@@ -12,14 +12,17 @@ const (
 	StatusCompleted   JobStatus = "completed"
 	StatusFailed      JobStatus = "failed"
 	StatusCancelled   JobStatus = "cancelled"
-	StatusAnalyzing   JobStatus = "analyzing"
-	StatusProcessing  JobStatus = "processing"
+	StatusAnalyzing         JobStatus = "analyzing"
+	StatusProcessing        JobStatus = "processing"
+	StatusAwaitingSelection JobStatus = "awaiting_selection"
+	StatusSeeding           JobStatus = "seeding"
 )
 
 // JobType classifies the download engine strategy.
 const (
 	TypeDownload = "download" // Direct file download via aria2
 	TypeMedia    = "media"    // Media extraction via yt-dlp
+	TypeTorrent  = "torrent"  // Torrent download via qBittorrent
 )
 
 // MediaFormat describes a single available format from a media source.
@@ -45,6 +48,53 @@ type MediaInfo struct {
 	SelectedFmt string        `json:"selectedFormat,omitempty"`
 }
 
+// TorrentFilePriority represents the priority level for a torrent file.
+type TorrentFilePriority string
+
+const (
+	PrioritySkip    TorrentFilePriority = "skip"
+	PriorityNormal  TorrentFilePriority = "normal"
+	PriorityHigh    TorrentFilePriority = "high"
+	PriorityMaximum TorrentFilePriority = "maximum"
+)
+
+// ValidPriority returns true if the priority value is valid.
+func ValidPriority(p TorrentFilePriority) bool {
+	switch p {
+	case PrioritySkip, PriorityNormal, PriorityHigh, PriorityMaximum:
+		return true
+	}
+	return false
+}
+
+// TorrentInfo holds normalized torrent metadata owned by GoDownloader.
+type TorrentInfo struct {
+	Name        string  `json:"name"`
+	InfoHash    string  `json:"infoHash"`
+	TotalSize   int64   `json:"totalSize"`
+	Seeders     int     `json:"seeders"`
+	Leechers    int     `json:"leechers"`
+	Uploaded    int64   `json:"uploaded"`
+	UploadSpeed int64   `json:"uploadSpeed"`
+	Ratio       float64 `json:"ratio"`
+}
+
+// TorrentFile represents a single file within a torrent.
+type TorrentFile struct {
+	Index    int                 `json:"index"`
+	Path     string              `json:"path"`
+	Size     int64               `json:"size"`
+	Progress float64             `json:"progress"`
+	Priority TorrentFilePriority `json:"priority"`
+	Selected bool                `json:"selected"`
+}
+
+// TorrentFileSelection represents a user's file selection with priority.
+type TorrentFileSelection struct {
+	Index    int                 `json:"index"`
+	Priority TorrentFilePriority `json:"priority"`
+}
+
 // Job represents a single download task.
 type Job struct {
 	ID     string `json:"id"`
@@ -67,6 +117,9 @@ type Job struct {
 	EngineID string `json:"-"`
 
 	MediaInfo *MediaInfo `json:"mediaInfo,omitempty"`
+
+	TorrentInfo       *TorrentInfo `json:"torrentInfo,omitempty"`
+	SeedAfterComplete bool         `json:"seedAfterComplete,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

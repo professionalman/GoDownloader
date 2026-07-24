@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -59,6 +60,77 @@ func (f *fakeEngine) Get(name string) (Engine, bool) {
 }
 
 func (f *fakeEngine) Detect(url string) string {
+	if strings.HasPrefix(url, "magnet:") || strings.HasPrefix(url, "torrent://") {
+		return "qbittorrent"
+	}
+	return "aria2"
+}
+
+type fakeTorrentEngine struct {
+	*fakeEngine
+	addMagnetFunc      func(magnet string) (string, error)
+	getFilesFunc       func(hash string) ([]TorrentFile, error)
+	setPrioritiesFunc  func(hash string) error
+	startDownloadFunc  func(hash string) error
+	getTorrentInfoFunc func(hash string) (*TorrentInfo, error)
+}
+
+func (f *fakeTorrentEngine) AddMagnet(ctx context.Context, magnet, savePath, jobID string) (string, error) {
+	if f.addMagnetFunc != nil {
+		return f.addMagnetFunc(magnet)
+	}
+	return "fake-hash", nil
+}
+func (f *fakeTorrentEngine) AddTorrentFile(ctx context.Context, filePath, savePath, jobID string) (string, error) {
+	return "fake-hash", nil
+}
+func (f *fakeTorrentEngine) GetFiles(ctx context.Context, infoHash string) ([]TorrentFile, error) {
+	if f.getFilesFunc != nil {
+		return f.getFilesFunc(infoHash)
+	}
+	return []TorrentFile{}, nil
+}
+func (f *fakeTorrentEngine) SetFilePriorities(ctx context.Context, infoHash string, selections []TorrentFileSelection) error {
+	if f.setPrioritiesFunc != nil {
+		return f.setPrioritiesFunc(infoHash)
+	}
+	return nil
+}
+func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) error {
+	if f.startDownloadFunc != nil {
+		return f.startDownloadFunc(infoHash)
+	}
+	return nil
+}
+func (f *fakeTorrentEngine) StopDownload(ctx context.Context, infoHash string) error {
+	return nil
+}
+func (f *fakeTorrentEngine) RemoveTorrent(ctx context.Context, infoHash string, deleteFiles bool) error {
+	return nil
+}
+func (f *fakeTorrentEngine) GetTorrentInfo(ctx context.Context, infoHash string) (*TorrentInfo, error) {
+	if f.getTorrentInfoFunc != nil {
+		return f.getTorrentInfoFunc(infoHash)
+	}
+	return &TorrentInfo{Name: "fake-torrent", TotalSize: 100}, nil
+}
+func (f *fakeTorrentEngine) HealthCheck(ctx context.Context) error {
+	return nil
+}
+
+type fakeEngineRegistry struct {
+	engines map[string]Engine
+}
+
+func (r *fakeEngineRegistry) Get(name string) (Engine, bool) {
+	e, ok := r.engines[name]
+	return e, ok
+}
+
+func (r *fakeEngineRegistry) Detect(url string) string {
+	if strings.HasPrefix(url, "magnet:") || strings.HasPrefix(url, "torrent://") {
+		return "qbittorrent"
+	}
 	return "aria2"
 }
 
@@ -150,26 +222,35 @@ func (f *fakeEventBus) Subscribe() <-chan Event {
 func (f *fakeEventBus) Unsubscribe(ch <-chan Event) {
 }
 
-func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func()) {
+func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func(), *fakeTorrentEngine) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	repo := newFakeJobRepository()
 	fakeEng := &fakeEngine{}
+	fakeTorrentEng := &fakeTorrentEngine{fakeEngine: fakeEng}
+	
+	registry := &fakeEngineRegistry{
+		engines: map[string]Engine{
+			"aria2":       fakeEng,
+			"qbittorrent": fakeTorrentEng,
+		},
+	}
+	
 	bus := newFakeEventBus()
 	downloadDir := filepath.Join(tmpDir, "downloads")
 	os.MkdirAll(downloadDir, 0755)
 
-	m := NewManager(repo, fakeEng, bus, downloadDir)
+	m := NewManager(repo, registry, bus, downloadDir, nil)
 
 	cleanup := func() {
 		os.RemoveAll(tmpDir)
 	}
 
-	return m, fakeEng, bus, cleanup
+	return m, fakeEng, bus, cleanup, fakeTorrentEng
 }
 
 func TestManager_Create(t *testing.T) {
-	m, _, bus, cleanup := setupManagerTest(t)
+	m, _, bus, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -203,7 +284,7 @@ func TestManager_Create(t *testing.T) {
 }
 
 func TestManager_Create_InvalidURL(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -219,7 +300,7 @@ func TestManager_Create_InvalidURL(t *testing.T) {
 }
 
 func TestManager_Pause(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -235,7 +316,7 @@ func TestManager_Pause(t *testing.T) {
 }
 
 func TestManager_Resume(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -252,7 +333,7 @@ func TestManager_Resume(t *testing.T) {
 }
 
 func TestManager_Cancel(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -268,7 +349,7 @@ func TestManager_Cancel(t *testing.T) {
 }
 
 func TestManager_Retry(t *testing.T) {
-	m, fakeEng, _, cleanup := setupManagerTest(t)
+	m, fakeEng, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -307,7 +388,7 @@ func TestManager_Retry(t *testing.T) {
 }
 
 func TestManager_InvalidStateTransition(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -328,7 +409,7 @@ func TestManager_InvalidStateTransition(t *testing.T) {
 }
 
 func TestManager_EngineFailure(t *testing.T) {
-	m, fakeEng, _, cleanup := setupManagerTest(t)
+	m, fakeEng, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -346,7 +427,7 @@ func TestManager_EngineFailure(t *testing.T) {
 }
 
 func TestManager_List(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -363,7 +444,7 @@ func TestManager_List(t *testing.T) {
 }
 
 func TestManager_Get_NotFound(t *testing.T) {
-	m, _, _, cleanup := setupManagerTest(t)
+	m, _, _, cleanup, _ := setupManagerTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -373,5 +454,90 @@ func TestManager_Get_NotFound(t *testing.T) {
 	}
 	if j != nil {
 		t.Errorf("expected nil, got %v", j)
+	}
+}
+
+func TestManager_CreateMagnet(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+		return "1234abcd", nil
+	}
+	fakeTorrent.getTorrentInfoFunc = func(hash string) (*TorrentInfo, error) {
+		return &TorrentInfo{Name: "test.iso", TotalSize: 1024}, nil
+	}
+
+	j, err := m.Create(ctx, "magnet:?xt=urn:btih:1234abcd")
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if j.Type != TypeTorrent {
+		t.Errorf("expected TypeTorrent, got %s", j.Type)
+	}
+	if j.Status != StatusAnalyzing {
+		t.Errorf("expected StatusAnalyzing, got %s", j.Status)
+	}
+	
+	// Wait a moment for background metadata acquisition to finish
+	time.Sleep(1500 * time.Millisecond)
+
+	updatedJ, _ := m.Get(ctx, j.ID)
+	if updatedJ.Status != StatusAwaitingSelection {
+		t.Errorf("expected StatusAwaitingSelection, got %s", updatedJ.Status)
+	}
+	if updatedJ.Name != "test.iso" {
+		t.Errorf("expected test.iso, got %s", updatedJ.Name)
+	}
+	if updatedJ.EngineID != "1234abcd" {
+		t.Errorf("expected 1234abcd, got %s", updatedJ.EngineID)
+	}
+}
+
+func TestManager_StartTorrent(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+		return "1234abcd", nil
+	}
+	fakeTorrent.getTorrentInfoFunc = func(hash string) (*TorrentInfo, error) {
+		return &TorrentInfo{Name: "test.iso", TotalSize: 1024}, nil
+	}
+
+	j, _ := m.Create(ctx, "magnet:?xt=urn:btih:1234abcd")
+	
+	time.Sleep(1500 * time.Millisecond) // await analysis
+
+	var prioritiesSet bool
+	fakeTorrent.setPrioritiesFunc = func(hash string) error {
+		prioritiesSet = true
+		return nil
+	}
+	var started bool
+	fakeTorrent.startDownloadFunc = func(hash string) error {
+		started = true
+		return nil
+	}
+
+	selections := []TorrentFileSelection{
+		{Index: 0, Priority: PriorityNormal},
+	}
+
+	startedJ, err := m.StartTorrent(ctx, j.ID, selections, true)
+	if err != nil {
+		t.Fatalf("StartTorrent failed: %v", err)
+	}
+
+	if startedJ.Status != StatusDownloading {
+		t.Errorf("expected StatusDownloading, got %s", startedJ.Status)
+	}
+	if !prioritiesSet {
+		t.Errorf("expected priorities to be set")
+	}
+	if !started {
+		t.Errorf("expected download to be started")
 	}
 }

@@ -67,6 +67,14 @@ func (r *Registry) Get(name string) (job.Engine, bool) {
 
 // Detect determines which engine should handle the given URL.
 func (r *Registry) Detect(rawURL string) string {
+	// Check for magnet URI
+	if strings.HasPrefix(strings.ToLower(rawURL), "magnet:") {
+		if _, ok := r.engines["qbittorrent"]; ok {
+			return "qbittorrent"
+		}
+		return "aria2" // fallback
+	}
+
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "aria2"

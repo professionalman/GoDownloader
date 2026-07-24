@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/gorilla/mux"
 
@@ -166,6 +169,107 @@ func (h *Handler) SelectFormat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, j)
+}
+
+// startTorrentRequest is the request body for POST /api/v1/jobs/{id}/torrent/start.
+type startTorrentRequest struct {
+	Files             []job.TorrentFileSelection `json:"files"`
+	SeedAfterComplete bool                       `json:"seedAfterComplete"`
+}
+
+// GetTorrentFiles handles GET /api/v1/jobs/{id}/torrent/files
+func (h *Handler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	files, err := h.manager.GetTorrentFiles(r.Context(), id)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, files)
+}
+
+// StartTorrent handles POST /api/v1/jobs/{id}/torrent/start
+func (h *Handler) StartTorrent(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	var req startTorrentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	if len(req.Files) == 0 {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "file selections are required")
+		return
+	}
+
+	j, err := h.manager.StartTorrent(r.Context(), id, req.Files, req.SeedAfterComplete)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, j)
+}
+
+// StopSeeding handles POST /api/v1/jobs/{id}/stop-seeding
+func (h *Handler) StopSeeding(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	j, err := h.manager.StopSeeding(r.Context(), id)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, j)
+}
+
+// CreateTorrentJob handles POST /api/v1/jobs/torrent for .torrent file uploads
+func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
+	// Parse multipart form (max 10MB)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid multipart form")
+		return
+	}
+
+	file, header, err := r.FormFile("torrent")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidTorrentFile, "torrent file is required")
+		return
+	}
+	defer file.Close()
+
+	// Validate file extension
+	if !strings.HasSuffix(strings.ToLower(header.Filename), ".torrent") {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidTorrentFile, "file must have .torrent extension")
+		return
+	}
+
+	// Save to temp location
+	// Use the data dir from config (we'll need to get it from somewhere)
+	// For now, save to a temp file
+	tmpFile, err := os.CreateTemp("", "godownloader-*.torrent")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to save torrent file")
+		return
+	}
+	defer tmpFile.Close()
+
+	if _, err := io.Copy(tmpFile, file); err != nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to save torrent file")
+		return
+	}
+
+	j, err := h.manager.CreateTorrentFromFile(r.Context(), tmpFile.Name())
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, j)
 }
 
 // --- helpers ---

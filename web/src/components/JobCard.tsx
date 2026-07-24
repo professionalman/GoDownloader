@@ -9,6 +9,8 @@ interface JobCardProps {
   onRetry?: (id: string) => void;
   onOpenFolder?: () => void;
   onSelectFormat?: (id: string) => void;
+  onSelectTorrentFiles?: (id: string) => void;
+  onStopSeeding?: (id: string) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -36,7 +38,7 @@ function formatETA(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
-export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResume, onRetry, onOpenFolder, onSelectFormat }) => {
+export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResume, onRetry, onOpenFolder, onSelectFormat, onSelectTorrentFiles, onStopSeeding }) => {
   const isDownloading = job.status === 'downloading';
   const isQueued = job.status === 'queued';
   const isPaused = job.status === 'paused';
@@ -44,8 +46,11 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
   const isFailed = job.status === 'failed';
   const isAnalyzing = job.status === 'analyzing';
   const isProcessing = job.status === 'processing';
-  const isActive = isDownloading || isQueued;
+  const isAwaitingSelection = job.status === 'awaiting_selection';
+  const isSeeding = job.status === 'seeding';
+  const isActive = isDownloading || isQueued || isSeeding;
   const isMediaJob = job.type === 'media';
+  const isTorrentJob = job.type === 'torrent';
 
   // Analysis is complete when mediaInfo has formats
   const analysisReady = isAnalyzing && job.mediaInfo && job.mediaInfo.formats && job.mediaInfo.formats.length > 0;
@@ -66,7 +71,8 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
         </div>
         <div className="job-badges">
           {isMediaJob && <span className="job-engine-badge">🎬 Media</span>}
-          <span className={`job-status status-${job.status}`}>{job.status}</span>
+          {isTorrentJob && <span className="job-engine-badge">🧲 Torrent</span>}
+          <span className={`job-status status-${job.status}`}>{job.status.replace('_', ' ')}</span>
         </div>
       </div>
 
@@ -90,6 +96,18 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
         </div>
       )}
 
+      {/* Awaiting file selection state (Torrent) */}
+      {isAwaitingSelection && onSelectTorrentFiles && (
+        <div className="job-analyzing-ready">
+          <span className="analyzing-ready-text">
+            Torrent metadata loaded
+          </span>
+          <button className="btn btn-primary btn-sm" onClick={() => onSelectTorrentFiles(job.id)}>
+            🎬 Select Files
+          </button>
+        </div>
+      )}
+
       {/* Processing state (FFmpeg) */}
       {isProcessing && (
         <div className="job-processing">
@@ -102,8 +120,8 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
         </div>
       )}
 
-      {/* Progress bar for downloading, queued, and paused jobs */}
-      {(isActive || isPaused) && (
+      {/* Progress bar for downloading, queued, paused, and seeding jobs */}
+      {(isActive || isPaused) && !isSeeding && (
         <>
           <div className="progress-bar-container">
             <div
@@ -123,6 +141,35 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
               </>
             )}
             {isPaused && <span className="job-paused-label">Paused</span>}
+            {isTorrentJob && job.torrentInfo && isDownloading && (
+              <span className="job-torrent-peers">
+                Peers: {job.torrentInfo.seeders} S / {job.torrentInfo.leechers} L
+              </span>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Seeding state */}
+      {isSeeding && (
+        <>
+          <div className="progress-bar-container">
+            <div className="progress-bar-fill progress-seeding" style={{ width: '100%' }} />
+          </div>
+          <div className="job-details">
+            <span className="job-progress">100% (Seeding)</span>
+            <span className="job-size">{formatBytes(job.totalBytes)}</span>
+            {job.torrentInfo && (
+              <>
+                <span className="job-speed">↑ {formatSpeed(job.torrentInfo.uploadSpeed)}</span>
+                <span className="job-torrent-peers">
+                  Peers: {job.torrentInfo.seeders} S / {job.torrentInfo.leechers} L
+                </span>
+                <span className="job-torrent-ratio">
+                  Ratio: {job.torrentInfo.ratio.toFixed(2)} (↑ {formatBytes(job.torrentInfo.uploaded)})
+                </span>
+              </>
+            )}
           </div>
         </>
       )}
@@ -142,6 +189,11 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
 
       {/* Actions */}
       <div className="job-actions">
+        {isSeeding && onStopSeeding && (
+          <button className="btn btn-danger btn-sm" onClick={() => onStopSeeding(job.id)}>
+            🛑 Stop Seeding
+          </button>
+        )}
         {isDownloading && onPause && job.type !== 'media' && (
           <button className="btn btn-secondary btn-sm" onClick={() => onPause(job.id)}>
             ⏸ Pause
@@ -152,7 +204,7 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
             ▶ Resume
           </button>
         )}
-        {(isActive || isPaused || isAnalyzing || isProcessing) && onCancel && (
+        {(isActive || isPaused || isAnalyzing || isProcessing || isAwaitingSelection) && !isSeeding && onCancel && (
           <button className="btn btn-danger btn-sm" onClick={() => onCancel(job.id)}>
             ✕ Cancel
           </button>
@@ -162,7 +214,7 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
             ↻ Retry
           </button>
         )}
-        {isCompleted && onOpenFolder && (
+        {(isCompleted || isSeeding) && onOpenFolder && (
           <button className="btn btn-secondary btn-sm" onClick={onOpenFolder}>
             📂 Open Folder
           </button>
@@ -176,3 +228,4 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
     </div>
   );
 };
+

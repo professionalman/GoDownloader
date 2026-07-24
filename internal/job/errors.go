@@ -21,4 +21,13 @@ const (
 	ErrInternalError    = "INTERNAL_ERROR"
 	ErrMediaAnalysis    = "MEDIA_ANALYSIS_ERROR"
 	ErrUnsupportedAction = "UNSUPPORTED_ACTION"
+	ErrQBitUnavailable    = "QBIT_UNAVAILABLE"
+	ErrQBitAuth           = "QBIT_AUTH_FAILED"
+	ErrQBitVersion        = "QBIT_UNSUPPORTED_VERSION"
+	ErrInvalidMagnet      = "INVALID_MAGNET"
+	ErrInvalidTorrentFile = "INVALID_TORRENT_FILE"
+	ErrMetadataTimeout    = "METADATA_TIMEOUT"
+	ErrDuplicateTorrent   = "DUPLICATE_TORRENT"
+	ErrNoFilesSelected    = "NO_FILES_SELECTED"
+	ErrTorrentNotFound    = "TORRENT_NOT_FOUND"
 )

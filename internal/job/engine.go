@@ -16,6 +16,11 @@ type EngineStatus struct {
 
 	Error    string
 	FileName string
+	UploadSpeed int64
+	Uploaded    int64
+	Ratio       float64
+	Seeders     int
+	Leechers    int
 }
 
 // Engine defines the interface for a download engine.
@@ -49,4 +54,36 @@ type EngineRegistry interface {
 
 	// Detect determines which engine should handle the given URL.
 	Detect(url string) string
+}
+
+// TorrentEngine extends Engine with torrent-specific operations.
+type TorrentEngine interface {
+	Engine
+
+	// AddMagnet adds a magnet URI and returns the info hash.
+	AddMagnet(ctx context.Context, magnet, savePath, jobID string) (infoHash string, err error)
+
+	// AddTorrentFile adds a .torrent file and returns the info hash.
+	AddTorrentFile(ctx context.Context, filePath, savePath, jobID string) (infoHash string, err error)
+
+	// GetFiles returns the normalized file list for a torrent.
+	GetFiles(ctx context.Context, infoHash string) ([]TorrentFile, error)
+
+	// SetFilePriorities applies file selections to a torrent.
+	SetFilePriorities(ctx context.Context, infoHash string, selections []TorrentFileSelection) error
+
+	// StartDownload starts/resumes a torrent.
+	StartDownload(ctx context.Context, infoHash string) error
+
+	// StopDownload stops/pauses a torrent.
+	StopDownload(ctx context.Context, infoHash string) error
+
+	// RemoveTorrent removes a torrent from the engine.
+	RemoveTorrent(ctx context.Context, infoHash string, deleteFiles bool) error
+
+	// GetTorrentInfo returns normalized torrent metadata.
+	GetTorrentInfo(ctx context.Context, infoHash string) (*TorrentInfo, error)
+
+	// HealthCheck verifies the engine is reachable and operational.
+	HealthCheck(ctx context.Context) error
 }

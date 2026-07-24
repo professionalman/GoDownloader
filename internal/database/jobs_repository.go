@@ -139,7 +139,7 @@ func (r *SQLiteJobRepository) List(ctx context.Context) ([]job.Job, error) {
 // ListRecoverable returns all jobs that should be recovered on startup.
 // These are jobs with non-terminal, non-failed statuses.
 func (r *SQLiteJobRepository) ListRecoverable(ctx context.Context) ([]job.Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status IN ('queued', 'downloading', 'paused', 'analyzing', 'processing') ORDER BY created_at ASC`, jobColumns)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status IN ('queued', 'downloading', 'paused', 'analyzing', 'processing', 'awaiting_selection', 'seeding') ORDER BY created_at ASC`, jobColumns)
 	rows, err := r.db.conn.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list recoverable jobs: %w", err)

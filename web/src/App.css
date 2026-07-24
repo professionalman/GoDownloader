@@ -402,3 +402,25 @@ body {
   color: #8b949e;
 }
 
+/* Torrent Styles */
+.status-awaiting_selection {
+  background: #2b1d0c;
+  color: #f0b72f;
+}
+
+.status-seeding {
+  background: #3c1e70;
+  color: #bc8cff;
+}
+
+.progress-seeding {
+  background: linear-gradient(90deg, #6e40c9, #8957e5) !important;
+}
+
+.btn-upload-torrent {
+  white-space: nowrap;
+}
+
+.job-torrent-peers, .job-torrent-ratio {
+  color: #8b949e;
+}

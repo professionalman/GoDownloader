@@ -1,0 +1,401 @@
+package qbittorrent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Client struct {
+	baseURL       string
+	username      string
+	password      string
+	httpClient    *http.Client
+	mu            sync.Mutex
+	authenticated bool
+}
+
+func NewClient(baseURL, username, password string, timeout time.Duration) *Client {
+	jar, _ := cookiejar.New(nil)
+	return &Client{
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		username: username,
+		password: password,
+		httpClient: &http.Client{
+			Timeout: timeout,
+			Jar:     jar,
+		},
+	}
+}
+
+func (c *Client) Login(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data := url.Values{}
+	data.Set("username", c.username)
+	data.Set("password", c.password)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/v2/auth/login", strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", c.baseURL)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("login failed with status: %s", resp.Status)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "Ok." {
+		return errors.New("login failed: invalid credentials")
+	}
+
+	c.authenticated = true
+	return nil
+}
+
+func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("Referer", c.baseURL)
+	return c.httpClient.Do(req)
+}
+
+func (c *Client) doAuthenticatedRequest(ctx context.Context, method, path string, bodyData []byte, contentType string) (*http.Response, error) {
+	c.mu.Lock()
+	auth := c.authenticated
+	c.mu.Unlock()
+
+	if !auth {
+		if err := c.Login(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	var bodyReader io.Reader
+	if bodyData != nil {
+		bodyReader = bytes.NewReader(bodyData)
+	}
+
+	resp, err := c.doRequest(ctx, method, path, bodyReader, contentType)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		resp.Body.Close()
+		if err := c.Login(ctx); err != nil {
+			return nil, err
+		}
+		if bodyData != nil {
+			bodyReader = bytes.NewReader(bodyData)
+		} else {
+			bodyReader = nil
+		}
+		resp, err = c.doRequest(ctx, method, path, bodyReader, contentType)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			return nil, errors.New("forbidden: authentication failed even after retry")
+		}
+	}
+
+	return resp, nil
+}
+
+func (c *Client) GetVersion(ctx context.Context) (string, error) {
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", "/api/v2/app/version", nil, "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func (c *Client) GetAPIVersion(ctx context.Context) (string, error) {
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", "/api/v2/app/webapiVersion", nil, "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category string, tags []string, stopped bool) error {
+	data := url.Values{}
+	data.Set("urls", magnet)
+	data.Set("savepath", savePath)
+	if category != "" {
+		data.Set("category", category)
+	}
+	if len(tags) > 0 {
+		data.Set("tags", strings.Join(tags, ","))
+	}
+	if stopped {
+		data.Set("stopped", "true")
+	}
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/add", []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to add magnet, status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) AddTorrentFile(ctx context.Context, filePath, savePath, category string, tags []string, stopped bool) error {
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+
+	fw, err := w.CreateFormFile("torrents", filepath.Base(filePath))
+	if err != nil {
+		return err
+	}
+	if _, err = fw.Write(fileData); err != nil {
+		return err
+	}
+
+	_ = w.WriteField("savepath", savePath)
+	if category != "" {
+		_ = w.WriteField("category", category)
+	}
+	if len(tags) > 0 {
+		_ = w.WriteField("tags", strings.Join(tags, ","))
+	}
+	if stopped {
+		_ = w.WriteField("stopped", "true")
+	}
+
+	if err = w.Close(); err != nil {
+		return err
+	}
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/add", b.Bytes(), w.FormDataContentType())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to add torrent file, status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) GetTorrentInfo(ctx context.Context, hash string) (*qbTorrentInfo, error) {
+	path := "/api/v2/torrents/info"
+	if hash != "" {
+		path += "?hashes=" + url.QueryEscape(hash)
+	}
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get torrent info, status: %d", resp.StatusCode)
+	}
+
+	var infos []qbTorrentInfo
+	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+		return nil, err
+	}
+
+	if len(infos) == 0 {
+		return nil, errors.New("torrent not found")
+	}
+
+	return &infos[0], nil
+}
+
+func (c *Client) GetTorrents(ctx context.Context, category string) ([]qbTorrentInfo, error) {
+	path := "/api/v2/torrents/info"
+	if category != "" {
+		path += "?category=" + url.QueryEscape(category)
+	}
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get torrents, status: %d", resp.StatusCode)
+	}
+
+	var infos []qbTorrentInfo
+	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+		return nil, err
+	}
+	return infos, nil
+}
+
+func (c *Client) GetTorrentFiles(ctx context.Context, hash string) ([]qbTorrentFile, error) {
+	path := "/api/v2/torrents/files?hash=" + url.QueryEscape(hash)
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get torrent files, status: %d", resp.StatusCode)
+	}
+
+	var files []qbTorrentFile
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		return nil, err
+	}
+
+	return files, nil
+}
+
+func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIDs []int, priority int) error {
+	data := url.Values{}
+	data.Set("hash", hash)
+
+	var ids []string
+	for _, id := range fileIDs {
+		ids = append(ids, fmt.Sprintf("%d", id))
+	}
+	data.Set("id", strings.Join(ids, "|"))
+	data.Set("priority", fmt.Sprintf("%d", priority))
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/filePrio", []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set file priority, status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) StartTorrents(ctx context.Context, hashes []string) error {
+	data := url.Values{}
+	data.Set("hashes", strings.Join(hashes, "|"))
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/start", []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to start torrents, status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) StopTorrents(ctx context.Context, hashes []string) error {
+	data := url.Values{}
+	data.Set("hashes", strings.Join(hashes, "|"))
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/stop", []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to stop torrents, status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) DeleteTorrents(ctx context.Context, hashes []string, deleteFiles bool) error {
+	data := url.Values{}
+	data.Set("hashes", strings.Join(hashes, "|"))
+	if deleteFiles {
+		data.Set("deleteFiles", "true")
+	} else {
+		data.Set("deleteFiles", "false")
+	}
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/delete", []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to delete torrents, status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) CreateCategory(ctx context.Context, category, savePath string) error {
+	data := url.Values{}
+	data.Set("category", category)
+	if savePath != "" {
+		data.Set("savePath", savePath)
+	}
+
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/createCategory", []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to create category, status: %d", resp.StatusCode)
+	}
+	return nil
+}

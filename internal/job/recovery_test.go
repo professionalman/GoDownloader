@@ -18,7 +18,7 @@ func setupRecoveryTest(t *testing.T, statusFunc func(ctx context.Context, j *Job
 	downloadDir := filepath.Join(tmpDir, "downloads")
 	os.MkdirAll(downloadDir, 0755)
 
-	m := NewManager(repo, fakeEng, bus, downloadDir)
+	m := NewManager(repo, fakeEng, bus, downloadDir, nil)
 
 	cleanup := func() {
 		os.RemoveAll(tmpDir)

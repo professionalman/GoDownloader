@@ -1,4 +1,4 @@
-export type JobStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'analyzing' | 'processing';
+export type JobStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'analyzing' | 'processing' | 'awaiting_selection' | 'seeding';
 
 export interface MediaFormat {
   formatId: string;
@@ -21,6 +21,33 @@ export interface MediaInfo {
   selectedFormat?: string;
 }
 
+export type TorrentFilePriority = 'skip' | 'normal' | 'high' | 'maximum';
+
+export interface TorrentInfo {
+  name: string;
+  infoHash: string;
+  totalSize: number;
+  seeders: number;
+  leechers: number;
+  uploaded: number;
+  uploadSpeed: number;
+  ratio: number;
+}
+
+export interface TorrentFile {
+  index: number;
+  path: string;
+  size: number;
+  progress: number;
+  priority: TorrentFilePriority;
+  selected: boolean;
+}
+
+export interface TorrentFileSelection {
+  index: number;
+  priority: TorrentFilePriority;
+}
+
 export interface Job {
   id: string;
   source: string;
@@ -35,6 +62,8 @@ export interface Job {
   error?: string;
   engine: string;
   mediaInfo?: MediaInfo;
+  torrentInfo?: TorrentInfo;
+  seedAfterComplete?: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -1,4 +1,4 @@
-import type { Job, CreateJobRequest, ApiError } from './types';
+import type { Job, CreateJobRequest, ApiError, TorrentFile, TorrentFileSelection } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -87,4 +87,33 @@ export function connectSSE(onEvent: (eventType: string, job: Job) => void): Even
 
 export async function openFolder(): Promise<void> {
   await fetch(`${API_BASE}/open-folder`, { method: 'POST' });
+}
+
+export async function uploadTorrent(file: File): Promise<Job> {
+  const formData = new FormData();
+  formData.append('torrent', file);
+  const res = await fetch(`${API_BASE}/jobs/torrent`, {
+    method: 'POST',
+    body: formData,
+  });
+  return handleResponse<Job>(res);
+}
+
+export async function getTorrentFiles(jobId: string): Promise<TorrentFile[]> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/torrent/files`);
+  return handleResponse<TorrentFile[]>(res);
+}
+
+export async function startTorrent(jobId: string, files: TorrentFileSelection[], seedAfterComplete: boolean): Promise<Job> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/torrent/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files, seedAfterComplete }),
+  });
+  return handleResponse<Job>(res);
+}
+
+export async function stopSeeding(jobId: string): Promise<Job> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/stop-seeding`, { method: 'POST' });
+  return handleResponse<Job>(res);
 }

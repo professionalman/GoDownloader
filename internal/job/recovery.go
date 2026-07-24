@@ -43,6 +43,52 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		return
 	}
 
+	// Torrent jobs can be recovered via qBittorrent (which is a long-running daemon)
+	if j.Type == TypeTorrent || j.Engine == "qbittorrent" {
+		log.Printf("recovery: torrent job %s in status %s, attempting reattachment", j.ID, j.Status)
+
+		// For awaiting_selection, keep state as-is (user hasn't picked files yet)
+		if j.Status == StatusAwaitingSelection {
+			if j.EngineID == "" {
+				// No info hash — can't recover
+				j.Status = StatusFailed
+				j.Error = "Torrent metadata was lost during restart. Retry the job."
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+			// Query qBittorrent to see if torrent still exists
+			eng, ok := m.engines.Get(j.Engine)
+			if !ok {
+				j.Status = StatusFailed
+				j.Error = "qBittorrent engine not available."
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+			_, err := eng.Status(ctx, j)
+			if err != nil {
+				// Torrent no longer in qBittorrent
+				j.Status = StatusFailed
+				j.Error = "Torrent was removed from qBittorrent during restart. Retry the job."
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+			// Torrent still exists, keep awaiting_selection
+			log.Printf("recovery: torrent job %s still in awaiting_selection, keeping state", j.ID)
+			m.publish(EventJobUpdated, j)
+			return
+		}
+
+		// For downloading/seeding, fall through to the standard engine recovery below
+		// qBittorrent is a daemon — it survives backend restart
+		// The standard recovery logic will query Status() and reattach
+	}
+
 	// Case 4: No engine ID — cannot recover
 	if j.EngineID == "" {
 		log.Printf("recovery: job %s has no engine ID, marking failed", j.ID)
@@ -86,10 +132,10 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 	}
 
 	switch status.Status {
-	case StatusDownloading, StatusQueued:
+	case StatusDownloading, StatusQueued, StatusSeeding:
 		// Case 1: Engine still knows the download and it's active
 		log.Printf("recovery: job %s is still active in engine, reattaching", j.ID)
-		j.Status = StatusDownloading
+		j.Status = status.Status
 		j.TotalBytes = status.TotalBytes
 		j.CompletedBytes = status.CompletedBytes
 		j.SpeedBytesPerSecond = status.SpeedBytesPerSecond
