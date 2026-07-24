@@ -103,15 +103,6 @@ func (r *Registry) Detect(rawURL string) string {
 		}
 	}
 
-	// Default: if ytdlp is available and URL doesn't look like a direct file, try ytdlp
-	// for unknown URLs that might be media sites yt-dlp supports
-	if _, ok := r.engines["ytdlp"]; ok {
-		// If no file extension or unrecognized extension, assume media
-		lastDot := strings.LastIndex(path, ".")
-		if lastDot == -1 || lastDot < strings.LastIndex(path, "/") {
-			return "ytdlp"
-		}
-	}
-
+	// Default: normal HTTP/HTTPS URLs route to aria2
 	return "aria2"
 }

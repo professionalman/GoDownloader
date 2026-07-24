@@ -13,12 +13,13 @@ import (
 
 // downloadState tracks an active yt-dlp download process.
 type downloadState struct {
-	cancel   context.CancelFunc
-	progress progressInfo
-	mu       sync.Mutex
-	done     bool
-	err      string
-	postProc bool // true when FFmpeg is post-processing
+	cancel    context.CancelFunc
+	progress  progressInfo
+	mu        sync.Mutex
+	done      bool
+	cancelled bool
+	err       string
+	postProc  bool // true when FFmpeg is post-processing
 }
 
 var (
@@ -78,8 +79,8 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 
 	args = append(args, j.Source)
 
-	// Create cancellable context
-	dlCtx, cancel := context.WithCancel(ctx)
+	// Create application-owned cancellable context (survives HTTP request)
+	dlCtx, cancel := context.WithCancel(context.Background())
 
 	state := &downloadState{
 		cancel: cancel,
@@ -133,6 +134,12 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 	defer state.mu.Unlock()
 
 	if state.done {
+		if state.cancelled {
+			return &job.EngineStatus{
+				Status:   job.StatusCancelled,
+				Progress: state.progress.Percent,
+			}, nil
+		}
 		if state.err != "" {
 			return &job.EngineStatus{
 				Status:   job.StatusFailed,
@@ -240,6 +247,7 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 	if err != nil {
 		if ctx.Err() != nil {
 			// Cancelled via context
+			state.cancelled = true
 			state.err = ""
 			state.mu.Unlock()
 			log.Printf("ytdlp: job %s was cancelled", jobID)

@@ -69,9 +69,12 @@ func (f *fakeEngine) Detect(url string) string {
 type fakeTorrentEngine struct {
 	*fakeEngine
 	addMagnetFunc      func(magnet string) (string, error)
+	addTorrentFileFunc func(path string) (string, error)
 	getFilesFunc       func(hash string) ([]TorrentFile, error)
 	setPrioritiesFunc  func(hash string) error
 	startDownloadFunc  func(hash string) error
+	stopDownloadFunc   func(hash string) error
+	removeTorrentFunc  func(hash string, deleteFiles bool) error
 	getTorrentInfoFunc func(hash string) (*TorrentInfo, error)
 }
 
@@ -82,13 +85,18 @@ func (f *fakeTorrentEngine) AddMagnet(ctx context.Context, magnet, savePath, job
 	return "fake-hash", nil
 }
 func (f *fakeTorrentEngine) AddTorrentFile(ctx context.Context, filePath, savePath, jobID string) (string, error) {
+	if f.addTorrentFileFunc != nil {
+		return f.addTorrentFileFunc(filePath)
+	}
 	return "fake-hash", nil
 }
 func (f *fakeTorrentEngine) GetFiles(ctx context.Context, infoHash string) ([]TorrentFile, error) {
 	if f.getFilesFunc != nil {
 		return f.getFilesFunc(infoHash)
 	}
-	return []TorrentFile{}, nil
+	return []TorrentFile{
+		{Index: 0, Path: "file1.bin", Size: 1024, Priority: PriorityNormal, Selected: true},
+	}, nil
 }
 func (f *fakeTorrentEngine) SetFilePriorities(ctx context.Context, infoHash string, selections []TorrentFileSelection) error {
 	if f.setPrioritiesFunc != nil {
@@ -103,9 +111,15 @@ func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) 
 	return nil
 }
 func (f *fakeTorrentEngine) StopDownload(ctx context.Context, infoHash string) error {
+	if f.stopDownloadFunc != nil {
+		return f.stopDownloadFunc(infoHash)
+	}
 	return nil
 }
 func (f *fakeTorrentEngine) RemoveTorrent(ctx context.Context, infoHash string, deleteFiles bool) error {
+	if f.removeTorrentFunc != nil {
+		return f.removeTorrentFunc(infoHash, deleteFiles)
+	}
 	return nil
 }
 func (f *fakeTorrentEngine) GetTorrentInfo(ctx context.Context, infoHash string) (*TorrentInfo, error) {
@@ -230,10 +244,89 @@ func (f *fakeEventBus) Subscribe() <-chan Event {
 func (f *fakeEventBus) Unsubscribe(ch <-chan Event) {
 }
 
+type fakeTorrentRepository struct {
+	mu           sync.Mutex
+	torrentJobs  map[string]*TorrentJobRecord
+	torrentFiles map[string][]TorrentFileRecord
+}
+
+func newFakeTorrentRepository() *fakeTorrentRepository {
+	return &fakeTorrentRepository{
+		torrentJobs:  make(map[string]*TorrentJobRecord),
+		torrentFiles: make(map[string][]TorrentFileRecord),
+	}
+}
+
+func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.torrentJobs[rec.JobID] = rec
+	return nil
+}
+
+func (f *fakeTorrentRepository) GetTorrentJob(ctx context.Context, jobID string) (*TorrentJobRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rec, ok := f.torrentJobs[jobID]
+	if !ok {
+		return nil, fmt.Errorf("not found")
+	}
+	return rec, nil
+}
+
+func (f *fakeTorrentRepository) UpdateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.torrentJobs[rec.JobID] = rec
+	return nil
+}
+
+func (f *fakeTorrentRepository) DeleteTorrentJob(ctx context.Context, jobID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.torrentJobs, jobID)
+	delete(f.torrentFiles, jobID)
+	return nil
+}
+
+func (f *fakeTorrentRepository) GetTorrentJobByInfoHash(ctx context.Context, infoHash string) (*TorrentJobRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, rec := range f.torrentJobs {
+		if rec.InfoHash == infoHash {
+			return rec, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeTorrentRepository) SaveTorrentFiles(ctx context.Context, jobID string, files []TorrentFileRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.torrentFiles[jobID] = files
+	return nil
+}
+
+func (f *fakeTorrentRepository) GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.torrentFiles[jobID], nil
+}
+
+func (f *fakeTorrentRepository) UpdateTorrentFileSelections(ctx context.Context, jobID string, selections []TorrentFileRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.torrentFiles[jobID] = selections
+	return nil
+}
+
+var _ ITorrentRepository = (*fakeTorrentRepository)(nil)
+
 func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func(), *fakeTorrentEngine) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	repo := newFakeJobRepository()
+	torrentRepo := newFakeTorrentRepository()
 	fakeEng := &fakeEngine{}
 	fakeTorrentEng := &fakeTorrentEngine{fakeEngine: fakeEng}
 
@@ -246,9 +339,11 @@ func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func(
 
 	bus := newFakeEventBus()
 	downloadDir := filepath.Join(tmpDir, "downloads")
+	dataDir := filepath.Join(tmpDir, "data")
 	os.MkdirAll(downloadDir, 0755)
+	os.MkdirAll(dataDir, 0755)
 
-	m := NewManager(repo, registry, bus, downloadDir, nil)
+	m := NewManager(repo, registry, bus, downloadDir, torrentRepo, dataDir)
 
 	cleanup := func() {
 		os.RemoveAll(tmpDir)
@@ -547,5 +642,159 @@ func TestManager_StartTorrent(t *testing.T) {
 	}
 	if !started {
 		t.Errorf("expected download to be started")
+	}
+}
+
+func TestManager_StartTorrent_Validation(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+		return "1234abcd", nil
+	}
+	fakeTorrent.getTorrentInfoFunc = func(hash string) (*TorrentInfo, error) {
+		return &TorrentInfo{Name: "test.iso", TotalSize: 1024}, nil
+	}
+
+	j, _ := m.Create(ctx, "magnet:?xt=urn:btih:1234abcd")
+	time.Sleep(1500 * time.Millisecond) // await analysis
+
+	// 1. Test zero selected files (all skip)
+	allSkip := []TorrentFileSelection{{Index: 0, Priority: PrioritySkip}}
+	_, err := m.StartTorrent(ctx, j.ID, allSkip, false)
+	if err == nil {
+		t.Error("expected error for zero selected files, got nil")
+	}
+
+	// 2. Test unknown file index
+	unknownIndex := []TorrentFileSelection{{Index: 99, Priority: PriorityNormal}}
+	_, err = m.StartTorrent(ctx, j.ID, unknownIndex, false)
+	if err == nil {
+		t.Error("expected error for unknown file index 99, got nil")
+	}
+
+	// 3. Test duplicate file index
+	duplicateIndex := []TorrentFileSelection{
+		{Index: 0, Priority: PriorityNormal},
+		{Index: 0, Priority: PriorityHigh},
+	}
+	_, err = m.StartTorrent(ctx, j.ID, duplicateIndex, false)
+	if err == nil {
+		t.Error("expected error for duplicate file index 0, got nil")
+	}
+
+	// 4. Test invalid priority string
+	invalidPriority := []TorrentFileSelection{{Index: 0, Priority: TorrentFilePriority("super_high")}}
+	_, err = m.StartTorrent(ctx, j.ID, invalidPriority, false)
+	if err == nil {
+		t.Error("expected error for invalid priority 'super_high', got nil")
+	}
+}
+
+func TestManager_CreateTorrentJob_DuplicateHash(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.addMagnetFunc = func(magnet string) (string, error) {
+		return "1234567890abcdef1234567890abcdef12345678", nil
+	}
+
+	magnet := "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678"
+	j1, err := m.Create(ctx, magnet)
+	if err != nil {
+		t.Fatalf("first Create failed: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	// Second create with same info hash should fail with duplicate hash error
+	_, err = m.Create(ctx, magnet)
+	if err == nil {
+		t.Error("expected error creating duplicate torrent job, got nil")
+	}
+	_ = j1
+}
+
+func TestManager_StopSeeding(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	j := &Job{
+		ID:        "job-seeding-1",
+		Status:    StatusSeeding,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "1234abcd",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+	m.addActive(j)
+
+	var stopCalled bool
+	var removeCalled bool
+	fakeTorrent.stopDownloadFunc = func(hash string) error {
+		stopCalled = true
+		return nil
+	}
+	fakeTorrent.removeTorrentFunc = func(hash string, deleteFiles bool) error {
+		removeCalled = true
+		return nil
+	}
+
+	stoppedJ, err := m.StopSeeding(ctx, "job-seeding-1")
+	if err != nil {
+		t.Fatalf("StopSeeding failed: %v", err)
+	}
+
+	if stoppedJ.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", stoppedJ.Status)
+	}
+	if !stopCalled {
+		t.Error("expected StopDownload to be called")
+	}
+	if !removeCalled {
+		t.Error("expected RemoveTorrent to be called")
+	}
+}
+
+func TestManager_CreateTorrentFromFile_PersistedStorage(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	fakeTorrent.addTorrentFileFunc = func(path string) (string, error) {
+		return "abcd1234", nil
+	}
+
+	// Create a dummy temp torrent file
+	tmpFile, err := os.CreateTemp("", "test-*.torrent")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	tmpFile.WriteString("dummy torrent content")
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
+	j, err := m.CreateTorrentFromFile(ctx, tmpPath)
+	if err != nil {
+		t.Fatalf("CreateTorrentFromFile failed: %v", err)
+	}
+
+	if j.Type != TypeTorrent {
+		t.Errorf("expected TypeTorrent, got %s", j.Type)
+	}
+
+	// Verify temp file was removed
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Errorf("expected temp file %s to be deleted", tmpPath)
+	}
+
+	// Verify persisted file exists in dataDir/torrents/
+	persistedPath := filepath.Join(m.dataDir, "torrents", j.ID+".torrent")
+	if _, err := os.Stat(persistedPath); os.IsNotExist(err) {
+		t.Errorf("expected persisted file %s to exist", persistedPath)
 	}
 }

@@ -16,20 +16,25 @@ type Monitor struct {
 	wg     sync.WaitGroup
 
 	// Track last DB persist time per job for tiered persistence
-	mu            sync.Mutex
-	lastPersisted map[string]time.Time
+	mu                  sync.Mutex
+	lastPersisted       map[string]time.Time
+	consecutiveFailures map[string]int
 }
 
 // persistInterval controls how often progress is written to DB (vs SSE which is every tick).
 const persistInterval = 3 * time.Second
 
+// maxConsecutiveFailures defines max status query failures before marking a job failed.
+const maxConsecutiveFailures = 5
+
 // NewMonitor creates a new progress monitor.
 func NewMonitor(manager *Manager, interval time.Duration) *Monitor {
 	return &Monitor{
-		manager:       manager,
-		interval:      interval,
-		stopCh:        make(chan struct{}),
-		lastPersisted: make(map[string]time.Time),
+		manager:             manager,
+		interval:            interval,
+		stopCh:              make(chan struct{}),
+		lastPersisted:       make(map[string]time.Time),
+		consecutiveFailures: make(map[string]int),
 	}
 }
 
@@ -77,20 +82,51 @@ func (m *Monitor) tick(ctx context.Context) {
 		eng, ok := m.manager.GetEngine(j.Engine)
 		if !ok {
 			log.Printf("monitor: engine %q not available for job %s", j.Engine, j.ID)
+			m.recordFailure(ctx, j, "Engine unavailable")
 			continue
 		}
 
 		status, err := eng.Status(ctx, j)
 		if err != nil {
 			log.Printf("monitor: failed to get status for job %s: %v", j.ID, err)
+			m.recordFailure(ctx, j, err.Error())
 			continue
 		}
+
+		// Reset failure counter on success
+		m.resetFailure(j.ID)
 
 		// Determine if we should persist to DB this tick
 		persistNow := m.shouldPersist(j.ID, status)
 
 		m.manager.UpdateJobFromEngine(ctx, j, status, persistNow)
 	}
+}
+
+func (m *Monitor) recordFailure(ctx context.Context, j *Job, errMsg string) {
+	m.mu.Lock()
+	m.consecutiveFailures[j.ID]++
+	count := m.consecutiveFailures[j.ID]
+	m.mu.Unlock()
+
+	if count >= maxConsecutiveFailures {
+		log.Printf("monitor: job %s exceeded max status query failures (%d), marking failed", j.ID, count)
+		j.Status = StatusFailed
+		j.Error = "Engine lost connection or task disappeared after repeated status check failures."
+		j.SpeedBytesPerSecond = 0
+		j.ETASeconds = 0
+		j.UpdatedAt = time.Now()
+		m.manager.repo.Update(ctx, j)
+		m.manager.removeActive(j.ID)
+		m.manager.publish(EventJobFailed, j)
+		m.CleanupJob(j.ID)
+	}
+}
+
+func (m *Monitor) resetFailure(jobID string) {
+	m.mu.Lock()
+	delete(m.consecutiveFailures, jobID)
+	m.mu.Unlock()
 }
 
 // shouldPersist determines whether to write to DB this tick.
@@ -113,5 +149,6 @@ func (m *Monitor) shouldPersist(jobID string, status interface{}) bool {
 func (m *Monitor) CleanupJob(jobID string) {
 	m.mu.Lock()
 	delete(m.lastPersisted, jobID)
+	delete(m.consecutiveFailures, jobID)
 	m.mu.Unlock()
 }

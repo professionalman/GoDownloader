@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,23 +22,31 @@ type Manager struct {
 	engines     IEngineRegistry
 	bus         IEventBus
 	downloadDir string
+	dataDir     string
 	torrentRepo ITorrentRepository
 
-	mu         sync.RWMutex
-	activeJobs map[string]*Job // id -> job (in-memory cache for active jobs)
+	mu            sync.RWMutex
+	activeJobs    map[string]*Job // id -> job (in-memory cache for active jobs)
+	activeCancels map[string]context.CancelFunc
 
 	monitor *Monitor
 }
 
 // NewManager creates a new job manager.
-func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, downloadDir string, torrentRepo ITorrentRepository) *Manager {
+func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, downloadDir string, torrentRepo ITorrentRepository, dataDir ...string) *Manager {
+	dDir := "./data"
+	if len(dataDir) > 0 && dataDir[0] != "" {
+		dDir = dataDir[0]
+	}
 	m := &Manager{
-		repo:        repo,
-		engines:     engines,
-		bus:         bus,
-		downloadDir: downloadDir,
-		torrentRepo: torrentRepo,
-		activeJobs:  make(map[string]*Job),
+		repo:          repo,
+		engines:       engines,
+		bus:           bus,
+		downloadDir:   downloadDir,
+		dataDir:       dDir,
+		torrentRepo:   torrentRepo,
+		activeJobs:    make(map[string]*Job),
+		activeCancels: make(map[string]context.CancelFunc),
 	}
 	return m
 }
@@ -56,6 +66,30 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 func (m *Manager) Stop() {
 	if m.monitor != nil {
 		m.monitor.Stop()
+	}
+}
+
+func (m *Manager) registerCancel(jobID string, cancel context.CancelFunc) {
+	m.mu.Lock()
+	m.activeCancels[jobID] = cancel
+	m.mu.Unlock()
+}
+
+func (m *Manager) unregisterCancel(jobID string) {
+	m.mu.Lock()
+	delete(m.activeCancels, jobID)
+	m.mu.Unlock()
+}
+
+func (m *Manager) triggerCancel(jobID string) {
+	m.mu.Lock()
+	cancel, exists := m.activeCancels[jobID]
+	if exists {
+		delete(m.activeCancels, jobID)
+	}
+	m.mu.Unlock()
+	if exists && cancel != nil {
+		cancel()
 	}
 }
 
@@ -158,7 +192,9 @@ func (m *Manager) Create(ctx context.Context, source string) (*Job, error) {
 
 // analyzeMedia runs yt-dlp analysis in the background and updates the job.
 func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) {
-	ctx := context.Background() // Use background context so analysis survives request context
+	ctx, cancel := context.WithCancel(context.Background())
+	m.registerCancel(jobID, cancel)
+	defer m.unregisterCancel(jobID)
 
 	j, err := m.repo.GetByID(ctx, jobID)
 	if err != nil || j == nil {
@@ -188,11 +224,22 @@ func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) 
 
 	info, err := analyzer.Analyze(ctx, source)
 	if err != nil {
+		if ctx.Err() != nil {
+			log.Printf("analyzeMedia: job %s analysis was cancelled", jobID)
+			return
+		}
 		j.Status = StatusFailed
 		j.Error = fmt.Sprintf("Media analysis failed: %v", err)
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobFailed, j)
+		return
+	}
+
+	// Verify job is still in analyzing state before committing metadata
+	current, err := m.repo.GetByID(ctx, jobID)
+	if err != nil || current == nil || current.Status == StatusCancelled {
+		log.Printf("analyzeMedia: job %s was cancelled or deleted, aborting commit", jobID)
 		return
 	}
 
@@ -276,16 +323,27 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, 
 	return j, nil
 }
 
-// createTorrentJob creates a new torrent download job.
-func (m *Manager) createTorrentJob(ctx context.Context, source, torrentFilePath string) (*Job, error) {
+// createTorrentJob creates a new torrent download job with a given ID.
+func (m *Manager) createTorrentJobWithID(ctx context.Context, jobID, source, torrentFilePath string) (*Job, error) {
 	engineName := m.engines.Detect(source)
 	if engineName != "qbittorrent" {
 		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available for torrent downloads"}
 	}
 
+	// Check for duplicate info hash if source is a magnet link
+	if hash, err := ExtractMagnetHash(source); err == nil && hash != "" && m.torrentRepo != nil {
+		rec, _ := m.torrentRepo.GetTorrentJobByInfoHash(ctx, hash)
+		if rec != nil {
+			existingJob, _ := m.repo.GetByID(ctx, rec.JobID)
+			if existingJob != nil && existingJob.Status != StatusFailed && existingJob.Status != StatusCancelled {
+				return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("a torrent with info hash %s is already managed by job %s", hash, rec.JobID)}
+			}
+		}
+	}
+
 	now := time.Now()
 	j := &Job{
-		ID:        "job_" + uuid.New().String()[:8],
+		ID:        jobID,
 		Source:    source,
 		Name:      "Fetching metadata...",
 		Status:    StatusAnalyzing,
@@ -307,14 +365,39 @@ func (m *Manager) createTorrentJob(ctx context.Context, source, torrentFilePath 
 	return j, nil
 }
 
-// CreateTorrentFromFile creates a torrent job from an uploaded .torrent file.
-func (m *Manager) CreateTorrentFromFile(ctx context.Context, torrentFilePath string) (*Job, error) {
-	return m.createTorrentJob(ctx, "torrent://"+torrentFilePath, torrentFilePath)
+func (m *Manager) createTorrentJob(ctx context.Context, source, torrentFilePath string) (*Job, error) {
+	jobID := "job_" + uuid.New().String()[:8]
+	return m.createTorrentJobWithID(ctx, jobID, source, torrentFilePath)
+}
+
+// CreateTorrentFromFile creates a torrent job from an uploaded .torrent file and persists it in DATA_DIR.
+func (m *Manager) CreateTorrentFromFile(ctx context.Context, tempFilePath string) (*Job, error) {
+	torrentsDir := filepath.Join(m.dataDir, "torrents")
+	if err := os.MkdirAll(torrentsDir, 0755); err != nil {
+		return nil, fmt.Errorf("create torrents dir: %w", err)
+	}
+
+	data, err := os.ReadFile(tempFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("read temp torrent file: %w", err)
+	}
+	os.Remove(tempFilePath)
+
+	jobID := "job_" + uuid.New().String()[:8]
+	persistedPath := filepath.Join(torrentsDir, jobID+".torrent")
+
+	if err := os.WriteFile(persistedPath, data, 0644); err != nil {
+		return nil, fmt.Errorf("write persisted torrent file: %w", err)
+	}
+
+	return m.createTorrentJobWithID(ctx, jobID, "torrent://"+persistedPath, persistedPath)
 }
 
 // acquireTorrentMetadata adds the torrent to qBittorrent and polls for metadata.
 func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.registerCancel(jobID, cancel)
+	defer m.unregisterCancel(jobID)
 
 	j, err := m.repo.GetByID(ctx, jobID)
 	if err != nil || j == nil {
@@ -350,6 +433,10 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		infoHash, err = torrentEng.AddMagnet(ctx, source, m.downloadDir, jobID)
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			log.Printf("acquireTorrentMetadata: job %s cancelled during add", jobID)
+			return
+		}
 		j.Status = StatusFailed
 		j.Error = fmt.Sprintf("Failed to add torrent: %v", err)
 		j.UpdatedAt = time.Now()
@@ -362,19 +449,42 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 	j.UpdatedAt = time.Now()
 	m.repo.Update(ctx, j)
 
-	// Poll for metadata (torrent name, file list)
-	// qBittorrent fetches metadata from peers for magnet links
+	// Poll for metadata with cancellation support & file readiness validation
 	var metadata *TorrentInfo
-	for attempt := 0; attempt < 120; attempt++ { // ~2 minutes timeout
-		time.Sleep(1 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
-		info, err := torrentEng.GetTorrentInfo(ctx, infoHash)
-		if err != nil {
-			continue
-		}
-		if info != nil && info.Name != "" && info.Name != infoHash {
-			metadata = info
-			break
+	timeoutCh := time.After(120 * time.Second)
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("acquireTorrentMetadata: job %s cancelled during polling", jobID)
+			if infoHash != "" {
+				torrentEng.RemoveTorrent(context.Background(), infoHash, false)
+			}
+			return
+		case <-timeoutCh:
+			break loop
+		case <-ticker.C:
+			current, err := m.repo.GetByID(ctx, jobID)
+			if err != nil || current == nil || current.Status == StatusCancelled {
+				log.Printf("acquireTorrentMetadata: job %s cancelled in DB", jobID)
+				if infoHash != "" {
+					torrentEng.RemoveTorrent(context.Background(), infoHash, false)
+				}
+				return
+			}
+
+			info, err := torrentEng.GetTorrentInfo(ctx, infoHash)
+			if err == nil && info != nil && info.Name != "" && info.Name != infoHash {
+				files, errFiles := torrentEng.GetFiles(ctx, infoHash)
+				if errFiles == nil && len(files) > 0 {
+					metadata = info
+					break loop
+				}
+			}
 		}
 	}
 
@@ -384,7 +494,14 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobFailed, j)
-		// Clean up from qBittorrent
+		torrentEng.RemoveTorrent(ctx, infoHash, false)
+		return
+	}
+
+	// Verify job state before updating
+	current, err := m.repo.GetByID(ctx, jobID)
+	if err != nil || current == nil || current.Status == StatusCancelled {
+		log.Printf("acquireTorrentMetadata: job %s was cancelled before completion", jobID)
 		torrentEng.RemoveTorrent(ctx, infoHash, false)
 		return
 	}
@@ -443,18 +560,6 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot start torrent from %s state", j.Status)}
 	}
 
-	// Validate at least one file is selected
-	hasSelected := false
-	for _, s := range selections {
-		if s.Priority != PrioritySkip {
-			hasSelected = true
-			break
-		}
-	}
-	if !hasSelected {
-		return nil, &AppError{Code: ErrNoFilesSelected, Message: "at least one file must be selected"}
-	}
-
 	eng, ok := m.engines.Get("qbittorrent")
 	if !ok {
 		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available"}
@@ -465,16 +570,53 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
 	}
 
-	// Apply file priorities
+	// 1. Fetch available files from engine for index validation
+	existingFiles, err := torrentEng.GetFiles(ctx, j.EngineID)
+	if err != nil || len(existingFiles) == 0 {
+		return nil, &AppError{Code: ErrEngineError, Message: "failed to retrieve torrent file list for validation"}
+	}
+	validIndices := make(map[int]bool)
+	for _, f := range existingFiles {
+		validIndices[f.Index] = true
+	}
+
+	// 2. Validate selections: index, duplicates, priorities, count >= 1
+	seenIndex := make(map[int]bool)
+	hasSelected := false
+
+	for _, s := range selections {
+		if !validIndices[s.Index] {
+			return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("unknown file index: %d", s.Index)}
+		}
+		if seenIndex[s.Index] {
+			return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("duplicate file index: %d", s.Index)}
+		}
+		seenIndex[s.Index] = true
+
+		if !ValidPriority(s.Priority) {
+			return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("invalid priority %q for file index %d", s.Priority, s.Index)}
+		}
+
+		if s.Priority != PrioritySkip {
+			hasSelected = true
+		}
+	}
+
+	if !hasSelected {
+		return nil, &AppError{Code: ErrNoFilesSelected, Message: "at least one file must be selected"}
+	}
+
+	// 3. Apply file priorities
 	if err := torrentEng.SetFilePriorities(ctx, j.EngineID, selections); err != nil {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
 	}
 
-	// Start the torrent
+	// 4. Start the torrent in qBittorrent
 	if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to start torrent: %v", err)}
 	}
 
+	// 5. State transition to DOWNLOADING occurs ONLY AFTER qBittorrent accepts start
 	j.SeedAfterComplete = seedAfterComplete
 	j.Status = StatusDownloading
 	j.UpdatedAt = time.Now()
@@ -485,6 +627,7 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		var records []TorrentFileRecord
 		for _, s := range selections {
 			records = append(records, TorrentFileRecord{
+				JobID:     id,
 				FileIndex: s.Index,
 				Selected:  s.Priority != PrioritySkip,
 				Priority:  string(s.Priority),
@@ -492,7 +635,6 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		}
 		m.torrentRepo.UpdateTorrentFileSelections(ctx, id, records)
 
-		// Update seed preference
 		rec, _ := m.torrentRepo.GetTorrentJob(ctx, id)
 		if rec != nil {
 			rec.SeedAfterComplete = seedAfterComplete
@@ -525,6 +667,7 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 	torrentEng, ok := eng.(ITorrentEngine)
 	if ok {
 		torrentEng.StopDownload(ctx, j.EngineID)
+		torrentEng.RemoveTorrent(ctx, j.EngineID, false)
 	}
 
 	j.Status = StatusCompleted
@@ -640,14 +783,8 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot cancel a %s job", j.Status)}
 	}
 
-	// For torrent jobs, also remove from qBittorrent
-	if j.Type == TypeTorrent && j.EngineID != "" {
-		if eng, ok := m.engines.Get(j.Engine); ok {
-			if te, ok := eng.(ITorrentEngine); ok {
-				te.RemoveTorrent(ctx, j.EngineID, false)
-			}
-		}
-	}
+	// Trigger any active background task (e.g. analysis/metadata polling)
+	m.triggerCancel(id)
 
 	// Try to cancel in engine (ignore errors for idempotency)
 	if j.EngineID != "" {
@@ -762,12 +899,41 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 
 // Get retrieves a job by ID.
 func (m *Manager) Get(ctx context.Context, id string) (*Job, error) {
-	return m.repo.GetByID(ctx, id)
+	j, err := m.repo.GetByID(ctx, id)
+	if err != nil || j == nil {
+		return j, err
+	}
+	m.hydrateJob(ctx, j)
+	return j, nil
 }
 
 // List retrieves all jobs.
 func (m *Manager) List(ctx context.Context) ([]Job, error) {
-	return m.repo.List(ctx)
+	jobs, err := m.repo.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range jobs {
+		m.hydrateJob(ctx, &jobs[i])
+	}
+	return jobs, nil
+}
+
+func (m *Manager) hydrateJob(ctx context.Context, j *Job) {
+	if j == nil || j.Type != TypeTorrent || m.torrentRepo == nil {
+		return
+	}
+	rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+	if err == nil && rec != nil {
+		j.SeedAfterComplete = rec.SeedAfterComplete
+		if j.TorrentInfo == nil && (rec.Name != "" || rec.TotalSize > 0) {
+			j.TorrentInfo = &TorrentInfo{
+				Name:      rec.Name,
+				InfoHash:  rec.InfoHash,
+				TotalSize: rec.TotalSize,
+			}
+		}
+	}
 }
 
 // GetActiveJobs returns a snapshot of all active jobs.
@@ -803,16 +969,24 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 
 	switch status.Status {
 	case StatusCompleted:
-		// For torrent jobs with seed-after-complete, transition to seeding instead
-		if j.Type == TypeTorrent && j.SeedAfterComplete && prevStatus == StatusDownloading {
-			j.Status = StatusSeeding
-			j.Progress = 100
-			j.SpeedBytesPerSecond = status.UploadSpeed
-			j.ETASeconds = 0
-			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
-			m.publish(EventJobUpdated, j)
-			return
+		// For torrent jobs, handle seeding or removal
+		if j.Type == TypeTorrent {
+			if j.SeedAfterComplete && prevStatus == StatusDownloading {
+				j.Status = StatusSeeding
+				j.Progress = 100
+				j.SpeedBytesPerSecond = status.UploadSpeed
+				j.ETASeconds = 0
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobUpdated, j)
+				return
+			}
+			// If seedAfterComplete = false, remove torrent from qBittorrent
+			if eng, ok := m.engines.Get(j.Engine); ok {
+				if te, ok := eng.(ITorrentEngine); ok {
+					te.RemoveTorrent(ctx, j.EngineID, false)
+				}
+			}
 		}
 		// Normal completion
 		j.Status = StatusCompleted

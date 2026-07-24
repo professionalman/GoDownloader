@@ -1,6 +1,10 @@
 package job
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // JobStatus represents the state of a download job.
 type JobStatus string
@@ -93,6 +97,27 @@ type TorrentFile struct {
 type TorrentFileSelection struct {
 	Index    int                 `json:"index"`
 	Priority TorrentFilePriority `json:"priority"`
+}
+
+// ExtractMagnetHash extracts the hex info hash from a magnet URI string.
+func ExtractMagnetHash(magnet string) (string, error) {
+	const prefix = "urn:btih:"
+	idx := strings.Index(strings.ToLower(magnet), prefix)
+	if idx == -1 {
+		return "", fmt.Errorf("invalid magnet link: missing btih")
+	}
+
+	hashPart := magnet[idx+len(prefix):]
+	ampIdx := strings.Index(hashPart, "&")
+	if ampIdx != -1 {
+		hashPart = hashPart[:ampIdx]
+	}
+
+	if len(hashPart) == 40 || len(hashPart) == 32 {
+		return strings.ToLower(hashPart), nil
+	}
+
+	return "", fmt.Errorf("invalid info hash length in magnet link")
 }
 
 // Job represents a single download task.

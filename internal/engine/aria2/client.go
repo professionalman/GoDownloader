@@ -8,13 +8,15 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
+	"time"
 )
 
 // Client communicates with aria2c via JSON-RPC.
 type Client struct {
-	rpcURL string
-	secret string
-	idSeq  atomic.Int64
+	rpcURL     string
+	secret     string
+	httpClient *http.Client
+	idSeq      atomic.Int64
 }
 
 type rpcRequest struct {
@@ -64,6 +66,9 @@ func NewClient(rpcURL, secret string) *Client {
 	return &Client{
 		rpcURL: rpcURL,
 		secret: secret,
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
 	}
 }
 
@@ -88,7 +93,7 @@ func (c *Client) call(method string, params ...interface{}) (json.RawMessage, er
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := http.Post(c.rpcURL, "application/json", bytes.NewReader(body))
+	resp, err := c.httpClient.Post(c.rpcURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("rpc call failed: %w", err)
 	}
