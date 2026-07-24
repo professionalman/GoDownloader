@@ -1,27 +1,31 @@
-# GoDownloader V0.3 — Media & Direct Download Manager
+# GoDownloader V0.4 — Torrent, Media & Direct Download Manager
 
-A high-performance, local-first download manager built with **Go**, **React (TypeScript + Vite)**, **SQLite**, **aria2c**, **yt-dlp**, and **FFmpeg**.
+A high-performance, local-first download manager built with **Go**, **React (TypeScript + Vite)**, **SQLite**, **aria2c**, **yt-dlp**, **FFmpeg**, and **qBittorrent-nox**.
 
-V0.3 extends GoDownloader from direct HTTP downloads into a complete media download system capable of extracting video metadata, format selection, video/audio stream merging, and persistent job management.
+V0.4 extends GoDownloader with first-class **Torrent & Magnet** download capabilities powered by qBittorrent-nox Web API v2.
 
 ---
 
 ## 🚀 Key Features
 
+### 🧲 Torrent & Magnet Downloads (V0.4)
+- **Magnet URIs & .torrent Uploads**: Accepts `magnet:` links or `.torrent` file uploads.
+- **Async Metadata Acquisition**: Automatically fetches torrent metainfo in the background (`analyzing` state).
+- **Interactive Torrent File Selector**: View file lists, individual file sizes, set per-file priorities (`High`, `Normal`, `Skip`), and configure seed-after-download preferences before starting.
+- **Seeding Lifecycle Management**: Conditional seeding (`seeding` state) with real-time upload speed, total uploaded bytes, ratio, and seeders/leechers counts, with a 1-click **Stop Seeding** action.
+- **qBittorrent Daemon Reattachment**: Daemon-aware restart recovery reattaches active and seeding torrent jobs across Go backend restarts without losing state.
+
 ### 🎬 Media Downloads (V0.3)
-- **Media URL Detection & Analysis**: Auto-detects media site links (YouTube, Vimeo, etc.) and extracts formats via `yt-dlp --dump-json`.
-- **Interactive Format Selector**: Select resolution (1080p, 720p, etc.), codec, or audio-only options with estimated file sizes before downloading.
-- **FFmpeg Post-Processing**: Automatically merges separate video and audio streams using `ffmpeg` with live status reporting (`processing` state).
+- **Media URL Detection & Analysis**: Auto-detects media links (YouTube, Vimeo, Twitch, etc.) and extracts available formats via `yt-dlp`.
+- **Interactive Format Selector**: Select resolution (1080p, 720p, etc.), codec, or audio-only streams with estimated file sizes before downloading.
+- **FFmpeg Stream Merging**: Merges separate video and audio streams using `ffmpeg` with live status reporting (`processing` state).
 - **Subprocess Security & Lifecycle**: Safe subprocess execution (`exec.CommandContext`) without shell invocation. Context cancellation cleans up orphan processes.
-- **Rich Media UI**: Displays video thumbnails, titles, duration, and progress.
 
 ### ⚡ Direct Downloads & Core System (V0.1 / V0.2)
-- **Engine Registry**: Auto-routes direct HTTP files to `aria2c` and media URLs to `yt-dlp`.
-- **Unified State Machine**: Centralized state validation (`queued`, `analyzing`, `downloading`, `processing`, `paused`, `completed`, `failed`, `cancelled`).
-- **Pause & Resume**: Pause and resume direct `aria2c` downloads seamlessly.
-- **Retry Mechanism**: Retry failed downloads with fresh engine executions while preserving job history.
-- **Backend Restart Reconciliation**: Restarting the Go backend re-attaches active `aria2c` downloads and gracefully fails interrupted media subprocesses with a 1-click retry option.
-- **Real-time SSE Streaming**: Server-Sent Events stream live progress, speed, completed bytes, size, and ETA directly to the UI.
+- **Engine Registry & Resolver**: Auto-routes inputs: `magnet:` / `.torrent` → `qbittorrent`, media URLs → `ytdlp`, direct HTTP/HTTPS → `aria2c`.
+- **Unified State Machine**: Centralized state validation (`queued`, `analyzing`, `awaiting_selection`, `downloading`, `processing`, `seeding`, `paused`, `completed`, `failed`, `cancelled`).
+- **Pause, Resume, Cancel & Retry**: Universal controls for all download engines.
+- **Real-time SSE Streaming**: Server-Sent Events stream live progress, speeds, file sizes, and ETAs directly to the UI without client polling.
 
 ---
 
@@ -49,21 +53,21 @@ V0.3 extends GoDownloader from direct HTTP downloads into a complete media downl
                                           │  │
              ┌────────────────────────────┘  └────────────────────────────┐
              ▼                                                            ▼
-       SQLite Store                                                   Event Bus
+        SQLite Store                                                   Event Bus
              │                                                            │
              │                                                            ▼
              │                                                         SSE Stream
              ▼
       Engine Registry
              │
-   ┌─────────┴─────────┐
-   ▼                   ▼
-aria2 Adapter     yt-dlp Engine
-   │                   │
-   ▼                   ▼
-aria2c daemon       yt-dlp subprocess ──→ FFmpeg / ffprobe
-   │                   │
-   └─────────┬─────────┘
+   ┌─────────┼──────────────────┐
+   ▼         ▼                  ▼
+aria2     yt-dlp           qBittorrent
+   │         │                  │
+   ▼         ▼                  ▼
+aria2c     yt-dlp ──→ FFmpeg  qBittorrent-nox ──→ BitTorrent
+   │         │                  │
+   └─────────┼──────────────────┘
              ▼
         Local File
 ```
@@ -82,15 +86,21 @@ aria2c daemon       yt-dlp subprocess ──→ FFmpeg / ffprobe
   - `winget install yt-dlp` / `brew install yt-dlp` / `pip install yt-dlp`
 - **FFmpeg & ffprobe** installed and on PATH:
   - `winget install ffmpeg` / `brew install ffmpeg` / `sudo apt install ffmpeg`
+- **qBittorrent-nox** (5.0+) running with Web UI enabled (default port `8081`):
+  - `qbittorrent-nox` / docker / desktop app with Web UI enabled
 
 ---
 
 ## 🚦 Quick Start
 
-### 1. Start the aria2c Daemon
+### 1. Start the Daemons (aria2 & qBittorrent)
 
 ```bash
+# Terminal 1: aria2c daemon
 aria2c --enable-rpc --rpc-listen-all=false --rpc-listen-port=6800 --rpc-allow-origin-all
+
+# Terminal 2: qBittorrent-nox daemon (or launch qBittorrent with Web UI on 8081)
+qbittorrent-nox --webui-port=8081
 ```
 
 ### 2. Build Frontend & Start Go Backend
@@ -115,8 +125,7 @@ Open [http://localhost:8080](http://localhost:8080) in your browser.
 For frontend hot reloading:
 
 ```bash
-# Terminal 1: aria2 daemon
-aria2c --enable-rpc --rpc-listen-all=false --rpc-listen-port=6800 --rpc-allow-origin-all
+# Terminal 1: aria2 & qBittorrent daemons
 
 # Terminal 2: Go API server
 go run ./cmd/server
@@ -134,12 +143,15 @@ Dev UI accessible at [http://localhost:5173](http://localhost:5173).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/jobs` | Create a new download job (`{"source": "https://..."}`) |
-| `POST` | `/api/v1/analyze` | Analyze a media URL and return formats (`{"source": "https://..."}`) |
-| `POST` | `/api/v1/jobs/{id}/format` | Select format for media job (`{"formatId": "..."}`) |
+| `POST` | `/api/v1/jobs` | Create a new HTTP or magnet download job (`{"source": "..."}`) |
+| `POST` | `/api/v1/jobs/torrent` | Upload a `.torrent` file (`multipart/form-data`) |
+| `GET`  | `/api/v1/jobs/{id}/torrent/files` | Get file list and priorities for a torrent job |
+| `POST` | `/api/v1/jobs/{id}/torrent/start` | Apply file priorities and start torrent download |
+| `POST` | `/api/v1/jobs/{id}/stop-seeding` | Stop seeding a completed torrent |
+| `POST` | `/api/v1/jobs/{id}/format` | Select format for a media job (`{"formatId": "..."}`) |
 | `GET`  | `/api/v1/jobs` | List all historical and active jobs |
 | `GET`  | `/api/v1/jobs/{id}` | Get details of a specific job |
-| `POST` | `/api/v1/jobs/{id}/pause` | Pause an active direct download |
+| `POST` | `/api/v1/jobs/{id}/pause` | Pause an active download |
 | `POST` | `/api/v1/jobs/{id}/resume` | Resume a paused download |
 | `POST` | `/api/v1/jobs/{id}/retry` | Retry a failed download |
 | `POST` | `/api/v1/jobs/{id}/cancel` | Cancel a download |
@@ -154,9 +166,14 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `:8080` | Server listen address |
-| `DOWNLOAD_DIR` | `./downloads` | Destination folder for downloads |
+| `DOWNLOAD_DIR` | `./downloads` | Destination folder for completed downloads |
+| `DATA_DIR` | `./data` | Application data folder for stored `.torrent` files |
 | `ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` | aria2 RPC endpoint |
-| `ARIA2_SECRET` | *(empty)* | RPC secret token |
+| `ARIA2_SECRET` | *(empty)* | aria2 RPC secret token |
+| `QBIT_URL` | `http://127.0.0.1:8081` | qBittorrent Web API URL |
+| `QBIT_USERNAME` | `admin` | qBittorrent Web API username |
+| `QBIT_PASSWORD` | *(empty)* | qBittorrent Web API password |
+| `QBIT_TIMEOUT` | `30` | qBittorrent request timeout in seconds |
 | `YTDLP_PATH` | `yt-dlp` | Executable path for yt-dlp |
 | `FFMPEG_PATH` | `ffmpeg` | Executable path for FFmpeg |
 | `WEB_DIR` | `./web/dist` | Static web files directory |
@@ -165,7 +182,7 @@ Environment variables:
 
 ## 🧪 Testing
 
-Run backend test suite and race detector checks:
+Run unit tests, race detector checks, and frontend verification:
 
 ```bash
 # Run unit & integration tests
@@ -185,19 +202,20 @@ cd web && npm run build && npm run lint
 ```text
 GoDownloader/
 ├── cmd/
-│   └── server/main.go          # Application entry point & graceful shutdown
+│   └── server/main.go          # Application entry point & engine registration
 ├── internal/
-│   ├── api/                    # HTTP router & handlers (/jobs, /analyze)
+│   ├── api/                    # HTTP router & handlers (/jobs, /jobs/torrent, SSE)
 │   ├── config/                 # App configuration & env vars
-│   ├── database/               # SQLite storage & schema migrations (v1-v3)
+│   ├── database/               # SQLite storage, migrations (v1-v4) & torrent repository
 │   ├── engine/                 # Engine Registry, Resolver, & Adapters
 │   │   ├── aria2/              # aria2 RPC client
-│   │   └── ytdlp/              # yt-dlp runner, analyzer, & progress parser
+│   │   ├── ytdlp/              # yt-dlp runner, analyzer, & progress parser
+│   │   └── qbittorrent/        # qBittorrent Web API v2 client, mapper & engine
 │   ├── events/                 # Pub/Sub EventBus & SSE HTTP handler
 │   └── job/                    # State machine, Manager, Monitor, & Recovery
 ├── web/                        # React + TypeScript + Vite frontend
 │   └── src/
-│       ├── components/         # DownloadForm, FormatSelector, JobCard, JobList
+│       ├── components/         # DownloadForm, FormatSelector, TorrentFileSelector, JobCard, JobList
 │       ├── api.ts              # REST client bindings
 │       └── types.ts            # TypeScript interfaces
 ├── downloads/                  # Default download folder
