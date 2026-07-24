@@ -229,9 +229,12 @@ func (h *Handler) StopSeeding(w http.ResponseWriter, r *http.Request) {
 
 // CreateTorrentJob handles POST /api/v1/jobs/torrent for .torrent file uploads
 func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
-	// Parse multipart form (max 10MB)
+	// Limit request body size to 10MB
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+
+	// Parse multipart form
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid multipart form")
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid or oversized multipart form")
 		return
 	}
 
@@ -242,29 +245,57 @@ func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Validate file extension
-	if !strings.HasSuffix(strings.ToLower(header.Filename), ".torrent") {
+	if header.Size == 0 {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidTorrentFile, "torrent file is empty")
+		return
+	}
+
+	// Safe filename handling
+	safeFilename := filepath.Base(header.Filename)
+	if !strings.HasSuffix(strings.ToLower(safeFilename), ".torrent") {
 		writeError(w, http.StatusBadRequest, job.ErrInvalidTorrentFile, "file must have .torrent extension")
 		return
 	}
 
-	// Save to temp location
-	// Use the data dir from config (we'll need to get it from somewhere)
-	// For now, save to a temp file
+	// Read initial header bytes to validate bencoded torrent format (starts with 'd')
+	buf := make([]byte, 512)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidTorrentFile, "failed to read torrent file header")
+		return
+	}
+	if n == 0 || buf[0] != 'd' {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidTorrentFile, "invalid torrent file format: missing bencoded dictionary")
+		return
+	}
+
+	// Create temp file
 	tmpFile, err := os.CreateTemp("", "godownloader-*.torrent")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to save torrent file")
 		return
 	}
-	defer tmpFile.Close()
+	tmpPath := tmpFile.Name()
 
-	if _, err := io.Copy(tmpFile, file); err != nil {
+	// Write header bytes + remaining content
+	if _, err := tmpFile.Write(buf[:n]); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
 		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to save torrent file")
 		return
 	}
 
-	j, err := h.manager.CreateTorrentFromFile(r.Context(), tmpFile.Name())
+	if _, err := io.Copy(tmpFile, file); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to save torrent file")
+		return
+	}
+	tmpFile.Close()
+
+	j, err := h.manager.CreateTorrentFromFile(r.Context(), tmpPath)
 	if err != nil {
+		os.Remove(tmpPath)
 		writeAppError(w, err)
 		return
 	}
