@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 )
@@ -143,7 +144,15 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			log.Printf("recovery: torrent job %s is seeding in engine but seedAfterComplete=false; removing from daemon and completing", j.ID)
 			if te, ok := eng.(ITorrentEngine); ok {
 				if err := te.RemoveTorrent(ctx, j.EngineID, false); err != nil {
-					log.Printf("recovery warning: failed to remove torrent %s from daemon: %v", j.EngineID, err)
+					log.Printf("recovery error: failed to remove torrent %s from daemon: %v", j.EngineID, err)
+					j.Status = StatusFailed
+					j.Error = fmt.Sprintf("failed to remove completed torrent from qBittorrent during recovery: %v", err)
+					j.SpeedBytesPerSecond = 0
+					j.ETASeconds = 0
+					j.UpdatedAt = time.Now()
+					m.repo.Update(ctx, j)
+					m.publish(EventJobFailed, j)
+					return
 				}
 			}
 			j.Status = StatusCompleted
