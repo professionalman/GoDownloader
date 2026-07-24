@@ -391,3 +391,26 @@ func TestRepository_GetActiveTorrentJobByInfoHash(t *testing.T) {
 		}
 	})
 }
+
+func TestSQLite_Migrations(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sqlitemig-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	dbPath := filepath.Join(dir, "test_migrations.db")
+
+	// 1. Fresh DB
+	db, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() fresh database failed: %v", err)
+	}
+	db.Close()
+
+	// 2. Reopen existing current DB
+	db, err = New(dbPath)
+	if err != nil {
+		t.Fatalf("New() reopening existing database failed: %v", err)
+	}
+	db.Close()
+}

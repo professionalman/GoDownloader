@@ -23,8 +23,9 @@ type downloadState struct {
 }
 
 var (
-	_ job.IEngine        = (*Engine)(nil)
-	_ job.IMediaAnalyzer = (*Engine)(nil)
+	_ job.IEngine             = (*Engine)(nil)
+	_ job.IMediaAnalyzer      = (*Engine)(nil)
+	_ job.IShutdownableEngine = (*Engine)(nil)
 )
 
 // Engine implements job.IEngine and job.IMediaAnalyzer for yt-dlp.
@@ -135,6 +136,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 	defer state.mu.Unlock()
 
 	if state.done {
+		defer e.Cleanup(j.ID)
 		if state.cancelled {
 			return &job.EngineStatus{
 				Status:   job.StatusCancelled,
@@ -177,11 +179,6 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 
 // runDownload executes yt-dlp and parses its output in real-time.
 func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, args []string) {
-	defer func() {
-		// Clean up after a delay to allow final status reads
-		// The monitor will read the final status and clean up via removeActive
-	}()
-
 	cmd := exec.CommandContext(ctx, e.ytdlpPath, args...)
 
 	// Capture stdout for progress
@@ -287,4 +284,21 @@ func (e *Engine) Cleanup(jobID string) {
 	e.mu.Lock()
 	delete(e.downloads, jobID)
 	e.mu.Unlock()
+}
+
+// Shutdown cancels all active yt-dlp subprocesses on application exit.
+func (e *Engine) Shutdown() {
+	e.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(e.downloads))
+	for id, state := range e.downloads {
+		if state != nil && state.cancel != nil {
+			cancels = append(cancels, state.cancel)
+		}
+		delete(e.downloads, id)
+	}
+	e.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
 }

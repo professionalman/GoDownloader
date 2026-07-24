@@ -16,3 +16,6 @@ type IEngineRegistry = job.IEngineRegistry
 
 // ITorrentEngine extends IEngine with torrent-specific operations.
 type ITorrentEngine = job.ITorrentEngine
+
+// IShutdownableEngine is optionally implemented by engines requiring cleanup on shutdown.
+type IShutdownableEngine = job.IShutdownableEngine

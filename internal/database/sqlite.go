@@ -57,23 +57,29 @@ func (db *DB) migrate() error {
 		updated_at DATETIME NOT NULL
 	);`
 	if _, err := db.conn.Exec(createTable); err != nil {
-		return fmt.Errorf("create table: %w", err)
+		return fmt.Errorf("create table jobs: %w", err)
 	}
 
 	// Migrate from V0.1 schema if needed
-	db.migrateFromV01()
+	if err := db.migrateFromV01(); err != nil {
+		return fmt.Errorf("migrate from V0.1: %w", err)
+	}
 
-	db.migrateToV03()
-	db.migrateToV04()
+	if err := db.migrateToV03(); err != nil {
+		return fmt.Errorf("migrate to V0.3: %w", err)
+	}
+	if err := db.migrateToV04(); err != nil {
+		return fmt.Errorf("migrate to V0.4: %w", err)
+	}
 
 	return nil
 }
 
 // migrateFromV01 handles migration from V0.1 schema.
-func (db *DB) migrateFromV01() {
+func (db *DB) migrateFromV01() error {
 	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
 	if err != nil {
-		return
+		return fmt.Errorf("query pragma table_info(jobs): %w", err)
 	}
 	defer rows.Close()
 
@@ -91,7 +97,7 @@ func (db *DB) migrateFromV01() {
 		var dfltValue sql.NullString
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
-			continue
+			return fmt.Errorf("scan pragma table_info(jobs): %w", err)
 		}
 		switch name {
 		case "aria2_gid":
@@ -108,32 +114,51 @@ func (db *DB) migrateFromV01() {
 			hasEngine = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows.Err pragma table_info(jobs): %w", err)
+	}
 
 	// Add missing columns for V0.2
 	if !hasEngineID && hasAria2GID {
-		db.conn.Exec("ALTER TABLE jobs ADD COLUMN engine_id TEXT NOT NULL DEFAULT ''")
-		db.conn.Exec("UPDATE jobs SET engine_id = aria2_gid WHERE aria2_gid != ''")
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN engine_id TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column engine_id: %w", err)
+		}
+		if _, err := db.conn.Exec("UPDATE jobs SET engine_id = aria2_gid WHERE aria2_gid != ''"); err != nil {
+			return fmt.Errorf("update engine_id from aria2_gid: %w", err)
+		}
 	}
 	if !hasEngine {
-		db.conn.Exec("ALTER TABLE jobs ADD COLUMN engine TEXT NOT NULL DEFAULT 'aria2'")
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN engine TEXT NOT NULL DEFAULT 'aria2'"); err != nil {
+			return fmt.Errorf("add column engine: %w", err)
+		}
 	}
 	if !hasSpeedNew && hasSpeedOld {
-		db.conn.Exec("ALTER TABLE jobs ADD COLUMN speed_bytes_per_second INTEGER NOT NULL DEFAULT 0")
-		db.conn.Exec("UPDATE jobs SET speed_bytes_per_second = speed")
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN speed_bytes_per_second INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("add column speed_bytes_per_second: %w", err)
+		}
+		if _, err := db.conn.Exec("UPDATE jobs SET speed_bytes_per_second = speed"); err != nil {
+			return fmt.Errorf("update speed_bytes_per_second: %w", err)
+		}
 	}
 	if !hasETASeconds {
-		db.conn.Exec("ALTER TABLE jobs ADD COLUMN eta_seconds INTEGER NOT NULL DEFAULT 0")
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN eta_seconds INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("add column eta_seconds: %w", err)
+		}
 	}
 
 	// Convert uppercase statuses to lowercase (V0.1 → V0.2)
-	db.conn.Exec("UPDATE jobs SET status = LOWER(status) WHERE status != LOWER(status)")
+	if _, err := db.conn.Exec("UPDATE jobs SET status = LOWER(status) WHERE status != LOWER(status)"); err != nil {
+		return fmt.Errorf("lowercase job status: %w", err)
+	}
+
+	return nil
 }
 
 // migrateToV03 adds V0.3 media download columns.
-func (db *DB) migrateToV03() {
+func (db *DB) migrateToV03() error {
 	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
 	if err != nil {
-		return
+		return fmt.Errorf("query pragma table_info(jobs): %w", err)
 	}
 	defer rows.Close()
 
@@ -147,7 +172,7 @@ func (db *DB) migrateToV03() {
 		var dfltValue sql.NullString
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
-			continue
+			return fmt.Errorf("scan pragma table_info(jobs): %w", err)
 		}
 		switch name {
 		case "type":
@@ -156,18 +181,27 @@ func (db *DB) migrateToV03() {
 			hasMediaInfo = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows.Err pragma table_info(jobs): %w", err)
+	}
 
 	if !hasType {
-		db.conn.Exec("ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'download'")
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'download'"); err != nil {
+			return fmt.Errorf("add column type: %w", err)
+		}
 	}
 	if !hasMediaInfo {
-		db.conn.Exec("ALTER TABLE jobs ADD COLUMN media_info TEXT NOT NULL DEFAULT ''")
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN media_info TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column media_info: %w", err)
+		}
 	}
+
+	return nil
 }
 
-func (db *DB) migrateToV04() {
+func (db *DB) migrateToV04() error {
 	// Create torrent_jobs table
-	db.conn.Exec(`CREATE TABLE IF NOT EXISTS torrent_jobs (
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS torrent_jobs (
 		job_id TEXT PRIMARY KEY,
 		info_hash TEXT NOT NULL DEFAULT '',
 		name TEXT NOT NULL DEFAULT '',
@@ -175,10 +209,12 @@ func (db *DB) migrateToV04() {
 		seed_after_complete INTEGER NOT NULL DEFAULT 0,
 		torrent_file_path TEXT NOT NULL DEFAULT '',
 		FOREIGN KEY (job_id) REFERENCES jobs(id)
-	)`)
+	)`); err != nil {
+		return fmt.Errorf("create table torrent_jobs: %w", err)
+	}
 
 	// Create torrent_files table
-	db.conn.Exec(`CREATE TABLE IF NOT EXISTS torrent_files (
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS torrent_files (
 		job_id TEXT NOT NULL,
 		file_index INTEGER NOT NULL,
 		path TEXT NOT NULL DEFAULT '',
@@ -187,10 +223,16 @@ func (db *DB) migrateToV04() {
 		priority TEXT NOT NULL DEFAULT 'normal',
 		PRIMARY KEY (job_id, file_index),
 		FOREIGN KEY (job_id) REFERENCES jobs(id)
-	)`)
+	)`); err != nil {
+		return fmt.Errorf("create table torrent_files: %w", err)
+	}
 
 	// Add index for looking up torrent jobs by info_hash
-	db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_torrent_jobs_info_hash ON torrent_jobs(info_hash)`)
+	if _, err := db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_torrent_jobs_info_hash ON torrent_jobs(info_hash)`); err != nil {
+		return fmt.Errorf("create index idx_torrent_jobs_info_hash: %w", err)
+	}
+
+	return nil
 }
 
 // Conn returns the underlying sql.DB connection.

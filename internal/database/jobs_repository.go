@@ -11,7 +11,6 @@ import (
 
 // IJobRepository defines the persistence interface for jobs.
 type IJobRepository = job.IJobRepository
-type JobRepository = job.IJobRepository
 
 var _ job.IJobRepository = (*SQLiteJobRepository)(nil)
 

@@ -66,3 +66,51 @@ func TestDownloadState_CancelledStatus(t *testing.T) {
 		t.Errorf("expected status cancelled, got %s", status.Status)
 	}
 }
+
+func TestEngine_StatusCleanupAndShutdown(t *testing.T) {
+	eng := NewEngine("ytdlp", "ffmpeg")
+
+	var cancelled bool
+	state := &downloadState{
+		done: true,
+		cancel: func() {
+			cancelled = true
+		},
+		progress: progressInfo{Percent: 100, TotalBytes: 5000},
+	}
+	eng.downloads["job-clean-test"] = state
+
+	j := &job.Job{ID: "job-clean-test"}
+
+	// 1. Final status is observable
+	status, err := eng.Status(context.Background(), j)
+	if err != nil {
+		t.Fatalf("expected Status to succeed, got %v", err)
+	}
+	if status.Status != job.StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", status.Status)
+	}
+
+	// 2. Next status read confirms download state was cleaned up
+	_, err = eng.Status(context.Background(), j)
+	if err == nil {
+		t.Error("expected Status to fail after completed state was cleaned up")
+	}
+
+	// 3. Test Shutdown() cancels remaining active process contexts
+	stateActive := &downloadState{
+		done: false,
+		cancel: func() {
+			cancelled = true
+		},
+	}
+	eng.downloads["job-shutdown-test"] = stateActive
+
+	eng.Shutdown()
+	if !cancelled {
+		t.Error("expected active download context to be cancelled on Shutdown")
+	}
+	if len(eng.downloads) != 0 {
+		t.Errorf("expected downloads map to be empty after Shutdown, got len %d", len(eng.downloads))
+	}
+}
