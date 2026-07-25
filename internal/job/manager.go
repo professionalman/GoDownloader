@@ -1662,6 +1662,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 					}
 					m.removeActive(j.ID)
 					m.publish(EventJobFailed, j)
+					m.cleanupTerminalEngineState(j)
 					if m.scheduler != nil {
 						m.scheduler.Kick()
 					}
@@ -1712,6 +1713,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				}
 				m.removeActive(j.ID)
 				m.publish(EventJobFailed, j)
+				m.cleanupTerminalEngineState(j)
 				if m.scheduler != nil {
 					m.scheduler.Kick()
 				}
@@ -1730,6 +1732,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				}
 				m.removeActive(j.ID)
 				m.publish(EventJobFailed, j)
+				m.cleanupTerminalEngineState(j)
 				if m.scheduler != nil {
 					m.scheduler.Kick()
 				}
@@ -2280,6 +2283,7 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 			JobID:    j.ID,
 			EngineID: j.EngineID,
 			Action:   qj.Action,
+			Kind:     DispatchFailureExternalExecutionPersistence,
 			Err:      err,
 		}
 	}

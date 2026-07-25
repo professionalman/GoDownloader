@@ -1317,13 +1317,13 @@ func TestScheduler_ExternalReconciliation_PreservesCompleted(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	updated, _ := jobRepo.GetByID(ctx, j.ID)
-	if updated.Status != job.StatusCompleted {
-		t.Errorf("expected job status COMPLETED, got %s", updated.Status)
+	if updated.Status != job.StatusDownloading {
+		t.Errorf("expected job status DOWNLOADING, got %s", updated.Status)
 	}
 
 	qEntry, _ := queueRepo.Get(ctx, j.ID)
 	if qEntry != nil {
-		t.Errorf("expected queue entry to be deleted after COMPLETED reconciliation")
+		t.Errorf("expected queue entry to be deleted after reconciliation")
 	}
 }
 

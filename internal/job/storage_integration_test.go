@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1552,17 +1553,17 @@ func TestMediaCompletion_PersistenceFailurePreservesTerminalEngineState(t *testi
 	}
 }
 
-func TestScheduler_ReconciliationCOMPLETED_CleansTerminalEngineState(t *testing.T) {
+func TestScheduler_ReconciliationCompleted_RestoresMonitorOwnership(t *testing.T) {
 	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
 	ctx := context.Background()
 
 	j := &Job{
-		ID:             "reconcile_completed_cleanup",
+		ID:             "reconcile_completed_restore",
 		Source:         "https://example.com/fileDone.zip",
-		Name:           "Reconcile Done Cleanup",
-		Status:         StatusDownloading,
+		Name:           "Reconcile Restore",
+		Status:         StatusQueued,
 		Engine:         "ytdlp",
-		EngineID:       "ytdlp_gid_done",
+		EngineID:       "ytdlp_gid_restore",
 		Type:           TypeMedia,
 		DestinationDir: downloadDir,
 		CreatedAt:      time.Now(),
@@ -1580,11 +1581,16 @@ func TestScheduler_ReconciliationCOMPLETED_CleansTerminalEngineState(t *testing.
 	reg.engines["ytdlp"] = cleanEng
 
 	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
 
+	activeAdded := false
 	limitFn := func(ctx context.Context) int { return 1 }
 	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
 	sched.SetEngineRegistry(reg)
 	sched.SetEventBus(bus)
+	sched.SetAddActiveFunc(func(activeJ *Job) {
+		activeAdded = true
+	})
 	mgr.scheduler = sched
 
 	// Simulate dirty external reservation
@@ -1593,13 +1599,366 @@ func TestScheduler_ReconciliationCOMPLETED_CleansTerminalEngineState(t *testing.
 	// Reconcile
 	sched.reconcileJob(ctx, j.ID)
 
-	// Assert status COMPLETED and engine cleaned
+	// Assert job status restored to DOWNLOADING
 	updated, _ := jobRepo.GetByID(ctx, j.ID)
-	if updated.Status != StatusCompleted {
-		t.Errorf("expected StatusCompleted after reconciliation, got %s", updated.Status)
+	if updated.Status != StatusDownloading {
+		t.Errorf("expected StatusDownloading after reconciliation, got %s", updated.Status)
+	}
+
+	// Queue row deleted
+	qItem, _ := queueRepo.Get(ctx, j.ID)
+	if qItem != nil {
+		t.Errorf("expected queue entry to be deleted after reconciliation")
+	}
+
+	// Active tracking added
+	if !activeAdded {
+		t.Errorf("expected job to be added to active tracking")
+	}
+
+	// Reservation released
+	sched.mu.Lock()
+	_, inFlight := sched.inFlight[j.ID]
+	sched.mu.Unlock()
+	if inFlight {
+		t.Errorf("expected in-flight reservation to be released")
+	}
+
+	// EventJobCompleted NOT emitted by Scheduler
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted MUST NOT be emitted by Scheduler reconciliation")
+		}
+	}
+
+	// Engine Cleanup NOT called
+	if cleanEng.cleaned[j.ID] {
+		t.Errorf("ICleanupableEngine.Cleanup MUST NOT be called by Scheduler reconciliation")
+	}
+}
+
+func TestScheduler_ReconciliationCompleted_MediaFinalizesThroughManager(t *testing.T) {
+	mgr, jobRepo, queueRepo, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "temp_reconcile_media")
+	os.MkdirAll(workDir, 0755)
+	storageSrv.PrepareWorkDir(ctx, "job_rec_media", workDir)
+
+	// Put artifact in WorkDir
+	artifactPath := filepath.Join(workDir, "video.mp4")
+	os.WriteFile(artifactPath, []byte("media video content"), 0644)
+
+	j := &Job{
+		ID:             "job_rec_media",
+		Source:         "https://youtube.com/watch?v=rec_media",
+		Name:           "Reconcile Media Test",
+		Status:         StatusQueued,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp_rec_gid",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: j.ID, Action: QueueActionStart})
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100, OutputPath: artifactPath},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(bus)
+	mgr.scheduler = sched
+
+	// Step 1: Scheduler reconciliation
+	sched.markReservationDirtyExternal(j.ID, QueueActionStart, j.EngineID)
+	sched.reconcileJob(ctx, j.ID)
+
+	// Assert Step 1: Restored to DOWNLOADING, engine state present, FinalPath empty, no event
+	updated1, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated1.Status != StatusDownloading {
+		t.Errorf("Step 1: expected status DOWNLOADING, got %s", updated1.Status)
+	}
+	if updated1.FinalPath != "" {
+		t.Errorf("Step 1: FinalPath must remain empty prior to Manager finalization, got %s", updated1.FinalPath)
+	}
+	if cleanEng.cleaned[j.ID] {
+		t.Errorf("Step 1: Engine cleanup MUST NOT be called during Scheduler reconciliation")
+	}
+
+	compEventCount := 0
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			compEventCount++
+		}
+	}
+	if compEventCount != 0 {
+		t.Errorf("Step 1: EventJobCompleted count must be 0, got %d", compEventCount)
+	}
+
+	// Step 2: Monitor / Manager terminal handling
+	mgr.UpdateJobFromEngine(ctx, updated1, &EngineStatus{
+		Status:     StatusCompleted,
+		Progress:   100,
+		OutputPath: artifactPath,
+	}, true)
+
+	// Assert Step 2: Finalized in DestinationDir, Status = COMPLETED, FinalPath set, event published once, engine cleaned
+	updated2, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated2.Status != StatusCompleted {
+		t.Errorf("Step 2: expected StatusCompleted after Manager finalization, got %s", updated2.Status)
+	}
+	if updated2.FinalPath == "" || !strings.HasPrefix(updated2.FinalPath, downloadDir) {
+		t.Errorf("Step 2: expected FinalPath in DestinationDir, got %s", updated2.FinalPath)
 	}
 
 	if !cleanEng.cleaned[j.ID] {
-		t.Errorf("expected ICleanupableEngine.Cleanup to be called during external reconciliation of COMPLETED status")
+		t.Errorf("Step 2: Engine cleanup expected after Manager finalization")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted && ev.Job.ID == j.ID {
+			compEventCount++
+		}
+	}
+	if compEventCount != 1 {
+		t.Errorf("Step 2: EventJobCompleted count must be exactly 1, got %d", compEventCount)
+	}
+}
+
+func TestMediaCompletion_MissingArtifact_CleansEngineAfterFailedStatePersisted(t *testing.T) {
+	mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "temp_media_missing")
+	os.MkdirAll(workDir, 0755)
+	storageSrv.PrepareWorkDir(ctx, "job_missing_art", workDir)
+
+	j := &Job{
+		ID:             "job_missing_art",
+		Source:         "https://youtube.com/watch?v=missing_art",
+		Name:           "Missing Artifact Test",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp_missing_gid",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Update with completed status but no output file in workDir
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusFailed {
+		t.Errorf("expected status FAILED when artifact missing, got %s", updated.Status)
+	}
+
+	failEventEmitted := false
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobFailed && ev.Job.ID == j.ID {
+			failEventEmitted = true
+		}
+	}
+	if !failEventEmitted {
+		t.Errorf("expected EventJobFailed to be emitted when artifact missing")
+	}
+
+	if !cleanEng.cleaned[j.ID] {
+		t.Errorf("expected engine cleanup to be called when missing artifact FAILED status persistence succeeds")
+	}
+}
+
+func TestMediaCompletion_MissingArtifact_PersistenceFailurePreservesEngineState(t *testing.T) {
+	mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "temp_media_missing_pers_fail")
+	os.MkdirAll(workDir, 0755)
+	storageSrv.PrepareWorkDir(ctx, "job_missing_pers_fail", workDir)
+
+	j := &Job{
+		ID:             "job_missing_pers_fail",
+		Source:         "https://youtube.com/watch?v=missing_pers_fail",
+		Name:           "Missing Artifact Persistence Failure",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp_missing_fail_gid",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Inject DB persistence failure
+	jobRepo.updateErr = errors.New("simulated DB update error")
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobFailed {
+			t.Errorf("EventJobFailed MUST NOT be emitted on DB update failure")
+		}
+	}
+
+	if cleanEng.cleaned[j.ID] {
+		t.Errorf("engine Cleanup MUST NOT be called when FAILED state persistence fails")
+	}
+}
+
+func TestMediaCompletion_FinalizeError_CleansEngineAfterFailedPersistence(t *testing.T) {
+	mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "temp_media_finalize_fail")
+	os.MkdirAll(workDir, 0755)
+	storageSrv.PrepareWorkDir(ctx, "job_finalize_fail", workDir)
+
+	// Make destination directory unwritable/invalid so FinalizeFile fails
+	invalidDest := filepath.Join(downloadDir, "non_existent_file_as_dir")
+	os.WriteFile(invalidDest, []byte("file blocker"), 0644)
+
+	artifactPath := filepath.Join(workDir, "video.mp4")
+	os.WriteFile(artifactPath, []byte("media content"), 0644)
+
+	j := &Job{
+		ID:             "job_finalize_fail",
+		Source:         "https://youtube.com/watch?v=finalize_fail",
+		Name:           "Finalize Fail Test",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp_finalize_fail_gid",
+		Type:           TypeMedia,
+		DestinationDir: invalidDest, // Will fail FinalizeFile
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100, OutputPath: artifactPath},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100, OutputPath: artifactPath}, true)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusFailed {
+		t.Errorf("expected status FAILED when FinalizeFile fails, got %s", updated.Status)
+	}
+
+	failEventEmitted := false
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobFailed && ev.Job.ID == j.ID {
+			failEventEmitted = true
+		}
+	}
+	if !failEventEmitted {
+		t.Errorf("expected EventJobFailed to be emitted on finalization failure")
+	}
+
+	if !cleanEng.cleaned[j.ID] {
+		t.Errorf("expected engine cleanup to be called when FinalizeFile failure persists FAILED status")
+	}
+}
+
+func TestDispatch_ExternalExecutionPersistenceKind(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job_ext_kind_test",
+		Source:         "https://example.com/fileExtKind.zip",
+		Name:           "External Persistence Kind Test",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionStart}
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: j.ID, Action: QueueActionStart})
+
+	eng := &fakeEngine{
+		startFunc: func(ctx context.Context, j *Job, dir string) (string, error) {
+			return "gid_ext_kind_123", nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = eng
+
+	// Inject DB persistence failure after engine Start succeeds
+	jobRepo.updateErr = errors.New("simulated DB update failure post-start")
+
+	err := mgr.dispatchQueuedJob(ctx, qj)
+	if err == nil {
+		t.Fatalf("expected error from dispatchQueuedJob when DB update fails")
+	}
+
+	var pErr *DispatchPersistenceError
+	if !errors.As(err, &pErr) {
+		t.Fatalf("expected *DispatchPersistenceError, got %T: %v", err, err)
+	}
+
+	if pErr.Kind != DispatchFailureExternalExecutionPersistence {
+		t.Errorf("expected Kind == DispatchFailureExternalExecutionPersistence, got %s", pErr.Kind)
+	}
+
+	if pErr.EngineID != "gid_ext_kind_123" {
+		t.Errorf("expected EngineID == gid_ext_kind_123, got %s", pErr.EngineID)
 	}
 }

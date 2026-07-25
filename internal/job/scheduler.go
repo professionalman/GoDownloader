@@ -426,27 +426,20 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 		s.Kick()
 
 	case StatusCompleted:
-		current.Status = StatusCompleted
+		current.Status = StatusDownloading
 		current.UpdatedAt = now
 		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
-			log.Printf("scheduler: external reconciliation failed to persist COMPLETED for job %s: %v", res.JobID, updateErr)
+			log.Printf("scheduler: external reconciliation failed to restore DOWNLOADING for completed job %s: %v", res.JobID, updateErr)
 			return
 		}
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
 			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
 		}
+		if s.addActiveFn != nil {
+			s.addActiveFn(current)
+		}
 		s.releaseInFlight(current.ID)
-		if s.bus != nil {
-			s.bus.Publish(Event{Type: EventJobCompleted, Job: *current})
-		}
-		if s.engines != nil {
-			if eng, ok := s.engines.Get(current.Engine); ok && eng != nil {
-				if cleanupEng, ok := eng.(ICleanupableEngine); ok {
-					cleanupEng.Cleanup(current.ID)
-				}
-			}
-		}
-		log.Printf("scheduler: external reconciliation succeeded for job %s, status=COMPLETED", current.ID)
+		log.Printf("scheduler: external reconciliation restored DOWNLOADING for job %s (engine completed), delegating to monitor/manager", current.ID)
 		s.Kick()
 
 	default:
