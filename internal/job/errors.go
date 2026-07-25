@@ -35,8 +35,15 @@ const (
 	ErrDuplicateTorrent   = "DUPLICATE_TORRENT"
 	ErrNoFilesSelected    = "NO_FILES_SELECTED"
 	ErrTorrentNotFound    = "TORRENT_NOT_FOUND"
-	ErrInvalidPriority    = "INVALID_PRIORITY"
-	ErrBatchLimitExceeded = "BATCH_LIMIT_EXCEEDED"
+	ErrInvalidPriority          = "INVALID_PRIORITY"
+	ErrBatchLimitExceeded       = "BATCH_LIMIT_EXCEEDED"
+	ErrInvalidStorageSelection = "INVALID_STORAGE_SELECTION"
+	ErrInvalidDestination      = "INVALID_DESTINATION"
+	ErrCategoryNotFound        = "CATEGORY_NOT_FOUND"
+	ErrCategoryNameConflict    = "CATEGORY_NAME_CONFLICT"
+	ErrInsufficientDiskSpace   = "INSUFFICIENT_DISK_SPACE"
+	ErrFileConflict            = "FILE_CONFLICT"
+	ErrStorageError            = "STORAGE_ERROR"
 )
 
 // Sentinel errors for scheduler reconciliation

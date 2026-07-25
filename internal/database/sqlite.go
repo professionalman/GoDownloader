@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 
 	"downloader/internal/job"
@@ -73,6 +75,9 @@ func (db *DB) migrate() error {
 	}
 	if err := db.migrateToV05(); err != nil {
 		return fmt.Errorf("migrate to V0.5: %w", err)
+	}
+	if err := db.migrateToV06(); err != nil {
+		return fmt.Errorf("migrate to V0.6: %w", err)
 	}
 
 	return nil
@@ -339,6 +344,119 @@ func (db *DB) migrateToV05() error {
 			return fmt.Errorf("insert backfill legacy queued job %s: %w", b.id, execErr)
 		}
 		pos++
+	}
+
+	return nil
+}
+
+func (db *DB) migrateToV06() error {
+	// Create categories table
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS categories (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL COLLATE NOCASE,
+		directory TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create table categories: %w", err)
+	}
+
+	if _, err := db.conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_name ON categories(name COLLATE NOCASE)`); err != nil {
+		return fmt.Errorf("create index idx_categories_name: %w", err)
+	}
+
+	// PRAGMA table_info to check missing V0.6 columns in jobs
+	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
+	if err != nil {
+		return fmt.Errorf("query pragma table_info(jobs): %w", err)
+	}
+	defer rows.Close()
+
+	hasCategoryID := false
+	hasDestinationDir := false
+	hasWorkDir := false
+	hasConflictPolicy := false
+	hasFinalPath := false
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan pragma table_info(jobs): %w", err)
+		}
+		switch name {
+		case "category_id":
+			hasCategoryID = true
+		case "destination_dir":
+			hasDestinationDir = true
+		case "work_dir":
+			hasWorkDir = true
+		case "conflict_policy":
+			hasConflictPolicy = true
+		case "final_path":
+			hasFinalPath = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows.Err pragma table_info(jobs): %w", err)
+	}
+
+	if !hasCategoryID {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN category_id TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column category_id: %w", err)
+		}
+	}
+	if !hasDestinationDir {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN destination_dir TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column destination_dir: %w", err)
+		}
+	}
+	if !hasWorkDir {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column work_dir: %w", err)
+		}
+	}
+	if !hasConflictPolicy {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT 'rename'"); err != nil {
+			return fmt.Errorf("add column conflict_policy: %w", err)
+		}
+	}
+	if !hasFinalPath {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN final_path TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column final_path: %w", err)
+		}
+	}
+
+	// Backfill legacy jobs where destination_dir is empty
+	defaultDir := "./downloads"
+	if absDir, err := filepath.Abs(defaultDir); err == nil {
+		defaultDir = absDir
+	}
+	if _, err := db.conn.Exec("UPDATE jobs SET destination_dir = ? WHERE destination_dir = '' OR destination_dir IS NULL", defaultDir); err != nil {
+		return fmt.Errorf("backfill legacy job destination_dir: %w", err)
+	}
+
+	// Seed initial categories if table is empty
+	var catCount int
+	if err := db.conn.QueryRow("SELECT count(*) FROM categories").Scan(&catCount); err == nil && catCount == 0 {
+		now := time.Now()
+		seeds := []struct {
+			name string
+			dir  string
+		}{
+			{"Video", "Video"},
+			{"Music", "Music"},
+			{"Archives", "Archives"},
+			{"Torrents", "Torrents"},
+		}
+		for _, seed := range seeds {
+			catID := uuid.New().String()
+			db.conn.Exec("INSERT OR IGNORE INTO categories (id, name, directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+				catID, seed.name, seed.dir, now, now)
+		}
 	}
 
 	return nil

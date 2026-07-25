@@ -168,9 +168,25 @@ type Job struct {
 	Priority JobPriority `json:"priority"`
 	BatchID  string      `json:"batchId,omitempty"`
 
+	CategoryID     string                 `json:"categoryId,omitempty"`
+	DestinationDir string                 `json:"destinationDir"`
+	WorkDir        string                 `json:"workDir,omitempty"`
+	ConflictPolicy FilenameConflictPolicy `json:"conflictPolicy"`
+	FinalPath      string                 `json:"finalPath,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
+
+// FilenameConflictPolicy defines the strategy when a destination file already exists.
+type FilenameConflictPolicy string
+
+const (
+	ConflictPolicyRename        FilenameConflictPolicy = "rename"
+	ConflictPolicyOverwrite     FilenameConflictPolicy = "overwrite"
+	ConflictPolicyFail          FilenameConflictPolicy = "fail"
+	ConflictPolicyEngineManaged FilenameConflictPolicy = "engine_managed"
+)
 
 // JobPriority represents the queue priority level for a download job.
 type JobPriority string
@@ -220,13 +236,21 @@ type QueuedJob struct {
 
 // BatchInput defines a single job input inside a batch submission.
 type BatchInput struct {
-	Source   string      `json:"source"`
-	Priority JobPriority `json:"priority,omitempty"`
+	Source         string                 `json:"source"`
+	Priority       JobPriority            `json:"priority,omitempty"`
+	CategoryID     string                 `json:"categoryId,omitempty"`
+	DestinationDir string                 `json:"destinationDir,omitempty"`
+	ConflictPolicy FilenameConflictPolicy `json:"conflictPolicy,omitempty"`
 }
 
 // CreateBatchRequest represents the POST /jobs/batch body.
 type CreateBatchRequest struct {
-	Inputs []BatchInput `json:"inputs"`
+	Inputs         []BatchInput           `json:"inputs,omitempty"`
+	Sources        []string               `json:"sources,omitempty"`
+	Priority       JobPriority            `json:"priority,omitempty"`
+	CategoryID     string                 `json:"categoryId,omitempty"`
+	DestinationDir string                 `json:"destinationDir,omitempty"`
+	ConflictPolicy FilenameConflictPolicy `json:"conflictPolicy,omitempty"`
 }
 
 // BatchItemResult represents the outcome for one item in a batch request.

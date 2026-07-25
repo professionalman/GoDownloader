@@ -16,6 +16,7 @@ type EngineStatus struct {
 
 	Error       string
 	FileName    string
+	OutputPath  string
 	UploadSpeed int64
 	Uploaded    int64
 	Ratio       float64

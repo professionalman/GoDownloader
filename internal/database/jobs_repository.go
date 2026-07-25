@@ -26,7 +26,8 @@ func NewSQLiteJobRepository(db *DB) *SQLiteJobRepository {
 }
 
 const jobColumns = `id, source, name, status, total_bytes, completed_bytes, progress,
-	speed_bytes_per_second, eta_seconds, error, engine, engine_id, type, media_info, priority, batch_id, created_at, updated_at`
+	speed_bytes_per_second, eta_seconds, error, engine, engine_id, type, media_info, priority, batch_id,
+	category_id, destination_dir, work_dir, conflict_policy, final_path, created_at, updated_at`
 
 func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	var j job.Job
@@ -38,6 +39,7 @@ func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 		&j.Error, &j.Engine, &j.EngineID,
 		&j.Type, &mediaInfoJSON,
 		&j.Priority, &j.BatchID,
+		&j.CategoryID, &j.DestinationDir, &j.WorkDir, &j.ConflictPolicy, &j.FinalPath,
 		&j.CreatedAt, &j.UpdatedAt,
 	)
 	if err != nil {
@@ -51,6 +53,9 @@ func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	}
 	if j.Priority == "" {
 		j.Priority = job.JobPriorityNormal
+	}
+	if j.ConflictPolicy == "" {
+		j.ConflictPolicy = job.ConflictPolicyRename
 	}
 	return j, nil
 }
@@ -66,7 +71,10 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 	if j.Priority == "" {
 		j.Priority = job.JobPriorityNormal
 	}
-	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
+	if j.ConflictPolicy == "" {
+		j.ConflictPolicy = job.ConflictPolicyRename
+	}
+	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.ID, j.Source, j.Name, j.Status,
 		j.TotalBytes, j.CompletedBytes, j.Progress,
@@ -74,6 +82,7 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 		j.Error, j.Engine, j.EngineID,
 		j.Type, mediaInfoJSON,
 		j.Priority, j.BatchID,
+		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
 		j.CreatedAt, j.UpdatedAt,
 	)
 	if err != nil {
@@ -93,16 +102,21 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 	if j.Priority == "" {
 		j.Priority = job.JobPriorityNormal
 	}
+	if j.ConflictPolicy == "" {
+		j.ConflictPolicy = job.ConflictPolicyRename
+	}
 	query := `UPDATE jobs SET
 		source=?, name=?, status=?, total_bytes=?, completed_bytes=?, progress=?,
 		speed_bytes_per_second=?, eta_seconds=?, error=?, engine=?, engine_id=?,
 		type=?, media_info=?, priority=?, batch_id=?,
+		category_id=?, destination_dir=?, work_dir=?, conflict_policy=?, final_path=?,
 		updated_at=?
 		WHERE id=?`
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.Source, j.Name, j.Status, j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds, j.Error, j.Engine, j.EngineID,
 		j.Type, mediaInfoJSON, j.Priority, j.BatchID,
+		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
 		j.UpdatedAt, j.ID,
 	)
 	if err != nil {
