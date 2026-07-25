@@ -1222,11 +1222,11 @@ func TestScheduler_Dispatch_StartPreflightSuccess_HandledOnce(t *testing.T) {
 	sched.SetEngineRegistry(reg)
 	sched.SetEventBus(bus)
 	mgr.scheduler = sched
-	sched.Start(ctx)
-	defer sched.Stop()
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Dispatch Job A manually via Scheduler
+	qjA := &QueuedJob{JobID: jA.ID, Action: QueueActionStart}
+	sched.reserveInFlight(jA.ID, QueueActionStart)
+	sched.dispatchSingle(qjA)
 
 	// Assert Job A: FAILED, queue entry removed, EventJobFailed emitted
 	updatedA, _ := jobRepo.GetByID(ctx, jA.ID)
@@ -1251,13 +1251,20 @@ func TestScheduler_Dispatch_StartPreflightSuccess_HandledOnce(t *testing.T) {
 		t.Errorf("expected EventJobFailed exactly once for Job A, got %d", failEventCount)
 	}
 
-	// Job B should have been dispatched cleanly after A's reservation was released
+	// Dispatch Job B after A's failure reservation was released
+	qjB := &QueuedJob{JobID: jB.ID, Action: QueueActionStart}
+	sched.reserveInFlight(jB.ID, QueueActionStart)
+	sched.dispatchSingle(qjB)
+
+	// Job B should have been dispatched cleanly
 	updatedB, _ := jobRepo.GetByID(ctx, jB.ID)
 	if updatedB.Status != StatusDownloading {
 		t.Errorf("expected Job B to dispatch and reach DOWNLOADING, got %s", updatedB.Status)
 	}
 
-	_ = startCalled
+	if !startCalled {
+		t.Errorf("expected eng.Start to be called for Job B")
+	}
 }
 
 func TestScheduler_Dispatch_ResumePreflightSuccess_HandledOnce(t *testing.T) {
@@ -1296,10 +1303,10 @@ func TestScheduler_Dispatch_ResumePreflightSuccess_HandledOnce(t *testing.T) {
 	sched.SetEngineRegistry(reg)
 	sched.SetEventBus(bus)
 	mgr.scheduler = sched
-	sched.Start(ctx)
-	defer sched.Stop()
 
-	time.Sleep(200 * time.Millisecond)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionResume}
+	sched.reserveInFlight(j.ID, QueueActionResume)
+	sched.dispatchSingle(qj)
 
 	updated, _ := jobRepo.GetByID(ctx, j.ID)
 	if updated.Status != StatusPaused {
