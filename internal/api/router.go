@@ -11,27 +11,37 @@ import (
 	"downloader/internal/config"
 	"downloader/internal/events"
 	"downloader/internal/job"
+	"downloader/internal/settings"
 )
 
 // NewRouter sets up the HTTP router with API routes, SSE, and static file serving.
-func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler) http.Handler {
+func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler, settingsService ...*settings.SettingsService) http.Handler {
 	r := mux.NewRouter()
-	h := NewHandler(manager)
+	h := NewHandler(manager, settingsService...)
 
 	// API routes
 	api := r.PathPrefix("/api/v1").Subrouter()
+	api.HandleFunc("/jobs/batch", h.CreateBatchJobs).Methods("POST")
+	api.HandleFunc("/jobs/bulk", h.BulkAction).Methods("POST")
 	api.HandleFunc("/jobs", h.CreateJob).Methods("POST")
 	api.HandleFunc("/jobs", h.GetJobs).Methods("GET")
 	api.HandleFunc("/jobs/torrent", h.CreateTorrentJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/torrent/files", h.GetTorrentFiles).Methods("GET")
 	api.HandleFunc("/jobs/{id}/torrent/start", h.StartTorrent).Methods("POST")
 	api.HandleFunc("/jobs/{id}/stop-seeding", h.StopSeeding).Methods("POST")
+	api.HandleFunc("/jobs/{id}/priority", h.SetJobPriority).Methods("PUT")
 	api.HandleFunc("/jobs/{id}", h.GetJob).Methods("GET")
 	api.HandleFunc("/jobs/{id}/pause", h.PauseJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/resume", h.ResumeJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/retry", h.RetryJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/cancel", h.CancelJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/format", h.SelectFormat).Methods("POST")
+
+	api.HandleFunc("/queue", h.GetQueueSnapshot).Methods("GET")
+	api.HandleFunc("/queue/reorder", h.ReorderQueue).Methods("PUT")
+	api.HandleFunc("/settings", h.GetSettings).Methods("GET")
+	api.HandleFunc("/settings", h.UpdateSettings).Methods("PUT")
+
 	api.Handle("/events", sseHandler).Methods("GET")
 
 	// Config endpoint

@@ -3,6 +3,9 @@ import type { Job } from '../types';
 
 interface JobCardProps {
   job: Job;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
+  onSetPriority?: (id: string, priority: import('../types').JobPriority) => void;
   onCancel?: (id: string) => void;
   onPause?: (id: string) => void;
   onResume?: (id: string) => void;
@@ -38,7 +41,20 @@ function formatETA(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
-export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResume, onRetry, onOpenFolder, onSelectFormat, onSelectTorrentFiles, onStopSeeding }) => {
+export const JobCard: React.FC<JobCardProps> = ({
+  job,
+  selected,
+  onToggleSelect,
+  onSetPriority,
+  onCancel,
+  onPause,
+  onResume,
+  onRetry,
+  onOpenFolder,
+  onSelectFormat,
+  onSelectTorrentFiles,
+  onStopSeeding,
+}) => {
   const isDownloading = job.status === 'downloading';
   const isQueued = job.status === 'queued';
   const isPaused = job.status === 'paused';
@@ -54,11 +70,20 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
 
   // Analysis is complete when mediaInfo has formats
   const analysisReady = isAnalyzing && job.mediaInfo && job.mediaInfo.formats && job.mediaInfo.formats.length > 0;
+  const priority = job.priority || 'normal';
 
   return (
-    <div className={`job-card job-${job.status}`}>
+    <div className={`job-card job-${job.status} ${selected ? 'job-selected' : ''}`}>
       <div className="job-header">
         <div className="job-name-area">
+          {onToggleSelect && (
+            <input
+              type="checkbox"
+              className="job-select-checkbox"
+              checked={!!selected}
+              onChange={() => onToggleSelect(job.id)}
+            />
+          )}
           {isMediaJob && job.mediaInfo?.thumbnail && (
             <img
               src={job.mediaInfo.thumbnail}
@@ -70,6 +95,23 @@ export const JobCard: React.FC<JobCardProps> = ({ job, onCancel, onPause, onResu
           <span className="job-name" title={job.source}>{job.name || 'Untitled'}</span>
         </div>
         <div className="job-badges">
+          {onSetPriority ? (
+            <select
+              className="priority-select-sm"
+              value={priority}
+              onChange={(e) => onSetPriority(job.id, e.target.value as import('../types').JobPriority)}
+            >
+              <option value="high">🔥 High</option>
+              <option value="normal">⚡ Normal</option>
+              <option value="low">🐢 Low</option>
+            </select>
+          ) : (
+            priority !== 'normal' && (
+              <span className={`priority-badge priority-${priority}`}>
+                {priority === 'high' ? '🔥 HIGH' : '🐢 LOW'}
+              </span>
+            )
+          )}
           {isMediaJob && <span className="job-engine-badge">🎬 Media</span>}
           {isTorrentJob && <span className="job-engine-badge">🧲 Torrent</span>}
           <span className={`job-status status-${job.status}`}>{job.status.replace('_', ' ')}</span>

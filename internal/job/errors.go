@@ -30,4 +30,6 @@ const (
 	ErrDuplicateTorrent   = "DUPLICATE_TORRENT"
 	ErrNoFilesSelected    = "NO_FILES_SELECTED"
 	ErrTorrentNotFound    = "TORRENT_NOT_FOUND"
+	ErrInvalidPriority    = "INVALID_PRIORITY"
+	ErrBatchLimitExceeded = "BATCH_LIMIT_EXCEEDED"
 )

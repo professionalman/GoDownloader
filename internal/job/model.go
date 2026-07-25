@@ -165,6 +165,123 @@ type Job struct {
 	TorrentInfo       *TorrentInfo `json:"torrentInfo,omitempty"`
 	SeedAfterComplete bool         `json:"seedAfterComplete,omitempty"`
 
+	Priority JobPriority `json:"priority"`
+	BatchID  string      `json:"batchId,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// JobPriority represents the queue priority level for a download job.
+type JobPriority string
+
+const (
+	JobPriorityLow    JobPriority = "low"
+	JobPriorityNormal JobPriority = "normal"
+	JobPriorityHigh   JobPriority = "high"
+)
+
+// ValidJobPriority checks if a job priority string is valid.
+func ValidJobPriority(p JobPriority) bool {
+	switch p {
+	case JobPriorityLow, JobPriorityNormal, JobPriorityHigh:
+		return true
+	}
+	return false
+}
+
+// QueueAction defines whether a queued job requires a fresh engine start or a resume operation.
+type QueueAction string
+
+const (
+	QueueActionStart  QueueAction = "start"
+	QueueActionResume QueueAction = "resume"
+)
+
+// QueueEntry represents a persistent row in job_queue.
+type QueueEntry struct {
+	JobID      string      `json:"jobId"`
+	Position   int64       `json:"position"`
+	Action     QueueAction `json:"action"`
+	EnqueuedAt time.Time   `json:"enqueuedAt"`
+	UpdatedAt  time.Time   `json:"updatedAt"`
+}
+
+// QueuedJob combines a Job with its QueueEntry and derived runtime waiting reason.
+type QueuedJob struct {
+	JobID         string      `json:"jobId"`
+	Position      int64       `json:"position"`
+	Action        QueueAction `json:"action"`
+	EnqueuedAt    time.Time   `json:"enqueuedAt"`
+	UpdatedAt     time.Time   `json:"updatedAt"`
+	WaitingReason string      `json:"waitingReason,omitempty"`
+	Job           Job         `json:"job"`
+}
+
+// BatchInput defines a single job input inside a batch submission.
+type BatchInput struct {
+	Source   string      `json:"source"`
+	Priority JobPriority `json:"priority,omitempty"`
+}
+
+// CreateBatchRequest represents the POST /jobs/batch body.
+type CreateBatchRequest struct {
+	Inputs []BatchInput `json:"inputs"`
+}
+
+// BatchItemResult represents the outcome for one item in a batch request.
+type BatchItemResult struct {
+	Index int       `json:"index"`
+	Job   *Job      `json:"job,omitempty"`
+	Error *AppError `json:"error,omitempty"`
+}
+
+// CreateBatchResponse is returned by POST /jobs/batch.
+type CreateBatchResponse struct {
+	BatchID string            `json:"batchId"`
+	Created int               `json:"created"`
+	Failed  int               `json:"failed"`
+	Items   []BatchItemResult `json:"items"`
+}
+
+// BulkActionRequest represents the POST /jobs/bulk body.
+type BulkActionRequest struct {
+	JobIDs []string `json:"jobIds"`
+	Action string   `json:"action"` // pause, resume, cancel, retry
+}
+
+// BulkItemResult represents the result for a single job in a bulk operation.
+type BulkItemResult struct {
+	JobID   string    `json:"jobId"`
+	Success bool      `json:"success"`
+	Job     *Job      `json:"job,omitempty"`
+	Error   *AppError `json:"error,omitempty"`
+}
+
+// BulkActionResponse is returned by POST /jobs/bulk.
+type BulkActionResponse struct {
+	Action    string           `json:"action"`
+	Succeeded int              `json:"succeeded"`
+	Failed    int              `json:"failed"`
+	Results   []BulkItemResult `json:"results"`
+}
+
+// QueueSnapshot represents the response for GET /queue.
+type QueueSnapshot struct {
+	MaxConcurrentDownloads int         `json:"maxConcurrentDownloads"`
+	RunningDownloads       int         `json:"runningDownloads"`
+	QueuedDownloads        int         `json:"queuedDownloads"`
+	PausedDownloads        int         `json:"pausedDownloads"`
+	Items                  []QueuedJob `json:"items"`
+}
+
+// QueueReorderRequest represents the body for PUT /queue/reorder.
+type QueueReorderRequest struct {
+	Priority JobPriority `json:"priority"`
+	JobIDs   []string    `json:"jobIds"`
+}
+
+// SetPriorityRequest represents the body for PUT /jobs/{id}/priority.
+type SetPriorityRequest struct {
+	Priority JobPriority `json:"priority"`
 }

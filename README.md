@@ -1,12 +1,30 @@
-# GoDownloader V0.4 — Torrent, Media & Direct Download Manager
+# GoDownloader V0.5 — Smart Queue, Batch Jobs, Concurrency & Settings Foundation
 
 A high-performance, local-first download manager built with **Go**, **React (TypeScript + Vite)**, **SQLite**, **aria2c**, **yt-dlp**, **FFmpeg**, and **qBittorrent-nox**.
 
-V0.4 extends GoDownloader with first-class **Torrent & Magnet** download capabilities powered by qBittorrent-nox Web API v2.
+V0.5 extends GoDownloader with a central **Smart Queue & Concurrency Scheduler**, **Priority Lanes**, **Batch Job Submissions**, **Bulk Control Actions**, and **Settings Persistence**.
 
 ---
 
 ## 🚀 Key Features
+
+### ⏳ Smart Queue & Concurrency Scheduler (V0.5)
+- **Central Scheduler**: The Manager/Scheduler owns execution policy (`Manager` -> `Scheduler` -> `Queue` -> `IEngine`). Engines never decide queue policy.
+- **Strict Capacity Accounting**: Downloads occupy 1 active slot during `DOWNLOADING`. Transitions to `PROCESSING` (yt-dlp FFmpeg merge) and `SEEDING` (qBittorrent seeding) immediately release download capacity slots.
+- **Priority Lanes**: Supports `high`, `normal` (default), and `low` priority lanes.
+- **Non-Preemptive Scheduling**: Higher priority downloads move ahead in queue but never interrupt active downloads.
+- **Interactive Reordering**: Dynamic drag/move reordering within priority lanes via API and React UI.
+- **Startup Recovery & Cleanup**: Stale or completed queue entries are automatically cleaned up on restart.
+
+### 📦 Batch & Bulk Operations (V0.5)
+- **Batch Submission**: Submit up to 100 links at once via multiline text input or `POST /api/v1/jobs/batch`.
+- **Bulk Lifecycle Control**: Perform `pause`, `resume`, `cancel`, or `retry` best-effort on up to 100 job IDs at once.
+- **Selection Toolbar**: Multi-select job cards in the UI for one-click bulk operations.
+
+### ⚙️ App Settings Foundation (V0.5)
+- **Max Concurrent Downloads**: Configurable in DB (`app_settings` table, validated 1–20, default 3).
+- **Environment Override**: Optional `MAX_CONCURRENT_DOWNLOADS` env var override with UI indicator.
+- **Settings UI**: Modal panel to view and modify queue concurrency settings live.
 
 ### 🧲 Torrent & Magnet Downloads (V0.4)
 - **Magnet URIs & .torrent Uploads**: Accepts `magnet:` links or `.torrent` file uploads.
@@ -19,13 +37,11 @@ V0.4 extends GoDownloader with first-class **Torrent & Magnet** download capabil
 - **Media URL Detection & Analysis**: Auto-detects media links (YouTube, Vimeo, Twitch, etc.) and extracts available formats via `yt-dlp`.
 - **Interactive Format Selector**: Select resolution (1080p, 720p, etc.), codec, or audio-only streams with estimated file sizes before downloading.
 - **FFmpeg Stream Merging**: Merges separate video and audio streams using `ffmpeg` with live status reporting (`processing` state).
-- **Subprocess Security & Lifecycle**: Safe subprocess execution (`exec.CommandContext`) without shell invocation. Context cancellation cleans up orphan processes.
 
 ### ⚡ Direct Downloads & Core System (V0.1 / V0.2)
 - **Engine Registry & Resolver**: Auto-routes inputs: `magnet:` / `.torrent` → `qbittorrent`, media URLs → `ytdlp`, direct HTTP/HTTPS → `aria2c`.
 - **Unified State Machine**: Centralized state validation (`queued`, `analyzing`, `awaiting_selection`, `downloading`, `processing`, `seeding`, `paused`, `completed`, `failed`, `cancelled`).
-- **Pause, Resume, Cancel & Retry**: Universal controls for all download engines.
-- **Real-time SSE Streaming**: Server-Sent Events stream live progress, speeds, file sizes, and ETAs directly to the UI without client polling.
+- **Real-time SSE Streaming**: Server-Sent Events stream live progress, speeds, file sizes, and ETAs directly to the UI.
 
 ---
 
@@ -45,21 +61,21 @@ V0.4 extends GoDownloader with first-class **Torrent & Magnet** download capabil
                                   ┌──────────────────┐
                                   │   Job Manager    │
                                   │                  │
-                                  │ State Machine    │
-                                  │ Engine Registry  │
-                                  │ Progress Monitor │
-                                  │ Restart Recovery │
-                                  └───────┬──┬───────┘
-                                          │  │
-             ┌────────────────────────────┘  └────────────────────────────┐
-             ▼                                                            ▼
-        SQLite Store                                                   Event Bus
-             │                                                            │
-             │                                                            ▼
-             │                                                         SSE Stream
-             ▼
-      Engine Registry
-             │
+                                  │   Scheduler ─────┼──┐
+                                  │ State Machine    │  │
+                                  │ Engine Registry  │  │
+                                  │ Progress Monitor │  │
+                                  └───────┬──┬───────┘  │
+                                          │  │          ▼
+             ┌────────────────────────────┘  └──── Persistent Queue
+             ▼                                      (job_queue)
+        SQLite Store                                    │
+             │                                          │
+             │                                          ▼
+             │                                       Event Bus
+             ▼                                          │
+      Engine Registry                                   ▼
+             │                                       SSE Stream
    ┌─────────┼──────────────────┐
    ▼         ▼                  ▼
 aria2     yt-dlp           qBittorrent
@@ -143,7 +159,14 @@ Dev UI accessible at [http://localhost:5173](http://localhost:5173).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/jobs` | Create a new HTTP or magnet download job (`{"source": "..."}`) |
+| `POST` | `/api/v1/jobs` | Create a download job (`{"source": "...", "priority": "high"}`) |
+| `POST` | `/api/v1/jobs/batch` | Batch submission (`{"inputs": [{"source": "..."}, ...]}`) |
+| `POST` | `/api/v1/jobs/bulk` | Bulk operation (`{"action": "pause", "jobIds": [...]}`) |
+| `PUT`  | `/api/v1/jobs/{id}/priority` | Update job priority lane (`{"priority": "high"}`) |
+| `GET`  | `/api/v1/queue` | Get queue snapshot, positions, and capacity stats |
+| `PUT`  | `/api/v1/queue/reorder` | Reorder job positions in priority lane |
+| `GET`  | `/api/v1/settings` | Get application & queue settings |
+| `PUT`  | `/api/v1/settings` | Update max concurrent downloads |
 | `POST` | `/api/v1/jobs/torrent` | Upload a `.torrent` file (`multipart/form-data`) |
 | `GET`  | `/api/v1/jobs/{id}/torrent/files` | Get file list and priorities for a torrent job |
 | `POST` | `/api/v1/jobs/{id}/torrent/start` | Apply file priorities and start torrent download |
@@ -166,6 +189,7 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `127.0.0.1:8080` | Server listen address (loopback only) |
+| `MAX_CONCURRENT_DOWNLOADS` | *(empty)* | Optional override for max concurrent downloads |
 | `DOWNLOAD_DIR` | `./downloads` | Destination folder for completed downloads |
 | `DATA_DIR` | `./data` | Application data folder for stored `.torrent` files |
 | `ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` | aria2 RPC endpoint |

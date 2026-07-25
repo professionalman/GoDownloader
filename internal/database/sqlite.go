@@ -71,6 +71,9 @@ func (db *DB) migrate() error {
 	if err := db.migrateToV04(); err != nil {
 		return fmt.Errorf("migrate to V0.4: %w", err)
 	}
+	if err := db.migrateToV05(); err != nil {
+		return fmt.Errorf("migrate to V0.5: %w", err)
+	}
 
 	return nil
 }
@@ -230,6 +233,103 @@ func (db *DB) migrateToV04() error {
 	// Add index for looking up torrent jobs by info_hash
 	if _, err := db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_torrent_jobs_info_hash ON torrent_jobs(info_hash)`); err != nil {
 		return fmt.Errorf("create index idx_torrent_jobs_info_hash: %w", err)
+	}
+
+	return nil
+}
+
+func (db *DB) migrateToV05() error {
+	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
+	if err != nil {
+		return fmt.Errorf("query pragma table_info(jobs): %w", err)
+	}
+	defer rows.Close()
+
+	hasPriority := false
+	hasBatchID := false
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan pragma table_info(jobs): %w", err)
+		}
+		switch name {
+		case "priority":
+			hasPriority = true
+		case "batch_id":
+			hasBatchID = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows.Err pragma table_info(jobs): %w", err)
+	}
+
+	if !hasPriority {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"); err != nil {
+			return fmt.Errorf("add column priority: %w", err)
+		}
+	}
+	if !hasBatchID {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add column batch_id: %w", err)
+		}
+	}
+
+	// Create job_queue table
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS job_queue (
+		job_id TEXT PRIMARY KEY,
+		position INTEGER NOT NULL,
+		action TEXT NOT NULL,
+		enqueued_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		FOREIGN KEY (job_id) REFERENCES jobs(id)
+	)`); err != nil {
+		return fmt.Errorf("create table job_queue: %w", err)
+	}
+
+	if _, err := db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_job_queue_position ON job_queue(position)`); err != nil {
+		return fmt.Errorf("create index idx_job_queue_position: %w", err)
+	}
+
+	// Create app_settings table
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS app_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create table app_settings: %w", err)
+	}
+
+	// Insert default max_concurrent_downloads if missing
+	now := time.Now()
+	if _, err := db.conn.Exec(`INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES ('max_concurrent_downloads', '3', ?)`, now); err != nil {
+		return fmt.Errorf("insert default app_settings: %w", err)
+	}
+
+	// Backfill legacy QUEUED jobs that do not have a job_queue row yet
+	queuedRows, err := db.conn.Query("SELECT j.id, j.created_at FROM jobs j LEFT JOIN job_queue q ON j.id = q.job_id WHERE j.status = 'queued' AND q.job_id IS NULL ORDER BY j.created_at ASC")
+	if err == nil {
+		defer queuedRows.Close()
+		type queuedBackfill struct {
+			id        string
+			createdAt time.Time
+		}
+		var backfills []queuedBackfill
+		for queuedRows.Next() {
+			var b queuedBackfill
+			if scanErr := queuedRows.Scan(&b.id, &b.createdAt); scanErr == nil {
+				backfills = append(backfills, b)
+			}
+		}
+		var pos int64 = 1
+		for _, b := range backfills {
+			db.conn.Exec(`INSERT OR IGNORE INTO job_queue (job_id, position, action, enqueued_at, updated_at) VALUES (?, ?, 'start', ?, ?)`, b.id, pos, b.createdAt, b.createdAt)
+			pos++
+		}
 	}
 
 	return nil

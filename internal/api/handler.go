@@ -11,11 +11,13 @@ import (
 	"github.com/gorilla/mux"
 
 	"downloader/internal/job"
+	"downloader/internal/settings"
 )
 
 // createJobRequest is the request body for POST /api/v1/jobs.
 type createJobRequest struct {
-	Source string `json:"source"`
+	Source   string          `json:"source"`
+	Priority job.JobPriority `json:"priority,omitempty"`
 }
 
 type selectFormatRequest struct {
@@ -34,12 +36,22 @@ type errorBody struct {
 
 // Handler contains HTTP handlers for the download API.
 type Handler struct {
-	manager *job.Manager
+	manager  *job.Manager
+	settings *settings.SettingsService
 }
 
 // NewHandler creates a new API handler.
-func NewHandler(manager *job.Manager) *Handler {
-	return &Handler{manager: manager}
+func NewHandler(manager *job.Manager, settingsService ...*settings.SettingsService) *Handler {
+	h := &Handler{manager: manager}
+	if len(settingsService) > 0 {
+		h.settings = settingsService[0]
+	}
+	return h
+}
+
+// SetSettingsService wires the settings service.
+func (h *Handler) SetSettingsService(s *settings.SettingsService) {
+	h.settings = s
 }
 
 // CreateJob handles POST /api/v1/jobs
@@ -55,7 +67,7 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := h.manager.Create(r.Context(), req.Source)
+	j, err := h.manager.Create(r.Context(), req.Source, req.Priority)
 	if err != nil {
 		writeAppError(w, err)
 		return
@@ -333,4 +345,128 @@ func writeAppError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, job.ErrInternalError, "an internal error occurred")
+}
+
+// CreateBatchJobs handles POST /api/v1/jobs/batch
+func (h *Handler) CreateBatchJobs(w http.ResponseWriter, r *http.Request) {
+	var req job.CreateBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	resp, err := h.manager.CreateBatch(r.Context(), req)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// BulkAction handles POST /api/v1/jobs/bulk
+func (h *Handler) BulkAction(w http.ResponseWriter, r *http.Request) {
+	var req job.BulkActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	resp, err := h.manager.BulkAction(r.Context(), req)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// SetJobPriority handles PUT /api/v1/jobs/{id}/priority
+func (h *Handler) SetJobPriority(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	var req job.SetPriorityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	j, err := h.manager.SetJobPriority(r.Context(), id, req.Priority)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, j)
+}
+
+// GetQueueSnapshot handles GET /api/v1/queue
+func (h *Handler) GetQueueSnapshot(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := h.manager.GetQueueSnapshot(r.Context())
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+// ReorderQueue handles PUT /api/v1/queue/reorder
+func (h *Handler) ReorderQueue(w http.ResponseWriter, r *http.Request) {
+	var req job.QueueReorderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	if err := h.manager.ReorderQueue(r.Context(), req.Priority, req.JobIDs); err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// GetSettings handles GET /api/v1/settings
+func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
+	if h.settings == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "settings service not available")
+		return
+	}
+
+	st, err := h.settings.GetSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// UpdateSettings handles PUT /api/v1/settings
+func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if h.settings == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "settings service not available")
+		return
+	}
+
+	var req settings.UpdateQueueSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.settings.UpdateQueueSettings(r.Context(), req.Queue.MaxConcurrentDownloads)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+		return
+	}
+
+	if m := h.manager; m != nil {
+		if s := m.GetScheduler(); s != nil {
+			s.Kick()
+		}
+	}
+
+	writeJSON(w, http.StatusOK, st)
 }

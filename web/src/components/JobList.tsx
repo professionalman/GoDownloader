@@ -4,6 +4,9 @@ import { JobCard } from './JobCard';
 
 interface JobListProps {
   jobs: Job[];
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
+  onSelectAll?: (ids: string[]) => void;
   onCancel: (id: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -14,7 +17,20 @@ interface JobListProps {
   onStopSeeding?: (id: string) => void;
 }
 
-export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onResume, onRetry, onOpenFolder, onSelectFormat, onSelectTorrentFiles, onStopSeeding }) => {
+export const JobList: React.FC<JobListProps> = ({
+  jobs,
+  selectedIds = new Set(),
+  onToggleSelect,
+  onSelectAll,
+  onCancel,
+  onPause,
+  onResume,
+  onRetry,
+  onOpenFolder,
+  onSelectFormat,
+  onSelectTorrentFiles,
+  onStopSeeding,
+}) => {
   const activeJobs = jobs.filter(
     (j) => j.status === 'downloading' || j.status === 'queued' || j.status === 'paused'
       || j.status === 'analyzing' || j.status === 'processing' || j.status === 'awaiting_selection' || j.status === 'seeding'
@@ -23,10 +39,23 @@ export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onRes
     (j) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled'
   );
 
+  const allActiveSelected = activeJobs.length > 0 && activeJobs.every(j => selectedIds.has(j.id));
+
   return (
     <div className="job-list">
       <section className="job-section">
-        <h2>Active Downloads</h2>
+        <div className="section-header">
+          <h2>Active Downloads ({activeJobs.length})</h2>
+          {activeJobs.length > 0 && onSelectAll && (
+            <button
+              type="button"
+              className="btn btn-sm btn-link"
+              onClick={() => onSelectAll(allActiveSelected ? [] : activeJobs.map(j => j.id))}
+            >
+              {allActiveSelected ? 'Deselect All Active' : 'Select All Active'}
+            </button>
+          )}
+        </div>
         {activeJobs.length === 0 ? (
           <p className="empty-message">No active downloads</p>
         ) : (
@@ -34,6 +63,8 @@ export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onRes
             <JobCard
               key={job.id}
               job={job}
+              selected={selectedIds.has(job.id)}
+              onToggleSelect={onToggleSelect}
               onCancel={onCancel}
               onPause={onPause}
               onResume={onResume}
@@ -47,7 +78,7 @@ export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onRes
       </section>
 
       <section className="job-section">
-        <h2>History</h2>
+        <h2>History ({completedJobs.length})</h2>
         {completedJobs.length === 0 ? (
           <p className="empty-message">No completed downloads</p>
         ) : (
@@ -55,6 +86,8 @@ export const JobList: React.FC<JobListProps> = ({ jobs, onCancel, onPause, onRes
             <JobCard
               key={job.id}
               job={job}
+              selected={selectedIds.has(job.id)}
+              onToggleSelect={onToggleSelect}
               onRetry={onRetry}
               onOpenFolder={onOpenFolder}
             />

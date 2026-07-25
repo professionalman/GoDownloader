@@ -19,12 +19,13 @@ import (
 	"downloader/internal/engine/ytdlp"
 	"downloader/internal/events"
 	"downloader/internal/job"
+	"downloader/internal/settings"
 )
 
 func main() {
 	cfg := config.New()
 
-	log.Printf("Download Manager V0.4")
+	log.Printf("Download Manager V0.5")
 	log.Printf("Listen: %s", cfg.ListenAddr)
 	log.Printf("Download dir: %s", cfg.DownloadDir)
 	log.Printf("Aria2 RPC: %s", cfg.Aria2RPCURL)
@@ -43,6 +44,11 @@ func main() {
 
 	// Create repository
 	repo := database.NewSQLiteJobRepository(db)
+
+	// Create queue & settings repositories
+	queueRepo := database.NewSQLiteQueueRepository(db)
+	settingsRepo := database.NewSQLiteSettingsRepository(db)
+	settingsService := settings.NewSettingsService(settingsRepo)
 
 	// Initialize aria2 engine
 	eng := aria2.NewEngine(cfg.Aria2RPCURL, cfg.Aria2Secret)
@@ -78,13 +84,19 @@ func main() {
 	// Initialize SSE handler
 	sseHandler := events.NewSSEHandler(bus)
 
-	// Initialize job manager
+	// Initialize job manager & scheduler
 	manager := job.NewManager(repo, registry, bus, cfg.DownloadDir, torrentRepo, cfg.DataDir)
+	manager.SetQueueRepository(queueRepo)
+	manager.SetSettingsService(settingsService)
+
+	scheduler := job.NewScheduler(repo, queueRepo, settingsService.EffectiveMaxConcurrentDownloads, manager.DispatchQueuedJob)
+	manager.SetScheduler(scheduler)
+
 	manager.StartBackgroundTasks(ctx)
 	defer manager.Stop()
 
 	// Setup router
-	router := api.NewRouter(cfg, manager, sseHandler)
+	router := api.NewRouter(cfg, manager, sseHandler, settingsService)
 
 	// Start server
 	server := &http.Server{

@@ -229,13 +229,25 @@ func (f *fakeJobRepository) List(ctx context.Context) ([]Job, error) {
 func (f *fakeJobRepository) ListRecoverable(ctx context.Context) ([]Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	res := make([]Job, 0)
+	var list []Job
 	for _, j := range f.jobs {
-		if IsRecoverable(j.Status) {
-			res = append(res, *j)
+		if j.Status == StatusDownloading || j.Status == StatusQueued || j.Status == StatusAnalyzing || j.Status == StatusAwaitingSelection || j.Status == StatusSeeding {
+			list = append(list, *j)
 		}
 	}
-	return res, nil
+	return list, nil
+}
+
+func (f *fakeJobRepository) CountDownloading(ctx context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, j := range f.jobs {
+		if j.Status == StatusDownloading {
+			count++
+		}
+	}
+	return count, nil
 }
 
 type fakeEventBus struct {

@@ -10,13 +10,13 @@ import (
 // - Engine/status reconciliation: controlled centrally by UpdateJobFromEngine during live monitoring.
 // - Startup recovery reconciliation: controlled by recoverJob, directly reconciling persisted database state against external daemon status.
 var validTransitions = map[JobStatus][]JobStatus{
-	StatusQueued:            {StatusDownloading, StatusAnalyzing, StatusCancelled, StatusFailed},
+	StatusQueued:            {StatusDownloading, StatusPaused, StatusCancelled, StatusFailed, StatusAnalyzing},
 	StatusDownloading:       {StatusPaused, StatusFailed, StatusCompleted, StatusCancelled, StatusProcessing, StatusSeeding},
-	StatusPaused:            {StatusDownloading, StatusCancelled},
-	StatusFailed:            {StatusQueued},
-	StatusAnalyzing:         {StatusDownloading, StatusFailed, StatusCancelled, StatusAwaitingSelection},
+	StatusPaused:            {StatusQueued, StatusDownloading, StatusCancelled},
+	StatusFailed:            {StatusQueued, StatusAnalyzing},
+	StatusAnalyzing:         {StatusQueued, StatusDownloading, StatusFailed, StatusCancelled, StatusAwaitingSelection},
 	StatusProcessing:        {StatusCompleted, StatusFailed, StatusCancelled},
-	StatusAwaitingSelection: {StatusDownloading, StatusCancelled},
+	StatusAwaitingSelection: {StatusQueued, StatusDownloading, StatusCancelled},
 	StatusSeeding:           {StatusCompleted, StatusFailed},
 	// completed and cancelled are terminal
 }
