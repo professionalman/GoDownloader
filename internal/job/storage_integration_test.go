@@ -1962,3 +1962,527 @@ func TestDispatch_ExternalExecutionPersistenceKind(t *testing.T) {
 		t.Errorf("expected EngineID == gid_ext_kind_123, got %s", pErr.EngineID)
 	}
 }
+
+func TestMediaCompletion_FinalizationSuccessPersistenceFailureRetriesWithoutRefinalizing(t *testing.T) {
+	mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "temp_media_retry")
+	os.MkdirAll(workDir, 0755)
+	storageSrv.PrepareWorkDir(ctx, "job_media_retry", workDir)
+
+	artifactPath := filepath.Join(workDir, "video.mp4")
+	os.WriteFile(artifactPath, []byte("media retry content"), 0644)
+
+	j := &Job{
+		ID:             "job_media_retry",
+		Source:         "https://youtube.com/watch?v=media_retry",
+		Name:           "Media Retry Test",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp_retry_gid",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	mgr.addActive(j)
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100, OutputPath: artifactPath},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Inject DB persistence failure on Attempt 1
+	jobRepo.updateErr = errors.New("simulated DB update error attempt 1")
+
+	// Attempt 1: Fetch copy #1 from ActiveJobs
+	activeCopies1 := mgr.GetActiveJobs()
+	copy1 := activeCopies1[j.ID]
+	if copy1 == nil {
+		t.Fatalf("expected job in activeJobs")
+	}
+
+	mgr.UpdateJobFromEngine(ctx, copy1, &EngineStatus{Status: StatusCompleted, Progress: 100, OutputPath: artifactPath}, true)
+
+	// Assert Attempt 1
+	destArtifact := filepath.Join(downloadDir, "video.mp4")
+	if _, err := os.Stat(destArtifact); err != nil {
+		t.Fatalf("expected destination file to exist after attempt 1, got error: %v", err)
+	}
+	if _, err := os.Stat(artifactPath); err == nil {
+		t.Errorf("expected WorkDir source file to no longer exist after attempt 1")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted MUST NOT be emitted on attempt 1 DB failure")
+		}
+	}
+
+	if cleanEng.cleaned[j.ID] {
+		t.Errorf("engine Cleanup MUST NOT be called on attempt 1 DB failure")
+	}
+
+	// Verify Manager activeJob retained FinalPath (using copy #2 from GetActiveJobs)
+	activeCopies2 := mgr.GetActiveJobs()
+	copy2 := activeCopies2[j.ID]
+	if copy2 == nil || copy2.FinalPath == "" {
+		t.Fatalf("expected Manager activeJob to retain FinalPath after attempt 1")
+	}
+
+	// Recover DB for Attempt 2
+	jobRepo.updateErr = nil
+
+	// Attempt 2: Update using copy #2 from GetActiveJobs
+	mgr.UpdateJobFromEngine(ctx, copy2, &EngineStatus{Status: StatusCompleted, Progress: 100, OutputPath: artifactPath}, true)
+
+	// Assert Attempt 2
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted after attempt 2, got %s", updated.Status)
+	}
+
+	if updated.FinalPath != destArtifact {
+		t.Errorf("expected FinalPath %s, got %s", destArtifact, updated.FinalPath)
+	}
+
+	compEventCount := 0
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted && ev.Job.ID == j.ID {
+			compEventCount++
+		}
+	}
+	if compEventCount != 1 {
+		t.Errorf("expected EventJobCompleted exactly once, got %d", compEventCount)
+	}
+
+	if !cleanEng.cleaned[j.ID] {
+		t.Errorf("expected engine Cleanup to be called after attempt 2 success")
+	}
+}
+
+func TestTorrentSelectedSize_RemainsSelectedSizeAfterStatusUpdate(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	const selectedSize = int64(5 * 1024 * 1024 * 1024)
+
+	j := &Job{
+		ID:             "job_qb_size_test",
+		Source:         "magnet:?xt=urn:btih:1111222233334444555566667777888899990000",
+		Name:           "QB Size Test",
+		Status:         StatusDownloading,
+		Engine:         "qbittorrent",
+		EngineID:       "1111222233334444555566667777888899990000",
+		Type:           TypeTorrent,
+		TotalBytes:     selectedSize,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	mgr.addActive(j)
+
+	qbEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *Job) (*EngineStatus, error) {
+			return &EngineStatus{
+				Status:     StatusDownloading,
+				TotalBytes: selectedSize,
+				Progress:   10.0,
+			}, nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = qbEng
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{
+		Status:     StatusDownloading,
+		TotalBytes: selectedSize,
+		Progress:   10.0,
+	}, true)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.TotalBytes != selectedSize {
+		t.Errorf("expected Job.TotalBytes to remain selected size %d, got %d", selectedSize, updated.TotalBytes)
+	}
+}
+
+func TestStartTorrent_RejectsPartialFileSelection(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job_partial_sel",
+		Source:         "magnet:?xt=urn:btih:aaaaabbbbbcccccdddddeeeeefffffffffff",
+		Name:           "Partial Selection Test",
+		Status:         StatusAwaitingSelection,
+		Engine:         "qbittorrent",
+		EngineID:       "aaaaabbbbbcccccdddddeeeeefffffffffff",
+		Type:           TypeTorrent,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	prioSetCount := 0
+	torrentEng := &fakeTorrentEngine{
+		getFilesFunc: func(hash string) ([]TorrentFile, error) {
+			return []TorrentFile{
+				{Index: 0, Path: "file1.mp4", Size: 100, Priority: PriorityNormal},
+				{Index: 1, Path: "file2.mp4", Size: 200, Priority: PriorityNormal},
+				{Index: 2, Path: "file3.mp4", Size: 300, Priority: PriorityNormal},
+			}, nil
+		},
+		setPrioritiesFunc: func(hash string) error {
+			prioSetCount++
+			return nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	// Send partial selection (only 2 out of 3 files)
+	partialSelections := []TorrentFileSelection{
+		{Index: 0, Priority: PriorityNormal},
+		{Index: 1, Priority: PrioritySkip},
+	}
+
+	_, err := mgr.StartTorrent(ctx, j.ID, partialSelections, false)
+	if err == nil {
+		t.Fatalf("expected error for partial file selection")
+	}
+
+	appErr, ok := err.(*AppError)
+	if !ok || appErr.Code != ErrInvalidRequest {
+		t.Errorf("expected ErrInvalidRequest, got %v", err)
+	}
+
+	if prioSetCount != 0 {
+		t.Errorf("SetFilePriorities MUST NOT be called when selection validation fails")
+	}
+
+	qItem, _ := queueRepo.Get(ctx, j.ID)
+	if qItem != nil {
+		t.Errorf("queue entry MUST NOT be created on selection failure")
+	}
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusAwaitingSelection {
+		t.Errorf("job status MUST remain StatusAwaitingSelection, got %s", updated.Status)
+	}
+}
+
+func TestStartTorrent_AcceptsCompleteSelectionSet(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job_full_sel",
+		Source:         "magnet:?xt=urn:btih:11111222223333344444555556666677",
+		Name:           "Complete Selection Test",
+		Status:         StatusAwaitingSelection,
+		Engine:         "qbittorrent",
+		EngineID:       "11111222223333344444555556666677",
+		Type:           TypeTorrent,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	prioSetCount := 0
+	torrentEng := &fakeTorrentEngine{
+		getFilesFunc: func(hash string) ([]TorrentFile, error) {
+			return []TorrentFile{
+				{Index: 0, Path: "file1.mp4", Size: 100, Priority: PriorityNormal},
+				{Index: 1, Path: "file2.mp4", Size: 200, Priority: PriorityNormal},
+				{Index: 2, Path: "file3.mp4", Size: 300, Priority: PriorityNormal},
+			}, nil
+		},
+		setPrioritiesFunc: func(hash string) error {
+			prioSetCount++
+			return nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	completeSelections := []TorrentFileSelection{
+		{Index: 0, Priority: PriorityNormal}, // 100
+		{Index: 1, Priority: PrioritySkip},   // skipped
+		{Index: 2, Priority: PriorityHigh},   // 300
+	}
+
+	updatedJ, err := mgr.StartTorrent(ctx, j.ID, completeSelections, false)
+	if err != nil {
+		t.Fatalf("expected StartTorrent to succeed, got %v", err)
+	}
+
+	if prioSetCount != 1 {
+		t.Errorf("expected SetFilePriorities to be called once, got %d", prioSetCount)
+	}
+
+	if updatedJ.TotalBytes != 400 {
+		t.Errorf("expected selected TotalBytes == 400 (100+300), got %d", updatedJ.TotalBytes)
+	}
+
+	qItem, _ := queueRepo.Get(ctx, j.ID)
+	if qItem == nil || qItem.Action != QueueActionStart {
+		t.Errorf("expected QueueActionStart entry in queueRepo")
+	}
+}
+
+func TestTorrent_SeedingWithoutSeedAfterComplete_SetsFinalPath(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_seed_false",
+		Source:            "magnet:?xt=urn:btih:seedfalse111122223333444455556666",
+		Name:              "Seed False Test",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "seedfalse111122223333444455556666",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			return nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusSeeding, Progress: 100}, true)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusCompleted {
+		t.Errorf("expected status StatusCompleted, got %s", updated.Status)
+	}
+	if updated.FinalPath != downloadDir {
+		t.Errorf("expected FinalPath == %s, got %s", downloadDir, updated.FinalPath)
+	}
+}
+
+func TestStopSeeding_SetsFinalPath(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_stop_seeding",
+		Source:            "magnet:?xt=urn:btih:stopseeding11112222333344445555",
+		Name:              "Stop Seeding Test",
+		Status:            StatusSeeding,
+		Engine:            "qbittorrent",
+		EngineID:          "stopseeding11112222333344445555",
+		Type:              TypeTorrent,
+		SeedAfterComplete: true,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		stopDownloadFunc:  func(hash string) error { return nil },
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	updatedJ, err := mgr.StopSeeding(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("expected StopSeeding to succeed, got %v", err)
+	}
+
+	if updatedJ.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", updatedJ.Status)
+	}
+
+	if updatedJ.FinalPath != downloadDir {
+		t.Errorf("expected FinalPath == %s, got %s", downloadDir, updatedJ.FinalPath)
+	}
+}
+
+func TestRecovery_TorrentCompleted_SetsFinalPath(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_rec_torrent_done",
+		Source:            "magnet:?xt=urn:btih:rectorrentdone1111222233334444",
+		Name:              "Recovery Torrent Done",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "rectorrentdone1111222233334444",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		statusFunc: func(ctx context.Context, j *Job) (*EngineStatus, error) {
+			return &EngineStatus{Status: StatusCompleted, Progress: 100}, nil
+		},
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	mgr.recover(ctx)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted after recovery, got %s", updated.Status)
+	}
+
+	if updated.FinalPath != downloadDir {
+		t.Errorf("expected FinalPath == %s, got %s", downloadDir, updated.FinalPath)
+	}
+}
+
+func TestRecovery_DirectCompleted_SetsFinalPath(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job_rec_direct_done",
+		Source:         "https://example.com/ubuntu.iso",
+		Name:           "Recovery Direct Done",
+		Status:         StatusDownloading,
+		Engine:         "aria2",
+		EngineID:       "aria2_gid_direct_done",
+		Type:           TypeDownload,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	ariaEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *Job) (*EngineStatus, error) {
+			return &EngineStatus{Status: StatusCompleted, Progress: 100, FileName: "ubuntu.iso"}, nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = ariaEng
+
+	mgr.recover(ctx)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted after recovery, got %s", updated.Status)
+	}
+
+	expectedFinal := filepath.Join(downloadDir, "ubuntu.iso")
+	if updated.FinalPath != expectedFinal {
+		t.Errorf("expected FinalPath %s, got %s", expectedFinal, updated.FinalPath)
+	}
+}
+
+func TestStopSeeding_PersistenceFailureDoesNotPublishCompleted(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_stop_seeding_pers_fail",
+		Source:            "magnet:?xt=urn:btih:stopseedingfail111122223333",
+		Name:              "Stop Seeding Pers Fail",
+		Status:            StatusSeeding,
+		Engine:            "qbittorrent",
+		EngineID:          "stopseedingfail111122223333",
+		Type:              TypeTorrent,
+		SeedAfterComplete: true,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		stopDownloadFunc:  func(hash string) error { return nil },
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Inject DB persistence failure
+	jobRepo.updateErr = errors.New("simulated DB error on StopSeeding")
+
+	_, err := mgr.StopSeeding(ctx, j.ID)
+	if err == nil {
+		t.Fatalf("expected error from StopSeeding when DB update fails")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted MUST NOT be emitted on StopSeeding DB failure")
+		}
+	}
+}
+
+func TestTorrentSeedingCompletion_PersistenceFailureDoesNotPublishCompleted(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_torrent_seeding_pers_fail",
+		Source:            "magnet:?xt=urn:btih:torrentseedingfail11112222",
+		Name:              "Torrent Seeding Pers Fail",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "torrentseedingfail11112222",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Inject DB persistence failure
+	jobRepo.updateErr = errors.New("simulated DB error on Seeding completion")
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusSeeding, Progress: 100}, true)
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted MUST NOT be emitted on Seeding completion DB failure")
+		}
+	}
+}

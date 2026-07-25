@@ -150,3 +150,39 @@ func TestEngine_SetFilePriorities(t *testing.T) {
 		t.Errorf("expected 1 call to filePrio, got %d", prioCallCount)
 	}
 }
+
+func TestStatus_UsesSelectedTorrentSize(t *testing.T) {
+	const selectedSize = int64(5 * 1024 * 1024 * 1024) // 5 GiB
+	const totalSize = int64(100 * 1024 * 1024 * 1024)  // 100 GiB
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/auth/login" {
+			w.Header().Set("Set-Cookie", "SID=12345; Path=/; HttpOnly")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Ok."))
+			return
+		}
+		if r.URL.Path == "/api/v2/torrents/info" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`[{"hash":"5555","name":"test.torrent","state":"downloading","progress":0.2,"eta":100,"dlspeed":1024,"completed":1073741824,"size":5368709120,"total_size":107374182400,"upspeed":0,"uploaded":0,"ratio":0.0,"num_seeds":1,"num_leechs":1}]`))
+			return
+		}
+	}))
+	defer ts.Close()
+
+	engine := NewEngine(ts.URL, "admin", "adminadmin", 5)
+
+	j := &job.Job{
+		ID:       "job-size-test",
+		EngineID: "5555",
+	}
+
+	status, err := engine.Status(context.Background(), j)
+	if err != nil {
+		t.Fatalf("expected Status to succeed, got %v", err)
+	}
+
+	if status.TotalBytes != selectedSize {
+		t.Errorf("expected TotalBytes == %d (selected size), got %d", selectedSize, status.TotalBytes)
+	}
+}

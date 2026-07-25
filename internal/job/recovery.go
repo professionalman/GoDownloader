@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 )
 
@@ -146,17 +147,24 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 					j.SpeedBytesPerSecond = 0
 					j.ETASeconds = 0
 					j.UpdatedAt = time.Now()
-					m.repo.Update(ctx, j)
+					if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+						log.Printf("recovery error: failed to persist FAILED status: %v", updateErr)
+						return
+					}
 					m.publish(EventJobFailed, j)
 					return
 				}
 			}
+			j.FinalPath = j.DestinationDir
 			j.Status = StatusCompleted
 			j.Progress = 100
 			j.SpeedBytesPerSecond = 0
 			j.ETASeconds = 0
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("recovery error: failed to persist COMPLETED status: %v", updateErr)
+				return
+			}
 			m.publish(EventJobCompleted, j)
 			return
 		}
@@ -192,6 +200,11 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 
 	case StatusCompleted:
 		log.Printf("recovery: job %s completed in engine", j.ID)
+		if j.Type == TypeDownload && status.FileName != "" {
+			j.FinalPath = filepath.Join(j.DestinationDir, status.FileName)
+		} else if j.Type == TypeTorrent {
+			j.FinalPath = j.DestinationDir
+		}
 		j.Status = StatusCompleted
 		j.Progress = 100
 		j.TotalBytes = status.TotalBytes
@@ -202,7 +215,10 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			j.Name = status.FileName
 		}
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist COMPLETED status for job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobCompleted, j)
 
 	case StatusFailed:

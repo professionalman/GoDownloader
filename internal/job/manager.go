@@ -973,6 +973,10 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 	}
 
 	// 2. Validate selections: index, duplicates, priorities, count >= 1
+	if len(selections) != len(existingFiles) {
+		return nil, &AppError{Code: ErrInvalidRequest, Message: "torrent selection must include every file exactly once"}
+	}
+
 	seenIndex := make(map[int]bool)
 	hasSelected := false
 
@@ -992,6 +996,10 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		if s.Priority != PrioritySkip {
 			hasSelected = true
 		}
+	}
+
+	if len(seenIndex) != len(existingFiles) {
+		return nil, &AppError{Code: ErrInvalidRequest, Message: "torrent selection must include every file exactly once"}
 	}
 
 	if !hasSelected {
@@ -1120,12 +1128,16 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to remove torrent from daemon: %v", err)}
 	}
 
+	j.FinalPath = j.DestinationDir
 	j.Status = StatusCompleted
 	j.Progress = 100
 	j.SpeedBytesPerSecond = 0
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
-	m.repo.Update(ctx, j)
+	if err := m.repo.Update(ctx, j); err != nil {
+		log.Printf("StopSeeding: failed to update job %s to COMPLETED: %v", j.ID, err)
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist completed status: %v", err)}
+	}
 	m.removeActive(j.ID)
 	m.publish(EventJobCompleted, j)
 
@@ -1740,6 +1752,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			}
 			j.FinalPath = finalPath
 			j.Name = filepath.Base(finalPath)
+			m.updateActiveJobFinalization(j.ID, finalPath, j.Name)
 		}
 
 		if j.Type == TypeDownload && status.FileName != "" {
@@ -1868,12 +1881,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 					}
 				}
 			}
+			j.FinalPath = j.DestinationDir
 			j.Status = StatusCompleted
 			j.Progress = 100
 			j.SpeedBytesPerSecond = 0
 			j.ETASeconds = 0
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("UpdateJobFromEngine: failed to update seeding torrent %s to COMPLETED: %v", j.ID, updateErr)
+				return
+			}
 			m.removeActive(j.ID)
 			m.publish(EventJobCompleted, j)
 			if m.scheduler != nil {
@@ -2344,6 +2361,15 @@ func (m *Manager) removeActive(id string) {
 	m.mu.Lock()
 	delete(m.activeJobs, id)
 	m.mu.Unlock()
+}
+
+func (m *Manager) updateActiveJobFinalization(jobID, finalPath, name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if active, ok := m.activeJobs[jobID]; ok && active != nil {
+		active.FinalPath = finalPath
+		active.Name = name
+	}
 }
 
 func (m *Manager) publish(eventType string, j *Job) {

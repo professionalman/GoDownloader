@@ -96,7 +96,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 		Progress:            normalizeProgress(info.Progress),
 		SpeedBytesPerSecond: info.DLSpeed,
 		CompletedBytes:      info.CompletedSize,
-		TotalBytes:          info.TotalSize,
+		TotalBytes:          info.Size,
 		ETASeconds:          normalizeETA(info.ETA),
 		UploadSpeed:         info.UPSpeed,
 		Uploaded:            info.Uploaded,
