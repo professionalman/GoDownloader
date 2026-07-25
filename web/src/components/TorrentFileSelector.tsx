@@ -122,6 +122,9 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
               />
               <label htmlFor="seedAfterComplete">Keep seeding after download completes</label>
             </div>
+            <div style={{ fontSize: '0.78rem', opacity: 0.6, marginTop: '4px' }}>
+              ℹ️ Torrent conflict policy is engine-managed by qBittorrent.
+            </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
               <button className="btn btn-secondary" onClick={onClose}>Cancel</button>

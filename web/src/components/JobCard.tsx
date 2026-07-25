@@ -224,6 +224,13 @@ export const JobCard: React.FC<JobCardProps> = ({
         </div>
       )}
 
+      {/* Destination & Final Path display */}
+      {(job.finalPath || job.destinationDir) && (
+        <div className="job-storage-path" style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '0.4rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={job.finalPath || job.destinationDir}>
+          📁 {job.finalPath ? `Saved to: ${job.finalPath}` : `Dest: ${job.destinationDir}`}
+        </div>
+      )}
+
       {/* Error display */}
       {isFailed && job.error && (
         <div className="job-error">{job.error}</div>

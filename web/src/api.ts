@@ -8,9 +8,14 @@ import type {
   BulkActionResponse,
   QueueSnapshot,
   AppSettings,
+  UpdateSettingsPayload,
   ApiError,
   TorrentFile,
   TorrentFileSelection,
+  Category,
+  CreateCategoryPayload,
+  UpdateCategoryPayload,
+  FilenameConflictPolicy,
 } from './types';
 
 const API_BASE = '/api/v1';
@@ -23,8 +28,14 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json();
 }
 
-export async function createJob(source: string, priority: JobPriority = 'normal'): Promise<Job> {
-  const body: CreateJobRequest = { source, priority };
+export async function createJob(
+  source: string,
+  priority: JobPriority = 'normal',
+  categoryId?: string,
+  destinationDir?: string,
+  conflictPolicy?: FilenameConflictPolicy
+): Promise<Job> {
+  const body: CreateJobRequest = { source, priority, categoryId, destinationDir, conflictPolicy };
   const res = await fetch(`${API_BASE}/jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -33,7 +44,9 @@ export async function createJob(source: string, priority: JobPriority = 'normal'
   return handleResponse<Job>(res);
 }
 
-export async function createBatchJobs(inputs: { source: string; priority?: JobPriority }[]): Promise<CreateBatchResponse> {
+export async function createBatchJobs(
+  inputs: { source: string; priority?: JobPriority; categoryId?: string; destinationDir?: string; conflictPolicy?: FilenameConflictPolicy }[]
+): Promise<CreateBatchResponse> {
   const body: CreateBatchRequest = { inputs };
   const res = await fetch(`${API_BASE}/jobs/batch`, {
     method: 'POST',
@@ -81,13 +94,43 @@ export async function getSettings(): Promise<AppSettings> {
   return handleResponse<AppSettings>(res);
 }
 
-export async function updateSettings(maxConcurrentDownloads: number): Promise<AppSettings> {
+export async function updateSettings(payload: UpdateSettingsPayload): Promise<AppSettings> {
   const res = await fetch(`${API_BASE}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ queue: { maxConcurrentDownloads } }),
+    body: JSON.stringify(payload),
   });
   return handleResponse<AppSettings>(res);
+}
+
+export async function getCategories(): Promise<Category[]> {
+  const res = await fetch(`${API_BASE}/categories`);
+  return handleResponse<Category[]>(res);
+}
+
+export async function createCategory(payload: CreateCategoryPayload): Promise<Category> {
+  const res = await fetch(`${API_BASE}/categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<Category>(res);
+}
+
+export async function updateCategory(id: string, payload: UpdateCategoryPayload): Promise<Category> {
+  const res = await fetch(`${API_BASE}/categories/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<Category>(res);
+}
+
+export async function deleteCategory(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/categories/${id}`, {
+    method: 'DELETE',
+  });
+  await handleResponse<{ status: string }>(res);
 }
 
 export async function getJobs(): Promise<Job[]> {
@@ -141,7 +184,6 @@ export function connectSSE(onEvent: (eventType: string, job: Job) => void): Even
     }
   };
 
-  // Listen to all event types from the backend
   es.addEventListener('job.created', handler);
   es.addEventListener('job.updated', handler);
   es.addEventListener('job.completed', handler);
@@ -159,11 +201,22 @@ export async function openFolder(): Promise<void> {
   await fetch(`${API_BASE}/open-folder`, { method: 'POST' });
 }
 
-export async function uploadTorrent(file: File, priority?: JobPriority): Promise<Job> {
+export async function uploadTorrent(
+  file: File,
+  priority?: JobPriority,
+  categoryId?: string,
+  destinationDir?: string
+): Promise<Job> {
   const formData = new FormData();
   formData.append('torrent', file);
   if (priority) {
     formData.append('priority', priority);
+  }
+  if (categoryId) {
+    formData.append('categoryId', categoryId);
+  }
+  if (destinationDir) {
+    formData.append('destinationDir', destinationDir);
   }
   const res = await fetch(`${API_BASE}/jobs/torrent`, {
     method: 'POST',

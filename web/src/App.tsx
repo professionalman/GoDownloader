@@ -86,15 +86,23 @@ function App() {
     return () => es.close();
   }, [fetchQueue]);
 
-  const handleDownload = useCallback(async (sources: string[], priority: JobPriority) => {
+  const handleDownload = useCallback(async (
+    sources: string[],
+    priority: JobPriority,
+    categoryId?: string,
+    destinationDir?: string,
+    conflictPolicy?: import('./types').FilenameConflictPolicy
+  ) => {
     setLoading(true);
     setError('');
     try {
       if (sources.length === 1) {
-        const job = await createJob(sources[0], priority);
+        const job = await createJob(sources[0], priority, categoryId, destinationDir, conflictPolicy);
         setJobs((prev) => [job, ...prev]);
       } else {
-        const resp = await createBatchJobs(sources.map((s) => ({ source: s, priority })));
+        const resp = await createBatchJobs(
+          sources.map((s) => ({ source: s, priority, categoryId, destinationDir, conflictPolicy }))
+        );
         const newJobs = resp.items.map((it) => it.job).filter((j): j is Job => !!j);
         setJobs((prev) => [...newJobs, ...prev]);
       }
@@ -106,11 +114,16 @@ function App() {
     }
   }, [fetchQueue]);
 
-  const handleUploadTorrent = useCallback(async (file: File, _priority: JobPriority) => {
+  const handleUploadTorrent = useCallback(async (
+    file: File,
+    priority: JobPriority,
+    categoryId?: string,
+    destinationDir?: string
+  ) => {
     setLoading(true);
     setError('');
     try {
-      const job = await uploadTorrent(file);
+      const job = await uploadTorrent(file, priority, categoryId, destinationDir);
       setJobs((prev) => [job, ...prev]);
       fetchQueue();
     } catch (err: unknown) {
@@ -170,8 +183,8 @@ function App() {
     }
   }, [fetchQueue]);
 
-  const handleUpdateSettings = useCallback(async (maxConcurrentDownloads: number) => {
-    const updated = await updateSettings(maxConcurrentDownloads);
+  const handleUpdateSettings = useCallback(async (payload: import('./types').UpdateSettingsPayload) => {
+    const updated = await updateSettings(payload);
     setSettings(updated);
     fetchQueue();
   }, [fetchQueue]);
@@ -264,7 +277,7 @@ function App() {
       <header className="app-header">
         <div className="header-brand">
           <h1>⬇ GoDownloader</h1>
-          <span className="app-version">v0.5</span>
+          <span className="app-version">v0.6</span>
         </div>
 
         <div className="header-nav">

@@ -36,6 +36,13 @@ Submit up to 100 links at once. Select multiple jobs in the UI and pause, resume
 - Presents available formats (1080p, 720p, audio-only, etc.) with estimated file sizes
 - Merges video + audio streams automatically using FFmpeg
 
+### Storage, Categories & File Lifecycle
+- **Per-Job Destinations**: Target specific download directories per job, snapshotting destination path at creation time.
+- **Download Categories**: Organize downloads with category folder mappings (relative to default download dir or absolute).
+- **Disk-Space Preflight**: Automatic free disk space validation before start/resume to prevent out-of-disk failures.
+- **Filename Conflict Policies**: Choose how collisions are handled for direct and media downloads (`rename`, `overwrite`, `fail`).
+- **Isolated Media Workspace**: Media downloads (yt-dlp/FFmpeg) process in an isolated temporary directory before safe finalization to destination.
+
 ### Real-Time Progress
 All job updates (speed, ETA, progress percentage, state changes) stream to the browser in real time via Server-Sent Events. No polling, no page refreshes.
 
@@ -171,6 +178,11 @@ cd web && npm run lint
 | `GET` | `/api/v1/jobs/{id}/torrent/files` | Get torrent file list |
 | `POST` | `/api/v1/jobs/{id}/torrent/start` | Set file priorities and start |
 | `POST` | `/api/v1/jobs/{id}/stop-seeding` | Stop seeding |
+| **Categories** | | |
+| `GET` | `/api/v1/categories` | List all download categories |
+| `POST` | `/api/v1/categories` | Create a new download category |
+| `PUT` | `/api/v1/categories/{id}` | Update category name and directory |
+| `DELETE` | `/api/v1/categories/{id}` | Delete a category |
 | **Media** | | |
 | `POST` | `/api/v1/jobs/{id}/format` | Select media format |
 | **Queue & Settings** | | |
@@ -192,6 +204,9 @@ All settings are optional. Defaults work out of the box for a typical local setu
 | `LISTEN_ADDR` | `127.0.0.1:8080` | Address the server listens on |
 | `MAX_CONCURRENT_DOWNLOADS` | — | Override max concurrent downloads (otherwise set via UI/DB, default 3) |
 | `DOWNLOAD_DIR` | `./downloads` | Where downloaded files are saved |
+| `TEMP_DIR` | `<DATA_DIR>/tmp` | Temporary working directory for media downloads |
+| `MIN_FREE_SPACE_BYTES` | `1073741824` (1 GiB) | Minimum free disk space reserve before download start |
+| `DEFAULT_CONFLICT_POLICY` | `rename` | Default filename conflict policy (`rename`, `overwrite`, `fail`) |
 | `DATA_DIR` | `./data` | Storage for `.torrent` files and app data |
 | `ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` | aria2 JSON-RPC endpoint |
 | `ARIA2_SECRET` | — | aria2 RPC secret (if configured) |
@@ -220,7 +235,8 @@ GoDownloader/
 │   │   └── qbittorrent/    qBittorrent Web API client
 │   ├── events/           Event bus and SSE handler
 │   ├── job/              Job state machine, scheduler, and recovery
-│   └── settings/         App settings persistence
+│   ├── settings/         App settings persistence
+│   └── storage/          Storage resolution, disk preflight, and file lifecycle
 ├── web/src/              React frontend
 │   ├── components/         UI components
 │   ├── api.ts              API client

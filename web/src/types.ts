@@ -2,6 +2,27 @@ export type JobStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'fai
 
 export type JobPriority = 'low' | 'normal' | 'high';
 
+export type FilenameConflictPolicy = 'rename' | 'overwrite' | 'fail' | 'engine_managed';
+
+export interface Category {
+  id: string;
+  name: string;
+  directory: string;
+  resolvedDirectory?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CreateCategoryPayload {
+  name: string;
+  directory: string;
+}
+
+export interface UpdateCategoryPayload {
+  name: string;
+  directory: string;
+}
+
 export interface MediaFormat {
   formatId: string;
   ext: string;
@@ -58,6 +79,11 @@ export interface Job {
   type: string;
   priority?: JobPriority;
   batchId?: string;
+  categoryId?: string;
+  destinationDir?: string;
+  workDir?: string;
+  conflictPolicy?: FilenameConflictPolicy;
+  finalPath?: string;
   progress: number;
   totalBytes: number;
   completedBytes: number;
@@ -75,15 +101,24 @@ export interface Job {
 export interface CreateJobRequest {
   source: string;
   priority?: JobPriority;
+  categoryId?: string;
+  destinationDir?: string;
+  conflictPolicy?: FilenameConflictPolicy;
 }
 
 export interface BatchInput {
   source: string;
   priority?: JobPriority;
+  categoryId?: string;
+  destinationDir?: string;
+  conflictPolicy?: FilenameConflictPolicy;
 }
 
 export interface CreateBatchRequest {
   inputs: BatchInput[];
+  categoryId?: string;
+  destinationDir?: string;
+  conflictPolicy?: FilenameConflictPolicy;
 }
 
 export interface BatchItemResult {
@@ -142,9 +177,41 @@ export interface QueueSnapshot {
   items: QueuedJob[];
 }
 
+export interface StorageOverrides {
+  defaultDownloadDirectory: boolean;
+  temporaryDirectory: boolean;
+  minimumFreeSpaceBytes: boolean;
+  defaultConflictPolicy: boolean;
+}
+
+export interface StorageSettings {
+  defaultDownloadDirectory: string;
+  temporaryDirectory: string;
+  minimumFreeSpaceBytes: number;
+  defaultConflictPolicy: FilenameConflictPolicy;
+  overrides?: StorageOverrides;
+}
+
 export interface AppSettings {
-  maxConcurrentDownloads: number;
+  queue?: {
+    maxConcurrentDownloads: number;
+    source?: string;
+  };
+  storage?: StorageSettings;
+  maxConcurrentDownloads?: number;
   maxConcurrentSource?: string;
+}
+
+export interface UpdateSettingsPayload {
+  queue?: {
+    maxConcurrentDownloads?: number;
+  };
+  storage?: {
+    defaultDownloadDirectory?: string;
+    temporaryDirectory?: string;
+    minimumFreeSpaceBytes?: number;
+    defaultConflictPolicy?: FilenameConflictPolicy;
+  };
 }
 
 export interface SelectFormatRequest {
