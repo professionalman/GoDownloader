@@ -151,12 +151,26 @@ func (s *Scheduler) schedule() {
 			continue
 		}
 
-		s.dispatchSingle(next)
+		if err := s.dispatchSingle(next); err != nil {
+			if errors.Is(err, ErrDispatchPersistenceFailed) {
+				// Stop fill loop: persistence is unreliable, do not dispatch more.
+				// In-flight reservation is retained to prevent double-dispatch.
+				log.Printf("scheduler: stopping fill loop due to persistence failure for job %s", next.JobID)
+				return
+			}
+		}
 	}
 }
 
-func (s *Scheduler) dispatchSingle(next *QueuedJob) {
-	defer s.releaseInFlight(next.JobID)
+func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
+	// NOTE: in-flight reservation is released here for all paths EXCEPT
+	// ErrDispatchPersistenceFailed, where it is retained to prevent double-dispatch.
+	releaseReservation := true
+	defer func() {
+		if releaseReservation {
+			s.releaseInFlight(next.JobID)
+		}
+	}()
 
 	// Revalidate job state immediately before dispatch
 	current, err := s.repo.GetByID(s.ctx, next.JobID)
@@ -165,50 +179,60 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) {
 		if current != nil && (current.Status == StatusCompleted || current.Status == StatusFailed || current.Status == StatusCancelled || current.Status == StatusDownloading || current.Status == StatusProcessing || current.Status == StatusSeeding) {
 			s.queueRepo.Delete(s.ctx, next.JobID)
 		}
-		return
+		return nil
 	}
 
 	entry, err := s.queueRepo.Get(s.ctx, next.JobID)
 	if err != nil || entry == nil || entry.Action != next.Action {
 		log.Printf("scheduler: queue entry for job %s missing or changed, skipping", next.JobID)
-		return
+		return nil
 	}
 
 	// Dispatch execution to engine
 	dispatchErr := s.dispatchFn(s.ctx, next)
 	if dispatchErr != nil {
 		if errors.Is(dispatchErr, ErrDispatchPersistenceFailed) {
-			log.Printf("scheduler reconciliation required for job %s: %v", next.JobID, dispatchErr)
-			return
+			log.Printf("scheduler: reconciliation required for job %s: %v", next.JobID, dispatchErr)
+			// Retain in-flight reservation so the job cannot be double-dispatched
+			releaseReservation = false
+			return dispatchErr
 		}
 
 		log.Printf("scheduler: engine failed for job %s (action=%s): %v", next.JobID, next.Action, dispatchErr)
 		now := time.Now()
 
 		if next.Action == QueueActionStart {
+			// START failure: mark FAILED, delete queue row only after persistence succeeds
 			current.Status = StatusFailed
 			current.Error = fmt.Sprintf("failed to start queued download: %v", dispatchErr)
 			current.SpeedBytesPerSecond = 0
 			current.ETASeconds = 0
 			current.UpdatedAt = now
-			s.repo.Update(s.ctx, current)
-			s.queueRepo.Delete(s.ctx, next.JobID)
+			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
+				log.Printf("scheduler: failed to persist FAILED state for job %s: %v", next.JobID, updateErr)
+				// Do NOT delete queue row — FAILED state was not persisted
+			} else {
+				s.queueRepo.Delete(s.ctx, next.JobID)
+			}
 			if s.bus != nil {
 				s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
 			}
 		} else {
-			// QueueActionResume failure: Mark job PAUSED, retain queue entry for user retry
+			// RESUME failure: mark PAUSED, retain queue entry for user retry
 			current.Status = StatusPaused
 			current.Error = fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
 			current.SpeedBytesPerSecond = 0
 			current.ETASeconds = 0
 			current.UpdatedAt = now
-			s.repo.Update(s.ctx, current)
+			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
+				log.Printf("scheduler: failed to persist PAUSED state for job %s: %v", next.JobID, updateErr)
+			}
 			if s.bus != nil {
 				s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
 			}
 		}
 	}
+	return nil
 }
 
 func currentStatus(j *Job) string {

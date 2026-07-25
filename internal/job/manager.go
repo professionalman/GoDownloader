@@ -1019,7 +1019,9 @@ func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 	if j.Status == StatusQueued {
 		j.Status = StatusPaused
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if err := m.repo.Update(ctx, j); err != nil {
+			return nil, fmt.Errorf("pause queued job: %w", err)
+		}
 		m.publish(EventJobUpdated, j)
 		return j, nil
 	}
@@ -1034,11 +1036,6 @@ func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 			return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine pause failed: %v", err)}
 		}
 	}
-
-	j.Status = StatusPaused
-	j.SpeedBytesPerSecond = 0
-	j.ETASeconds = 0
-	j.UpdatedAt = time.Now()
 
 	j.Status = StatusPaused
 	j.SpeedBytesPerSecond = 0
@@ -1085,7 +1082,10 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 
 	action := QueueActionResume
 	if m.queueRepo != nil {
-		entry, _ := m.queueRepo.Get(ctx, id)
+		entry, getErr := m.queueRepo.Get(ctx, id)
+		if getErr != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to read queue entry: %v", getErr)}
+		}
 		if entry != nil {
 			action = entry.Action
 			entry.UpdatedAt = time.Now()
@@ -1702,25 +1702,41 @@ func (m *Manager) SetJobPriority(ctx context.Context, id string, p JobPriority) 
 	j.Priority = p
 	j.UpdatedAt = time.Now()
 
+	// Persist job priority first
+	if err := m.repo.Update(ctx, j); err != nil {
+		j.Priority = oldPriority
+		return nil, fmt.Errorf("update job priority: %w", err)
+	}
+
+	// Then update queue entry position to match new lane
 	if m.queueRepo != nil {
-		entry, err := m.queueRepo.Get(ctx, id)
-		if err == nil && entry != nil {
-			nextPos, err := m.queueRepo.NextPosition(ctx, p)
-			if err != nil {
+		entry, getErr := m.queueRepo.Get(ctx, id)
+		if getErr != nil {
+			// Rollback job priority since queue state is unknown
+			j.Priority = oldPriority
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			return nil, fmt.Errorf("read queue entry: %w", getErr)
+		}
+		if entry != nil {
+			nextPos, posErr := m.queueRepo.NextPosition(ctx, p)
+			if posErr != nil {
+				// Rollback job priority
 				j.Priority = oldPriority
-				return nil, fmt.Errorf("calculate next position: %w", err)
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				return nil, fmt.Errorf("calculate next position: %w", posErr)
 			}
 			entry.Position = nextPos
 			entry.UpdatedAt = time.Now()
-			if err := m.queueRepo.Enqueue(ctx, entry); err != nil {
+			if enqErr := m.queueRepo.Enqueue(ctx, entry); enqErr != nil {
+				// Rollback job priority
 				j.Priority = oldPriority
-				return nil, fmt.Errorf("update queue entry priority: %w", err)
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				return nil, fmt.Errorf("update queue entry priority: %w", enqErr)
 			}
 		}
-	}
-
-	if err := m.repo.Update(ctx, j); err != nil {
-		return nil, fmt.Errorf("update job priority: %w", err)
 	}
 
 	m.publish(EventJobUpdated, j)
