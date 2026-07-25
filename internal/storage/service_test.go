@@ -347,3 +347,130 @@ func TestStorageService_WorkDirSafetyMarker(t *testing.T) {
 		t.Errorf("expected workDir to be removed")
 	}
 }
+
+func TestFinalizeOverwrite_ExistingFile(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	srcDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	os.MkdirAll(srcDir, 0755)
+	os.MkdirAll(destDir, 0755)
+
+	targetFile := filepath.Join(destDir, "test.txt")
+	os.WriteFile(targetFile, []byte("old content"), 0644)
+
+	srcFile := filepath.Join(srcDir, "test.txt")
+	os.WriteFile(srcFile, []byte("new overwritten content"), 0644)
+
+	finalPath, err := svc.FinalizeFile(ctx, srcFile, destDir, storage.ConflictPolicyOverwrite)
+	if err != nil {
+		t.Fatalf("FinalizeFile failed: %v", err)
+	}
+	if finalPath != targetFile {
+		t.Errorf("expected finalPath %s, got %s", targetFile, finalPath)
+	}
+
+	data, err := os.ReadFile(targetFile)
+	if err != nil || string(data) != "new overwritten content" {
+		t.Errorf("expected overwritten content, got %s (err=%v)", string(data), err)
+	}
+	if _, err := os.Stat(srcFile); !os.IsNotExist(err) {
+		t.Errorf("expected source file to be removed after overwrite")
+	}
+}
+
+func TestFinalizeOverwrite_CrossDeviceFallback(t *testing.T) {
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+
+	targetFile := filepath.Join(destDir, "cross_dev.txt")
+	os.WriteFile(targetFile, []byte("original content"), 0644)
+
+	srcFile := filepath.Join(srcDir, "cross_dev.txt")
+	os.WriteFile(srcFile, []byte("cross device content"), 0644)
+
+	if err := storage.MoveOrCopyFile(srcFile, targetFile); err != nil {
+		t.Fatalf("MoveOrCopyFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(targetFile)
+	if err != nil || string(data) != "cross device content" {
+		t.Errorf("expected updated content, got %s (err=%v)", string(data), err)
+	}
+	if _, err := os.Stat(srcFile); !os.IsNotExist(err) {
+		t.Errorf("expected source file to be removed after move")
+	}
+}
+
+func TestCategoryDelete_ClearsJobReference(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open in-memory db: %v", err)
+	}
+	defer db.Close()
+
+	schema := `
+	CREATE TABLE categories (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL COLLATE NOCASE,
+		directory TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+	CREATE TABLE jobs (
+		id TEXT PRIMARY KEY,
+		category_id TEXT NOT NULL DEFAULT '',
+		destination_dir TEXT NOT NULL DEFAULT ''
+	);
+	`
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("failed to create schema: %v", err)
+	}
+
+	repo := storage.NewSQLiteCategoryRepository(db)
+	ctx := context.Background()
+
+	cat := &storage.Category{Name: "Video", Directory: "Video"}
+	if err := repo.Create(ctx, cat); err != nil {
+		t.Fatalf("failed to create category: %v", err)
+	}
+
+	destDir := "/downloads/Video"
+	if _, err := db.Exec(`INSERT INTO jobs (id, category_id, destination_dir) VALUES ('job-1', ?, ?)`, cat.ID, destDir); err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+
+	// Delete category
+	if err := repo.Delete(ctx, cat.ID); err != nil {
+		t.Fatalf("failed to delete category: %v", err)
+	}
+
+	// Category must be deleted
+	deleted, err := repo.GetByID(ctx, cat.ID)
+	if err != nil || deleted != nil {
+		t.Errorf("expected category to be deleted, got %v", deleted)
+	}
+
+	// Job category_id must be cleared, destination_dir remains unchanged
+	var catID, jobDest string
+	if err := db.QueryRow(`SELECT category_id, destination_dir FROM jobs WHERE id = 'job-1'`).Scan(&catID, &jobDest); err != nil {
+		t.Fatalf("failed to query job: %v", err)
+	}
+
+	if catID != "" {
+		t.Errorf("expected job category_id to be cleared, got %s", catID)
+	}
+	if jobDest != destDir {
+		t.Errorf("expected job destination_dir %s to remain unchanged, got %s", destDir, jobDest)
+	}
+}
+
+func TestCategoryDelete_PreservesDestinationSnapshot(t *testing.T) {
+	// Re-verify DestinationDir preservation on job after category deletion
+	TestCategoryDelete_ClearsJobReference(t)
+}

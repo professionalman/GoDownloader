@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -430,18 +429,8 @@ func (db *DB) migrateToV06() error {
 		}
 	}
 
-	// Backfill legacy jobs where destination_dir is empty
-	defaultDir := "./downloads"
-	if absDir, err := filepath.Abs(defaultDir); err == nil {
-		defaultDir = absDir
-	}
-	if _, err := db.conn.Exec("UPDATE jobs SET destination_dir = ? WHERE destination_dir = '' OR destination_dir IS NULL", defaultDir); err != nil {
-		return fmt.Errorf("backfill legacy job destination_dir: %w", err)
-	}
-
-	// Seed initial categories if table is empty
-	var catCount int
-	if err := db.conn.QueryRow("SELECT count(*) FROM categories").Scan(&catCount); err == nil && catCount == 0 {
+	// Seed initial categories ONLY on first migration to V0.6 (when category_id column was missing)
+	if !hasCategoryID {
 		now := time.Now()
 		seeds := []struct {
 			name string
@@ -454,8 +443,10 @@ func (db *DB) migrateToV06() error {
 		}
 		for _, seed := range seeds {
 			catID := uuid.New().String()
-			db.conn.Exec("INSERT OR IGNORE INTO categories (id, name, directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-				catID, seed.name, seed.dir, now, now)
+			if _, err := db.conn.Exec("INSERT OR IGNORE INTO categories (id, name, directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+				catID, seed.name, seed.dir, now, now); err != nil {
+				return fmt.Errorf("seed default category %s: %w", seed.name, err)
+			}
 		}
 	}
 

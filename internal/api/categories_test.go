@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -37,10 +38,12 @@ func setupAPITestRouter(t *testing.T) (http.Handler, storage.ICategoryRepository
 	dataDir := filepath.Join(tempDir, "data")
 
 	settingsSvc := settings.NewSettingsService(settingsRepo, downloadDir, dataDir)
+	storageSvc := storage.NewStorageService(catRepo, settingsSvc, storage.NewOSFreeSpaceProvider(), downloadDir, dataDir)
 	registry := engine.NewRegistry()
 	mgr := job.NewManager(jobRepo, registry, nil, downloadDir, nil, dataDir)
 	mgr.SetQueueRepository(queueRepo)
 	mgr.SetSettingsService(settingsSvc)
+	mgr.SetStorageService(storageSvc)
 
 	cfg := &config.Config{
 		DownloadDir: downloadDir,
@@ -156,5 +159,63 @@ func TestSettingsAPI_StorageUpdate(t *testing.T) {
 	}
 	if st.Storage.DefaultConflictPolicy != "overwrite" {
 		t.Errorf("expected default conflict policy overwrite, got %s", st.Storage.DefaultConflictPolicy)
+	}
+}
+
+func TestCategoriesAPI_UsesUpdatedDefaultDirectory(t *testing.T) {
+	router, catRepo, settingsSvc := setupAPITestRouter(t)
+
+	// Create relative category "Books" -> "Books"
+	cat := &storage.Category{Name: "Books", Directory: "Books"}
+	if err := catRepo.Create(context.Background(), cat); err != nil {
+		t.Fatalf("Create category failed: %v", err)
+	}
+
+	newDir := filepath.Join(t.TempDir(), "new_root")
+	os.MkdirAll(newDir, 0755)
+
+	// Update settings
+	reqPayload := &settings.UpdateSettingsRequest{}
+	reqPayload.Storage = &struct {
+		DefaultDownloadDirectory *string `json:"defaultDownloadDirectory,omitempty"`
+		TemporaryDirectory       *string `json:"temporaryDirectory,omitempty"`
+		MinimumFreeSpaceBytes    *int64  `json:"minimumFreeSpaceBytes,omitempty"`
+		DefaultConflictPolicy    *string `json:"defaultConflictPolicy,omitempty"`
+	}{
+		DefaultDownloadDirectory: &newDir,
+	}
+
+	if _, err := settingsSvc.UpdateStorageSettings(context.Background(), reqPayload); err != nil {
+		t.Fatalf("UpdateStorageSettings failed: %v", err)
+	}
+
+	// GET /api/v1/categories must use updated default directory immediately
+	req := httptest.NewRequest("GET", "/api/v1/categories", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var categories []storage.CategoryResponse
+	if err := json.NewDecoder(rec.Body).Decode(&categories); err != nil {
+		t.Fatalf("decode categories: %v", err)
+	}
+
+	var found *storage.CategoryResponse
+	for i := range categories {
+		if categories[i].ID == cat.ID {
+			found = &categories[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("created category Books not found in API response")
+	}
+
+	expectedResolved := filepath.Join(newDir, "Books")
+	if found.ResolvedDirectory != expectedResolved {
+		t.Errorf("expected resolvedDirectory %s, got %s", expectedResolved, found.ResolvedDirectory)
 	}
 }

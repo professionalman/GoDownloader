@@ -24,9 +24,7 @@ func (m *Manager) recover(ctx context.Context) {
 
 	for i := range jobs {
 		j := &jobs[i]
-		if j.Type == TypeTorrent {
-			m.hydrateJob(ctx, j)
-		}
+		m.hydrateJob(ctx, j)
 		m.recoverJob(ctx, j)
 	}
 }

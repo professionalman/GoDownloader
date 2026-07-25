@@ -53,6 +53,7 @@ type StorageResolution struct {
 
 // IStorageService manages path resolution, preflight checks, file finalization, and workdir lifecycles.
 type IStorageService interface {
+	GetEffectiveDefaultDownloadDir(ctx context.Context) string
 	ResolveDestination(ctx context.Context, categoryID, customDest string, policy FilenameConflictPolicy, jobID string, isMedia bool) (*StorageResolution, error)
 	PrepareWorkDir(ctx context.Context, jobID, workDir string) error
 	Preflight(ctx context.Context, destinationDir, workDir string, totalBytes, completedBytes int64) error

@@ -64,6 +64,22 @@ func (m *Manager) GetDefaultDownloadDir() string {
 	return m.downloadDir
 }
 
+// GetEffectiveDefaultDownloadDir returns the effective default download directory from StorageService or SettingsService.
+func (m *Manager) GetEffectiveDefaultDownloadDir(ctx context.Context) string {
+	if m.storageService != nil {
+		return m.storageService.GetEffectiveDefaultDownloadDir(ctx)
+	}
+	if m.settings != nil {
+		if st, err := m.settings.GetSettings(ctx); err == nil {
+			return st.Storage.EffectiveDefaultDownloadDirectory
+		}
+	}
+	if abs, err := filepath.Abs(m.downloadDir); err == nil {
+		return abs
+	}
+	return m.downloadDir
+}
+
 // SetQueueRepository wires the queue repository.
 func (m *Manager) SetQueueRepository(queueRepo IQueueRepository) {
 	m.queueRepo = queueRepo
@@ -100,18 +116,38 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 	// 1. Run recovery first
 	m.recover(ctx)
 
-	// 2. Clean up stale queue entries on startup
+	// 2. Clean up stale GoDownloader-owned workdirs on startup
+	if m.storageService != nil {
+		allJobs, err := m.repo.List(ctx)
+		if err != nil {
+			log.Printf("startup: failed to list jobs for workdir cleanup: %v", err)
+		} else {
+			preservedJobIDs := make(map[string]bool)
+			for _, j := range allJobs {
+				if j.Status == StatusQueued || j.Status == StatusPaused ||
+					j.Status == StatusAnalyzing || j.Status == StatusAwaitingSelection ||
+					j.Status == StatusDownloading || j.Status == StatusProcessing {
+					preservedJobIDs[j.ID] = true
+				}
+			}
+			if err := m.storageService.CleanupStaleWorkDirs(ctx, preservedJobIDs); err != nil {
+				log.Printf("startup: cleanup stale workdirs error: %v", err)
+			}
+		}
+	}
+
+	// 3. Clean up stale queue entries on startup
 	if m.queueRepo != nil {
 		m.cleanupQueueOnStartup(ctx)
 	}
 
-	// 3. Start scheduler and kick once
+	// 4. Start scheduler and kick once
 	if m.scheduler != nil {
 		m.scheduler.Start(ctx)
 		m.scheduler.Kick()
 	}
 
-	// 4. Start progress monitor
+	// 5. Start progress monitor
 	m.monitor = NewMonitor(m, 1*time.Second)
 	m.monitor.Start(ctx)
 }
@@ -967,8 +1003,22 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
 	}
 
-	// 4. Save selections & SeedAfterComplete to DB
+	// 4. Calculate selected payload bytes & Save selections & SeedAfterComplete to DB
+	fileSizeMap := make(map[int]int64)
+	for _, f := range existingFiles {
+		fileSizeMap[f.Index] = f.Size
+	}
+
+	selectedBytes := int64(0)
+	for _, s := range selections {
+		if s.Priority != PrioritySkip {
+			selectedBytes += fileSizeMap[s.Index]
+		}
+	}
+
+	j.TotalBytes = selectedBytes
 	j.SeedAfterComplete = seedAfterComplete
+
 	if m.torrentRepo != nil {
 		var records []TorrentFileRecord
 		for _, s := range selections {
@@ -979,12 +1029,19 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 				Priority:  string(s.Priority),
 			})
 		}
-		m.torrentRepo.UpdateTorrentFileSelections(ctx, id, records)
+		if err := m.torrentRepo.UpdateTorrentFileSelections(ctx, id, records); err != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to save torrent file selections: %v", err)}
+		}
 
-		rec, _ := m.torrentRepo.GetTorrentJob(ctx, id)
+		rec, err := m.torrentRepo.GetTorrentJob(ctx, id)
+		if err != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to get torrent job record: %v", err)}
+		}
 		if rec != nil {
 			rec.SeedAfterComplete = seedAfterComplete
-			m.torrentRepo.UpdateTorrentJob(ctx, rec)
+			if err := m.torrentRepo.UpdateTorrentJob(ctx, rec); err != nil {
+				return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to update torrent job record: %v", err)}
+			}
 		}
 	}
 
@@ -1287,6 +1344,12 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 	m.removeActive(id)
 	m.publish(EventJobCancelled, j)
 
+	if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
+		if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
+			log.Printf("Cancel: cleanup workdir error for job %s: %v", j.ID, err)
+		}
+	}
+
 	if m.scheduler != nil {
 		m.scheduler.Kick()
 	}
@@ -1307,6 +1370,13 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 
 	// For media jobs, restart analysis
 	if j.Type == TypeMedia {
+		if m.storageService != nil && j.WorkDir != "" {
+			if err := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); err == nil {
+				if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
+					log.Printf("Retry: cleanup stale workdir error for job %s: %v", j.ID, err)
+				}
+			}
+		}
 		j.Status = StatusAnalyzing
 		j.Name = "Analyzing..."
 		j.MediaInfo = nil
@@ -1447,17 +1517,24 @@ func (m *Manager) List(ctx context.Context) ([]Job, error) {
 }
 
 func (m *Manager) hydrateJob(ctx context.Context, j *Job) {
-	if j == nil || j.Type != TypeTorrent || m.torrentRepo == nil {
+	if j == nil {
 		return
 	}
-	rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
-	if err == nil && rec != nil {
-		j.SeedAfterComplete = rec.SeedAfterComplete
-		if j.TorrentInfo == nil && (rec.Name != "" || rec.TotalSize > 0) {
-			j.TorrentInfo = &TorrentInfo{
-				Name:      rec.Name,
-				InfoHash:  rec.InfoHash,
-				TotalSize: rec.TotalSize,
+	if j.DestinationDir == "" {
+		effDir := m.GetEffectiveDefaultDownloadDir(ctx)
+		j.DestinationDir = effDir
+		_ = m.repo.Update(ctx, j)
+	}
+	if j.Type == TypeTorrent && m.torrentRepo != nil {
+		rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+		if err == nil && rec != nil {
+			j.SeedAfterComplete = rec.SeedAfterComplete
+			if j.TorrentInfo == nil && (rec.Name != "" || rec.TotalSize > 0) {
+				j.TorrentInfo = &TorrentInfo{
+					Name:      rec.Name,
+					InfoHash:  rec.InfoHash,
+					TotalSize: rec.TotalSize,
+				}
 			}
 		}
 	}
@@ -1536,37 +1613,65 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" && j.FinalPath == "" {
 			srcFile := status.OutputPath
 			if srcFile == "" && status.FileName != "" {
-				srcFile = filepath.Join(j.WorkDir, status.FileName)
+				cand := filepath.Join(j.WorkDir, status.FileName)
+				if _, err := os.Stat(cand); err == nil {
+					srcFile = cand
+				}
 			}
 			if srcFile == "" {
 				entries, _ := os.ReadDir(j.WorkDir)
+				var bestFile string
+				var bestSize int64
 				for _, entry := range entries {
-					if !entry.IsDir() && entry.Name() != storage.WorkDirMarkerFilename {
-						srcFile = filepath.Join(j.WorkDir, entry.Name())
-						break
+					if entry.IsDir() || entry.Name() == storage.WorkDirMarkerFilename {
+						continue
+					}
+					name := entry.Name()
+					if strings.HasSuffix(name, ".part") || strings.HasSuffix(name, ".ytdl") {
+						continue
+					}
+					info, err := entry.Info()
+					if err != nil {
+						continue
+					}
+					if info.Size() > bestSize {
+						bestSize = info.Size()
+						bestFile = filepath.Join(j.WorkDir, name)
 					}
 				}
+				srcFile = bestFile
 			}
 
-			if srcFile != "" {
-				finalPath, err := m.storageService.FinalizeFile(ctx, srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
-				if err != nil {
-					log.Printf("UpdateJobFromEngine: media finalization failed for job %s: %v", j.ID, err)
-					j.Status = StatusFailed
-					j.Error = fmt.Sprintf("file finalization failed: %v", err)
-					j.UpdatedAt = time.Now()
-					m.repo.Update(ctx, j)
-					m.removeActive(j.ID)
-					m.publish(EventJobFailed, j)
-					if m.scheduler != nil {
-						m.scheduler.Kick()
-					}
-					return
+			if srcFile == "" {
+				log.Printf("UpdateJobFromEngine: media completed but final output file was not found for job %s", j.ID)
+				j.Status = StatusFailed
+				j.Error = "media completed but final output file was not found"
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.removeActive(j.ID)
+				m.publish(EventJobFailed, j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
 				}
-				j.FinalPath = finalPath
-				j.Name = filepath.Base(finalPath)
-				m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir)
+				return
 			}
+
+			finalPath, err := m.storageService.FinalizeFile(ctx, srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
+			if err != nil {
+				log.Printf("UpdateJobFromEngine: media finalization failed for job %s: %v", j.ID, err)
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("file finalization failed: %v", err)
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.removeActive(j.ID)
+				m.publish(EventJobFailed, j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
+				}
+				return
+			}
+			j.FinalPath = finalPath
+			j.Name = filepath.Base(finalPath)
 		}
 
 		if j.Type == TypeDownload && status.FileName != "" {
@@ -1581,9 +1686,26 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if err := m.repo.Update(ctx, j); err != nil {
+			log.Printf("UpdateJobFromEngine: failed to update job %s to COMPLETED: %v", j.ID, err)
+			j.Status = StatusFailed
+			j.Error = fmt.Sprintf("failed to persist completion state: %v", err)
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.removeActive(j.ID)
+			m.publish(EventJobFailed, j)
+			if m.scheduler != nil {
+				m.scheduler.Kick()
+			}
+			return
+		}
 		m.removeActive(j.ID)
 		m.publish(EventJobCompleted, j)
+		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
+			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
+				log.Printf("UpdateJobFromEngine: cleanup workdir error for completed job %s: %v", j.ID, err)
+			}
+		}
 		if m.scheduler != nil {
 			m.scheduler.Kick()
 		}
@@ -1598,6 +1720,11 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		m.repo.Update(ctx, j)
 		m.removeActive(j.ID)
 		m.publish(EventJobFailed, j)
+		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
+			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
+				log.Printf("UpdateJobFromEngine: cleanup workdir error for failed job %s: %v", j.ID, err)
+			}
+		}
 		if m.scheduler != nil {
 			m.scheduler.Kick()
 		}
@@ -1611,6 +1738,11 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		m.repo.Update(ctx, j)
 		m.removeActive(j.ID)
 		m.publish(EventJobCancelled, j)
+		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
+			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
+				log.Printf("UpdateJobFromEngine: cleanup workdir error for cancelled job %s: %v", j.ID, err)
+			}
+		}
 		if m.scheduler != nil {
 			m.scheduler.Kick()
 		}
@@ -2012,7 +2144,25 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 
 		if j.WorkDir != "" {
 			if prepareErr := m.storageService.PrepareWorkDir(ctx, j.ID, j.WorkDir); prepareErr != nil {
-				log.Printf("dispatchQueuedJob: prepare workdir failed for job %s: %v", j.ID, prepareErr)
+				log.Printf("dispatchQueuedJob: prepare workdir failed for job %s (action=%s): %v", j.ID, qj.Action, prepareErr)
+				if qj.Action == QueueActionStart {
+					j.Status = StatusFailed
+					j.Error = fmt.Sprintf("failed to prepare work directory: %v", prepareErr)
+					j.UpdatedAt = time.Now()
+					m.repo.Update(ctx, j)
+					if m.queueRepo != nil {
+						m.queueRepo.Delete(ctx, j.ID)
+					}
+					m.publish(EventJobFailed, j)
+				} else {
+					// QueueActionResume: revert to PAUSED, keep queue entry with QueueActionResume
+					j.Status = StatusPaused
+					j.Error = fmt.Sprintf("failed to prepare work directory: %v", prepareErr)
+					j.UpdatedAt = time.Now()
+					m.repo.Update(ctx, j)
+					m.publish(EventJobUpdated, j)
+				}
+				return prepareErr
 			}
 		}
 	}

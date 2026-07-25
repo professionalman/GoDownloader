@@ -40,7 +40,7 @@ func (h *Handler) GetCategories(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve directories for UI response
-	defaultDir := h.manager.GetDefaultDownloadDir()
+	defaultDir := h.manager.GetEffectiveDefaultDownloadDir(r.Context())
 	resp := make([]storage.CategoryResponse, 0, len(cats))
 	for _, c := range cats {
 		resDir := c.Directory
@@ -83,7 +83,7 @@ func (h *Handler) CreateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defaultDir := h.manager.GetDefaultDownloadDir()
+	defaultDir := h.manager.GetEffectiveDefaultDownloadDir(r.Context())
 	resDir := cat.Directory
 	if !filepath.IsAbs(cat.Directory) {
 		resDir = filepath.Join(defaultDir, cat.Directory)
@@ -132,7 +132,7 @@ func (h *Handler) UpdateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defaultDir := h.manager.GetDefaultDownloadDir()
+	defaultDir := h.manager.GetEffectiveDefaultDownloadDir(r.Context())
 	resDir := existing.Directory
 	if !filepath.IsAbs(existing.Directory) {
 		resDir = filepath.Join(defaultDir, existing.Directory)

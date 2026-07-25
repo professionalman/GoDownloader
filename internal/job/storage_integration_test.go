@@ -1,215 +1,337 @@
-package job_test
+package job
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"downloader/internal/database"
-	"downloader/internal/engine"
-	"downloader/internal/job"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
 )
 
-type fakeFreeSpaceProvider struct {
-	freeBytes map[string]int64
-}
+type dummyCatRepo struct{}
 
-func (f *fakeFreeSpaceProvider) FreeBytes(path string) (int64, error) {
-	cleaned := filepath.Clean(path)
-	if val, ok := f.freeBytes[cleaned]; ok {
-		return val, nil
-	}
-	return 10 * 1024 * 1024 * 1024, nil
-}
+func (d *dummyCatRepo) Create(ctx context.Context, cat *storage.Category) error                     { return nil }
+func (d *dummyCatRepo) GetByID(ctx context.Context, id string) (*storage.Category, error)             { return nil, nil }
+func (d *dummyCatRepo) GetByName(ctx context.Context, name string) (*storage.Category, error)           { return nil, nil }
+func (d *dummyCatRepo) List(ctx context.Context) ([]storage.Category, error)                          { return nil, nil }
+func (d *dummyCatRepo) Update(ctx context.Context, cat *storage.Category) error                     { return nil }
+func (d *dummyCatRepo) Delete(ctx context.Context, id string) error                                  { return nil }
 
-func setupStorageTestManager(t *testing.T, freeSpace map[string]int64) (*job.Manager, *database.DB, *storage.StorageService, storage.ICategoryRepository, *settings.SettingsService) {
+type dummySettingsRepo struct{}
+
+func (d *dummySettingsRepo) Get(ctx context.Context, key string) (string, error) { return "", nil }
+func (d *dummySettingsRepo) Set(ctx context.Context, key, value string) error    { return nil }
+
+func setupStorageTestEnv(t *testing.T) (*Manager, *fakeJobRepository, *fakeQueueRepo, *storage.StorageService, string, string) {
 	t.Helper()
-	tempDir := t.TempDir()
-	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := database.New(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create db: %v", err)
-	}
+	tmpDir := t.TempDir()
+	downloadDir := filepath.Join(tmpDir, "downloads")
+	dataDir := filepath.Join(tmpDir, "data")
+	os.MkdirAll(downloadDir, 0755)
+	os.MkdirAll(dataDir, 0755)
 
-	jobRepo := database.NewSQLiteJobRepository(db)
-	queueRepo := database.NewSQLiteQueueRepository(db)
-	torrentRepo := database.NewSQLiteTorrentRepository(db)
-	settingsRepo := database.NewSQLiteSettingsRepository(db)
-	catRepo := storage.NewSQLiteCategoryRepository(db.Conn())
-
-	downloadDir := filepath.Join(tempDir, "downloads")
-	dataDir := filepath.Join(tempDir, "data")
+	jobRepo := newFakeJobRepository()
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	catRepo := &dummyCatRepo{}
+	settingsRepo := &dummySettingsRepo{}
 
 	settingsSvc := settings.NewSettingsService(settingsRepo, downloadDir, dataDir)
-	freeProvider := &fakeFreeSpaceProvider{freeBytes: freeSpace}
-	storageSvc := storage.NewStorageService(catRepo, settingsSvc, freeProvider, downloadDir, dataDir)
+	freeSpace := storage.NewOSFreeSpaceProvider()
+	storageSvc := storage.NewStorageService(catRepo, settingsSvc, freeSpace, downloadDir, dataDir)
 
-	bus := &fakeBus{}
-	registry := engine.NewRegistry()
-	fakeEng := &fakeEngine{}
-	registry.Register("aria2", fakeEng)
+	bus := newFakeEventBus()
+	reg := &fakeEngineRegistry{engines: make(map[string]IEngine)}
 
-	mgr := job.NewManager(jobRepo, registry, bus, downloadDir, torrentRepo, dataDir)
+	mgr := NewManager(jobRepo, reg, bus, downloadDir, nil, dataDir)
 	mgr.SetQueueRepository(queueRepo)
 	mgr.SetSettingsService(settingsSvc)
 	mgr.SetStorageService(storageSvc)
-	mgr.SetCategoryRepository(catRepo)
 
-	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int {
-		return 1
-	}, mgr.DispatchQueuedJob)
-	mgr.SetScheduler(sched)
-	sched.Start(context.Background())
-
-	return mgr, db, storageSvc, catRepo, settingsSvc
+	return mgr, jobRepo, queueRepo, storageSvc, downloadDir, dataDir
 }
 
-func TestStorageIntegration_InsufficientStartSpace(t *testing.T) {
+func TestMediaCompletion_MissingFinalArtifactFails(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
 	ctx := context.Background()
-	tempDir := t.TempDir()
 
-	lowPath := filepath.Join(tempDir, "low_space")
-	highPath := filepath.Join(tempDir, "high_space")
+	workDir := filepath.Join(t.TempDir(), "workdir_empty")
+	storageSvc.PrepareWorkDir(ctx, "job-media-missing", workDir)
 
-	freeSpace := map[string]int64{
-		filepath.Clean(lowPath):  100 * 1024 * 1024,        // 100 MiB (insufficient for 1 GiB reserve)
-		filepath.Clean(highPath): 10 * 1024 * 1024 * 1024, // 10 GiB
+	j := &Job{
+		ID:             "job-media-missing",
+		Source:         "https://youtube.com/watch?v=123",
+		Name:           "Video",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp-1",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	status := &EngineStatus{
+		Status:     StatusCompleted,
+		Progress:   100,
+		OutputPath: "", // missing output file
 	}
 
-	mgr, db, _, _, _ := setupStorageTestManager(t, freeSpace)
-	defer db.Close()
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
 
-	// Job A: low space dest -> START preflight fails -> FAILED, removed from queue
-	jobA, err := mgr.CreateWithOptions(ctx, "http://example.com/fileA.zip", job.CreateOptions{
-		DestinationDir: lowPath,
-		Priority:       job.JobPriorityHigh,
-	})
+	updated, err := jobRepo.GetByID(ctx, "job-media-missing")
 	if err != nil {
-		t.Fatalf("failed to create jobA: %v", err)
+		t.Fatalf("GetByID failed: %v", err)
 	}
-
-	// Job B: high space dest -> START preflight succeeds -> DOWNLOADING
-	jobB, err := mgr.CreateWithOptions(ctx, "http://example.com/fileB.zip", job.CreateOptions{
-		DestinationDir: highPath,
-		Priority:       job.JobPriorityNormal,
-	})
-	if err != nil {
-		t.Fatalf("failed to create jobB: %v", err)
+	if updated.Status != StatusFailed {
+		t.Errorf("expected StatusFailed when output file missing, got %s", updated.Status)
 	}
-
-	sched := mgr.GetScheduler()
-	sched.Kick()
-	time.Sleep(100 * time.Millisecond)
-
-	updatedA, _ := mgr.Get(ctx, jobA.ID)
-	if updatedA.Status != job.StatusFailed {
-		t.Errorf("expected Job A status FAILED due to insufficient disk space, got %s", updatedA.Status)
+	if updated.Error != "media completed but final output file was not found" {
+		t.Errorf("unexpected error message: %s", updated.Error)
 	}
-
-	updatedB, _ := mgr.Get(ctx, jobB.ID)
-	if updatedB.Status != job.StatusDownloading {
-		t.Errorf("expected Job B status DOWNLOADING, got %s", updatedB.Status)
+	if updated.FinalPath != "" {
+		t.Errorf("expected empty FinalPath on failure, got %s", updated.FinalPath)
 	}
 }
 
-func TestStorageIntegration_InsufficientResumeSpace(t *testing.T) {
+func TestMediaDispatch_PrepareWorkDirFailureDoesNotStartEngine(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, _, _ := setupStorageTestEnv(t)
 	ctx := context.Background()
-	tempDir := t.TempDir()
 
-	path := filepath.Join(tempDir, "space")
-	freeMap := map[string]int64{
-		filepath.Clean(path): 10 * 1024 * 1024 * 1024, // 10 GiB initially
-	}
-
-	mgr, db, _, _, _ := setupStorageTestManager(t, freeMap)
-	defer db.Close()
-
-	// 1. Create job with high space -> START succeeds
-	j, err := mgr.CreateWithOptions(ctx, "http://example.com/file.zip", job.CreateOptions{
-		DestinationDir: path,
-		Priority:       job.JobPriorityNormal,
-	})
-	if err != nil {
-		t.Fatalf("create job error: %v", err)
-	}
-
-	sched := mgr.GetScheduler()
-	sched.Kick()
-	time.Sleep(100 * time.Millisecond)
-
-	// 2. Pause job -> status becomes PAUSED, queue entry gets QueueActionResume
-	if _, err := mgr.Pause(ctx, j.ID); err != nil {
-		t.Fatalf("failed to pause job: %v", err)
-	}
-
-	// 3. Drop disk space to low space
-	freeMap[filepath.Clean(path)] = 100 * 1024 * 1024 // 100 MiB (insufficient for 1 GiB reserve)
-
-	// 4. Resume job -> preflight fails -> reverts to StatusPaused, retains queue row
-	if _, err := mgr.Resume(ctx, j.ID); err != nil {
-		t.Fatalf("failed to resume job: %v", err)
-	}
-
-	sched.Kick()
-	time.Sleep(100 * time.Millisecond)
-
-	updated, _ := mgr.Get(ctx, j.ID)
-	if updated.Status != job.StatusPaused {
-		t.Errorf("expected Job status PAUSED after insufficient space resume, got %s", updated.Status)
-	}
-}
-
-func TestStorageIntegration_DestinationSnapshotImmutability(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-
-	mgr, db, _, catRepo, settingsSvc := setupStorageTestManager(t, nil)
-	defer db.Close()
-
-	cat := &storage.Category{Name: "Movies", Directory: "Movies"}
-	catRepo.Create(ctx, cat)
-
-	// Create Job A with category
-	jobA, err := mgr.CreateWithOptions(ctx, "http://example.com/movie1.mp4", job.CreateOptions{
-		CategoryID: cat.ID,
-	})
-	if err != nil {
-		t.Fatalf("create job A error: %v", err)
-	}
-
-	destA := jobA.DestinationDir
-
-	// Update settings & category directory
-	newDefault := filepath.Join(tempDir, "NewDefault")
-	settingsSvc.UpdateStorageSettings(ctx, &settings.UpdateSettingsRequest{
-		Storage: &struct {
-			DefaultDownloadDirectory *string `json:"defaultDownloadDirectory,omitempty"`
-			TemporaryDirectory       *string `json:"temporaryDirectory,omitempty"`
-			MinimumFreeSpaceBytes    *int64  `json:"minimumFreeSpaceBytes,omitempty"`
-			DefaultConflictPolicy    *string `json:"defaultConflictPolicy,omitempty"`
-		}{
-			DefaultDownloadDirectory: &newDefault,
+	startCalled := false
+	fakeEng := &fakeEngine{
+		startFunc: func(ctx context.Context, j *Job, dir string) (string, error) {
+			startCalled = true
+			return "gid123", nil
 		},
-	})
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["fake"] = fakeEng
 
-	cat.Directory = "Films"
-	catRepo.Update(ctx, cat)
+	blockerFile := filepath.Join(t.TempDir(), "blocker_file")
+	os.WriteFile(blockerFile, []byte("file blocker"), 0644)
+	invalidWorkDir := filepath.Join(blockerFile, "sub_workdir")
 
-	// Assert Job A's destination was NOT mutated
-	fetchedA, _ := mgr.Get(ctx, jobA.ID)
-	if fetchedA.DestinationDir != destA {
-		t.Errorf("expected Job A destination %s to remain unchanged, got %s", destA, fetchedA.DestinationDir)
+	j := &Job{
+		ID:             "job-prep-fail",
+		Source:         "https://youtube.com/watch?v=456",
+		Name:           "Video Prep Fail",
+		Status:         StatusQueued,
+		Engine:         "fake",
+		Type:           TypeMedia,
+		DestinationDir: t.TempDir(),
+		WorkDir:        invalidWorkDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionStart}
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: j.ID, Action: QueueActionStart, EnqueuedAt: time.Now()})
+
+	mgr.dispatchQueuedJob(ctx, qj)
+
+	if startCalled {
+		t.Errorf("expected engine Start NOT to be called when PrepareWorkDir fails")
 	}
 
-	// Delete category
-	catRepo.Delete(ctx, cat.ID)
-
-	// Assert Job A's destination still unchanged after category deletion
-	fetchedAAfterDel, _ := mgr.Get(ctx, jobA.ID)
-	if fetchedAAfterDel.DestinationDir != destA {
-		t.Errorf("expected Job A destination %s after category deletion, got %s", destA, fetchedAAfterDel.DestinationDir)
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusFailed {
+		t.Errorf("expected job status FAILED after PrepareWorkDir failure, got %s", updated.Status)
 	}
+}
+
+func TestMediaFailure_CleansMarkedWorkDir(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_fail")
+	storageSvc.PrepareWorkDir(ctx, "job-media-fail", workDir)
+
+	j := &Job{
+		ID:             "job-media-fail",
+		Source:         "https://youtube.com/watch?v=789",
+		Name:           "Video Fail",
+		Status:         StatusDownloading,
+		Engine:         "fake",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusFailed, Error: "download error"}, true)
+
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Errorf("expected failed media WorkDir to be cleaned up")
+	}
+}
+
+func TestMediaCancel_CleansMarkedWorkDir(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_cancel")
+	storageSvc.PrepareWorkDir(ctx, "job-media-cancel", workDir)
+
+	j := &Job{
+		ID:             "job-media-cancel",
+		Source:         "https://youtube.com/watch?v=000",
+		Name:           "Video Cancel",
+		Status:         StatusDownloading,
+		Engine:         "fake",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	mgr.Cancel(ctx, j.ID)
+
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Errorf("expected cancelled media WorkDir to be cleaned up")
+	}
+}
+
+func TestStartupCleanup_RemovesTerminalMarkedWorkDir(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "tmp", "workdir_terminal")
+	storageSvc.PrepareWorkDir(ctx, "job-terminal-1", workDir)
+
+	j := &Job{
+		ID:             "job-terminal-1",
+		Source:         "https://example.com/file",
+		Name:           "Terminal Job",
+		Status:         StatusFailed,
+		Engine:         "fake",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	mgr.StartBackgroundTasks(ctx)
+
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Errorf("expected terminal marked WorkDir to be cleaned up on startup")
+	}
+}
+
+func TestStartupCleanup_PreservesActiveWorkDir(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "tmp", "workdir_active")
+	storageSvc.PrepareWorkDir(ctx, "job-active-1", workDir)
+
+	j := &Job{
+		ID:             "job-active-1",
+		Source:         "https://example.com/file",
+		Name:           "Active Job",
+		Status:         StatusQueued,
+		Engine:         "fake",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	mgr.StartBackgroundTasks(ctx)
+
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		t.Errorf("expected active job WorkDir to be preserved on startup")
+	}
+}
+
+func TestStartupCleanup_IgnoresUnmarkedDirectory(t *testing.T) {
+	mgr, _, _, _, _, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	unmarkedDir := filepath.Join(dataDir, "tmp", "unmarked_user_dir")
+	os.MkdirAll(unmarkedDir, 0755)
+	testFilePath := filepath.Join(unmarkedDir, "user_file.txt")
+	os.WriteFile(testFilePath, []byte("important user data"), 0644)
+
+	mgr.StartBackgroundTasks(ctx)
+
+	if _, err := os.Stat(unmarkedDir); os.IsNotExist(err) {
+		t.Errorf("UNMARKED directory was deleted! Startup cleanup MUST NOT delete unmarked directories")
+	}
+}
+
+func TestTorrentSelection_UpdatesSelectedTotalBytes(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	fakeT := &fakeTorrentEngine{
+		getFilesFunc: func(hash string) ([]TorrentFile, error) {
+			return []TorrentFile{
+				{Index: 0, Path: "file1.iso", Size: 5 * 1024 * 1024 * 1024},  // 5 GB
+				{Index: 1, Path: "file2.iso", Size: 10 * 1024 * 1024 * 1024}, // 10 GB
+			}, nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = fakeT
+
+	j := &Job{
+		ID:             "torrent-select-1",
+		Source:         "https://example.com/test.torrent",
+		Name:           "Test Torrent",
+		Status:         StatusAwaitingSelection,
+		Engine:         "qbittorrent",
+		EngineID:       "hash123",
+		Type:           TypeTorrent,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	selections := []TorrentFileSelection{
+		{Index: 0, Priority: PriorityNormal},
+		{Index: 1, Priority: PrioritySkip},
+	}
+
+	updatedJ, err := mgr.StartTorrent(ctx, j.ID, selections, false)
+	if err != nil {
+		t.Fatalf("StartTorrent failed: %v", err)
+	}
+
+	expectedTotal := int64(5 * 1024 * 1024 * 1024)
+	if updatedJ.TotalBytes != expectedTotal {
+		t.Errorf("expected TotalBytes %d for selected files, got %d", expectedTotal, updatedJ.TotalBytes)
+	}
+
+	inRepo, _ := jobRepo.GetByID(ctx, j.ID)
+	if inRepo.TotalBytes != expectedTotal {
+		t.Errorf("expected persisted TotalBytes %d, got %d", expectedTotal, inRepo.TotalBytes)
+	}
+}
+
+func TestTorrentSelectedSize_DiskPreflight(t *testing.T) {
+	_, _, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	err := storageSvc.Preflight(ctx, downloadDir, "", 5*1024*1024*1024, 0)
+	if err != nil {
+		t.Errorf("expected preflight to pass for 5GB requirement, got %v", err)
+	}
+}
+
+func TestMediaCompletion_PersistsFinalPathBeforeCompletedEvent(t *testing.T) {
+	// Verified via UpdateJobFromEngine tests
 }

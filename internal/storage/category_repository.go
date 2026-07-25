@@ -142,10 +142,23 @@ func (r *SQLiteCategoryRepository) Update(ctx context.Context, cat *Category) er
 	return nil
 }
 
-// Delete removes a category by ID.
+// Delete removes a category by ID and clears job category references atomically in a transaction.
 func (r *SQLiteCategoryRepository) Delete(ctx context.Context, id string) error {
-	query := `DELETE FROM categories WHERE id = ?`
-	res, err := r.db.ExecContext(ctx, query, id)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete category tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var jobsTableExists int
+	_ = tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='jobs'").Scan(&jobsTableExists)
+	if jobsTableExists > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET category_id = '' WHERE category_id = ?`, id); err != nil {
+			return fmt.Errorf("clear job category references: %w", err)
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM categories WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete category: %w", err)
 	}
@@ -155,5 +168,8 @@ func (r *SQLiteCategoryRepository) Delete(ctx context.Context, id string) error 
 		return fmt.Errorf("category not found")
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete category tx: %w", err)
+	}
 	return nil
 }

@@ -46,6 +46,12 @@ func NewStorageService(catRepo ICategoryRepository, settingsSvc *settings.Settin
 	}
 }
 
+// GetEffectiveDefaultDownloadDir returns the resolved effective default download directory.
+func (s *StorageService) GetEffectiveDefaultDownloadDir(ctx context.Context) string {
+	defaultDir, _, _, _ := s.getEffectiveDefaults(ctx)
+	return defaultDir
+}
+
 func (s *StorageService) getEffectiveDefaults(ctx context.Context) (defaultDir, tempDir string, minFreeSpace int64, defaultPolicy FilenameConflictPolicy) {
 	defaultDir = s.defaultDownloadDir
 	tempDir = filepath.Join(s.dataDir, "tmp")

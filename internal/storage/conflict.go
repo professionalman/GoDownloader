@@ -86,25 +86,33 @@ func GenerateUniqueFilename(dstDir, filename string) string {
 	}
 }
 
-// MoveOrCopyFile moves src to dst, with fallback to atomic copy+move for cross-device/filesystem moves.
+// MoveOrCopyFile moves src to dst, replacing dst if it exists (for ConflictPolicyOverwrite),
+// with fallback to atomic copy+move for cross-device/filesystem moves or OS rename limitations (e.g. Windows).
 func MoveOrCopyFile(src, dst string) error {
 	if src == dst {
 		return nil
 	}
 
-	// 1. Try atomic rename first
-	err := os.Rename(src, dst)
-	if err == nil {
-		return nil
-	}
-
-	// 2. Cross-device fallback
 	dstDir := filepath.Dir(dst)
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return fmt.Errorf("mkdir dst dir: %w", err)
 	}
 
-	// Generate temp file in target destination directory
+	// Ensure dst is not a directory if it exists
+	if fi, err := os.Stat(dst); err == nil {
+		if fi.IsDir() {
+			return fmt.Errorf("%w: target destination %s is a directory", ErrFileConflict, dst)
+		}
+	}
+
+	// 1. Try atomic rename first if dst does NOT exist
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		if err := os.Rename(src, dst); err == nil {
+			return nil
+		}
+	}
+
+	// 2. Safe copy-then-replace fallback (handles existing target on Windows & cross-volume moves)
 	randBuf := make([]byte, 4)
 	rand.Read(randBuf)
 	tempPath := dst + ".tmp-" + hex.EncodeToString(randBuf)
@@ -113,16 +121,17 @@ func MoveOrCopyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("open src file %s: %w", src, err)
 	}
-	defer sf.Close()
 
 	tf, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
+		sf.Close()
 		return fmt.Errorf("create temp file %s: %w", tempPath, err)
 	}
 
 	_, copyErr := io.Copy(tf, sf)
 	syncErr := tf.Sync()
 	closeErr := tf.Close()
+	sf.Close()
 
 	if copyErr != nil || syncErr != nil || closeErr != nil {
 		os.Remove(tempPath)
@@ -135,14 +144,21 @@ func MoveOrCopyFile(src, dst string) error {
 		return fmt.Errorf("close temp file: %w", closeErr)
 	}
 
-	// Atomically rename temp copy to target dst
+	// Remove target dst if it exists before replacing (required on Windows)
+	if _, err := os.Stat(dst); err == nil {
+		if err := os.Remove(dst); err != nil {
+			os.Remove(tempPath)
+			return fmt.Errorf("remove existing target file %s: %w", dst, err)
+		}
+	}
+
+	// Rename temp file to final dst
 	if err := os.Rename(tempPath, dst); err != nil {
 		os.Remove(tempPath)
 		return fmt.Errorf("rename temp file to dst: %w", err)
 	}
 
-	// Remove source file after successful copy
-	sf.Close()
+	// Remove source file after successful replacement
 	os.Remove(src)
 	return nil
 }
