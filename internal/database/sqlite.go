@@ -311,25 +311,34 @@ func (db *DB) migrateToV05() error {
 	}
 
 	// Backfill legacy QUEUED jobs that do not have a job_queue row yet
-	queuedRows, err := db.conn.Query("SELECT j.id, j.created_at FROM jobs j LEFT JOIN job_queue q ON j.id = q.job_id WHERE j.status = 'queued' AND q.job_id IS NULL ORDER BY j.created_at ASC")
-	if err == nil {
-		defer queuedRows.Close()
-		type queuedBackfill struct {
-			id        string
-			createdAt time.Time
+	queuedRows, err := db.conn.Query("SELECT j.id, j.created_at FROM jobs j LEFT JOIN job_queue q ON j.id = q.job_id WHERE j.status = 'queued' AND q.job_id IS NULL ORDER BY j.created_at ASC, j.id ASC")
+	if err != nil {
+		return fmt.Errorf("query backfill legacy queued jobs: %w", err)
+	}
+	defer queuedRows.Close()
+
+	type queuedBackfill struct {
+		id        string
+		createdAt time.Time
+	}
+	var backfills []queuedBackfill
+	for queuedRows.Next() {
+		var b queuedBackfill
+		if scanErr := queuedRows.Scan(&b.id, &b.createdAt); scanErr != nil {
+			return fmt.Errorf("scan backfill legacy queued job: %w", scanErr)
 		}
-		var backfills []queuedBackfill
-		for queuedRows.Next() {
-			var b queuedBackfill
-			if scanErr := queuedRows.Scan(&b.id, &b.createdAt); scanErr == nil {
-				backfills = append(backfills, b)
-			}
+		backfills = append(backfills, b)
+	}
+	if err := queuedRows.Err(); err != nil {
+		return fmt.Errorf("rows.Err backfill legacy queued jobs: %w", err)
+	}
+
+	var pos int64 = 1
+	for _, b := range backfills {
+		if _, execErr := db.conn.Exec(`INSERT OR IGNORE INTO job_queue (job_id, position, action, enqueued_at, updated_at) VALUES (?, ?, 'start', ?, ?)`, b.id, pos, b.createdAt, b.createdAt); execErr != nil {
+			return fmt.Errorf("insert backfill legacy queued job %s: %w", b.id, execErr)
 		}
-		var pos int64 = 1
-		for _, b := range backfills {
-			db.conn.Exec(`INSERT OR IGNORE INTO job_queue (job_id, position, action, enqueued_at, updated_at) VALUES (?, ?, 'start', ?, ?)`, b.id, pos, b.createdAt, b.createdAt)
-			pos++
-		}
+		pos++
 	}
 
 	return nil

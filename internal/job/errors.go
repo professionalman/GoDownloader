@@ -1,5 +1,7 @@
 package job
 
+import "errors"
+
 // AppError represents an application-level error with a code.
 type AppError struct {
 	Code    string `json:"code"`
@@ -32,4 +34,9 @@ const (
 	ErrTorrentNotFound    = "TORRENT_NOT_FOUND"
 	ErrInvalidPriority    = "INVALID_PRIORITY"
 	ErrBatchLimitExceeded = "BATCH_LIMIT_EXCEEDED"
+)
+
+// Sentinel errors for scheduler reconciliation
+var (
+	ErrDispatchPersistenceFailed = errors.New("dispatch persistence failed")
 )

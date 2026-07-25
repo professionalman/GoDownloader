@@ -34,9 +34,24 @@ func (m *Manager) recover(ctx context.Context) {
 func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 	log.Printf("recovery: recovering job %s (status=%s, engine=%s, engineID=%s)", j.ID, j.Status, j.Engine, j.EngineID)
 
-	// Media subprocesses do not survive backend restart
+	// 1. QUEUED jobs: In V0.5, QUEUED jobs are ready to execute and waiting for Scheduler capacity.
+	// They must remain QUEUED across backend restarts.
+	if j.Status == StatusQueued {
+		log.Printf("recovery: job %s is QUEUED (waiting for scheduler), preserving QUEUED status", j.ID)
+		m.publish(EventJobUpdated, j)
+		return
+	}
+
+	// 2. PAUSED jobs: Must remain PAUSED across backend restarts.
+	if j.Status == StatusPaused {
+		log.Printf("recovery: job %s is PAUSED, preserving PAUSED status", j.ID)
+		m.publish(EventJobUpdated, j)
+		return
+	}
+
+	// 3. Media subprocesses in DOWNLOADING or PROCESSING state do not survive backend restart.
 	if j.Type == TypeMedia || j.Engine == "ytdlp" {
-		log.Printf("recovery: media job %s was in status %s during restart, marking failed", j.ID, j.Status)
+		log.Printf("recovery: active media job %s was in status %s during restart, marking failed", j.ID, j.Status)
 		j.Status = StatusFailed
 		j.Error = "Media download was interrupted by application restart. Retry the job."
 		j.SpeedBytesPerSecond = 0
@@ -47,55 +62,42 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		return
 	}
 
-	// Torrent jobs can be recovered via qBittorrent (which is a long-running daemon)
-	if j.Type == TypeTorrent || j.Engine == "qbittorrent" {
-		log.Printf("recovery: torrent job %s in status %s, attempting reattachment", j.ID, j.Status)
-
-		// For awaiting_selection, keep state as-is (user hasn't picked files yet)
-		if j.Status == StatusAwaitingSelection {
-			if j.EngineID == "" {
-				// No info hash — can't recover
-				j.Status = StatusFailed
-				j.Error = "Torrent metadata was lost during restart. Retry the job."
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				m.publish(EventJobFailed, j)
-				return
-			}
-			// Query qBittorrent to see if torrent still exists
-			eng, ok := m.engines.Get(j.Engine)
-			if !ok {
-				j.Status = StatusFailed
-				j.Error = "qBittorrent engine not available."
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				m.publish(EventJobFailed, j)
-				return
-			}
-			_, err := eng.Status(ctx, j)
-			if err != nil {
-				// Torrent no longer in qBittorrent
-				j.Status = StatusFailed
-				j.Error = "Torrent was removed from qBittorrent during restart. Retry the job."
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				m.publish(EventJobFailed, j)
-				return
-			}
-			// Torrent still exists, keep awaiting_selection
-			log.Printf("recovery: torrent job %s still in awaiting_selection, keeping state", j.ID)
-			m.publish(EventJobUpdated, j)
+	// 4. Torrent jobs in AWAITING_SELECTION: keep state as-is
+	if (j.Type == TypeTorrent || j.Engine == "qbittorrent") && j.Status == StatusAwaitingSelection {
+		if j.EngineID == "" {
+			j.Status = StatusFailed
+			j.Error = "Torrent metadata was lost during restart. Retry the job."
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobFailed, j)
 			return
 		}
-
-		// For downloading/seeding, fall through to the standard engine recovery below
-		// qBittorrent is a daemon — it survives backend restart
-		// The standard recovery logic will query Status() and reattach
+		eng, ok := m.engines.Get(j.Engine)
+		if !ok {
+			j.Status = StatusFailed
+			j.Error = "qBittorrent engine not available."
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobFailed, j)
+			return
+		}
+		_, err := eng.Status(ctx, j)
+		if err != nil {
+			j.Status = StatusFailed
+			j.Error = "Torrent was removed from qBittorrent during restart. Retry the job."
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			m.publish(EventJobFailed, j)
+			return
+		}
+		log.Printf("recovery: torrent job %s still in awaiting_selection, keeping state", j.ID)
+		m.publish(EventJobUpdated, j)
+		return
 	}
 
-	// Case 4: No engine ID — cannot recover
+	// 5. Active running jobs (DOWNLOADING, SEEDING): require EngineID to reattach
 	if j.EngineID == "" {
-		log.Printf("recovery: job %s has no engine ID, marking failed", j.ID)
+		log.Printf("recovery: active job %s has no engine ID, marking failed", j.ID)
 		j.Status = StatusFailed
 		j.Error = "Download engine state could not be recovered."
 		j.SpeedBytesPerSecond = 0
@@ -106,7 +108,6 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		return
 	}
 
-	// Look up engine by name
 	eng, ok := m.engines.Get(j.Engine)
 	if !ok {
 		log.Printf("recovery: engine %q not available for job %s, marking failed", j.Engine, j.ID)
@@ -120,10 +121,8 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		return
 	}
 
-	// Query engine for current status
 	status, err := eng.Status(ctx, j)
 	if err != nil {
-		// Case 5: Engine unavailable or GID unknown
 		log.Printf("recovery: engine status failed for job %s: %v", j.ID, err)
 		j.Status = StatusFailed
 		j.Error = "Download engine state could not be recovered."
@@ -137,8 +136,7 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 
 	switch status.Status {
 	case StatusDownloading, StatusQueued, StatusSeeding:
-		// Case 1: Engine still knows the download and it's active
-		log.Printf("recovery: job %s is still active in engine, reattaching", j.ID)
+		log.Printf("recovery: job %s is active in engine (engineStatus=%s), reattaching", j.ID, status.Status)
 
 		if j.Type == TypeTorrent && status.Status == StatusSeeding && !j.SeedAfterComplete {
 			log.Printf("recovery: torrent job %s is seeding in engine but seedAfterComplete=false; removing from daemon and completing", j.ID)
@@ -164,6 +162,7 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			m.publish(EventJobCompleted, j)
 			return
 		}
+
 		j.Status = status.Status
 		j.TotalBytes = status.TotalBytes
 		j.CompletedBytes = status.CompletedBytes
@@ -179,7 +178,6 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		m.publish(EventJobUpdated, j)
 
 	case StatusPaused:
-		// Engine has it paused
 		log.Printf("recovery: job %s is paused in engine", j.ID)
 		j.Status = StatusPaused
 		j.TotalBytes = status.TotalBytes
@@ -195,7 +193,6 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		m.publish(EventJobUpdated, j)
 
 	case StatusCompleted:
-		// Case 2: Engine reports completed
 		log.Printf("recovery: job %s completed in engine", j.ID)
 		j.Status = StatusCompleted
 		j.Progress = 100
@@ -211,7 +208,6 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		m.publish(EventJobCompleted, j)
 
 	case StatusFailed:
-		// Case 3: Engine reports error
 		log.Printf("recovery: job %s failed in engine: %s", j.ID, status.Error)
 		j.Status = StatusFailed
 		j.Error = status.Error
@@ -234,7 +230,6 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		m.publish(EventJobCancelled, j)
 
 	default:
-		// Unknown status — mark failed
 		log.Printf("recovery: job %s has unknown engine status %q, marking failed", j.ID, status.Status)
 		j.Status = StatusFailed
 		j.Error = "Download engine state could not be recovered."

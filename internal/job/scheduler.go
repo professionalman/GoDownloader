@@ -2,9 +2,11 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
 // SchedulerDispatchFunc defines the callback for dispatching a queued job to an engine.
@@ -19,6 +21,10 @@ type Scheduler struct {
 	queueRepo  IQueueRepository
 	getLimit   SchedulerLimitFunc
 	dispatchFn SchedulerDispatchFunc
+	bus        IEventBus
+
+	mu       sync.Mutex
+	inFlight map[string]struct{}
 
 	kickCh chan struct{}
 	ctx    context.Context
@@ -38,8 +44,14 @@ func NewScheduler(
 		queueRepo:  queueRepo,
 		getLimit:   getLimit,
 		dispatchFn: dispatchFn,
+		inFlight:   make(map[string]struct{}),
 		kickCh:     make(chan struct{}, 1),
 	}
+}
+
+// SetEventBus injects an optional event bus for publishing failure/update events.
+func (s *Scheduler) SetEventBus(bus IEventBus) {
+	s.bus = bus
 }
 
 // Start launches the single scheduler background loop.
@@ -78,6 +90,35 @@ func (s *Scheduler) loop() {
 	}
 }
 
+func (s *Scheduler) isInFlight(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.inFlight[id]
+	return ok
+}
+
+func (s *Scheduler) reserveInFlight(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.inFlight[id]; ok {
+		return false
+	}
+	s.inFlight[id] = struct{}{}
+	return true
+}
+
+func (s *Scheduler) releaseInFlight(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inFlight, id)
+}
+
+func (s *Scheduler) inFlightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inFlight)
+}
+
 func (s *Scheduler) schedule() {
 	for {
 		if s.ctx.Err() != nil {
@@ -91,7 +132,8 @@ func (s *Scheduler) schedule() {
 			return
 		}
 
-		if running >= max {
+		effectiveRunning := running + s.inFlightCount()
+		if effectiveRunning >= max {
 			return
 		}
 
@@ -104,44 +146,67 @@ func (s *Scheduler) schedule() {
 			return
 		}
 
-		// Revalidate job state before dispatch
-		current, err := s.repo.GetByID(s.ctx, next.JobID)
-		if err != nil || current == nil || current.Status != StatusQueued {
-			log.Printf("scheduler: job %s is no longer queued (status=%v), skipping", next.JobID, currentStatus(current))
-			// Remove stale queue row if job is terminal or active
-			if current != nil && (current.Status == StatusCompleted || current.Status == StatusFailed || current.Status == StatusCancelled || current.Status == StatusDownloading || current.Status == StatusProcessing || current.Status == StatusSeeding) {
-				s.queueRepo.Delete(s.ctx, next.JobID)
-			}
+		if !s.reserveInFlight(next.JobID) {
+			// Already in flight in another dispatch step
 			continue
 		}
 
-		entry, err := s.queueRepo.Get(s.ctx, next.JobID)
-		if err != nil || entry == nil {
-			log.Printf("scheduler: queue entry for job %s missing, skipping", next.JobID)
-			continue
+		s.dispatchSingle(next)
+	}
+}
+
+func (s *Scheduler) dispatchSingle(next *QueuedJob) {
+	defer s.releaseInFlight(next.JobID)
+
+	// Revalidate job state immediately before dispatch
+	current, err := s.repo.GetByID(s.ctx, next.JobID)
+	if err != nil || current == nil || current.Status != StatusQueued {
+		log.Printf("scheduler: job %s is no longer queued (status=%v), skipping", next.JobID, currentStatus(current))
+		if current != nil && (current.Status == StatusCompleted || current.Status == StatusFailed || current.Status == StatusCancelled || current.Status == StatusDownloading || current.Status == StatusProcessing || current.Status == StatusSeeding) {
+			s.queueRepo.Delete(s.ctx, next.JobID)
+		}
+		return
+	}
+
+	entry, err := s.queueRepo.Get(s.ctx, next.JobID)
+	if err != nil || entry == nil || entry.Action != next.Action {
+		log.Printf("scheduler: queue entry for job %s missing or changed, skipping", next.JobID)
+		return
+	}
+
+	// Dispatch execution to engine
+	dispatchErr := s.dispatchFn(s.ctx, next)
+	if dispatchErr != nil {
+		if errors.Is(dispatchErr, ErrDispatchPersistenceFailed) {
+			log.Printf("scheduler reconciliation required for job %s: %v", next.JobID, dispatchErr)
+			return
 		}
 
-		// Dispatch execution
-		dispatchErr := s.dispatchFn(s.ctx, next)
-		if dispatchErr != nil {
-			log.Printf("scheduler: failed to dispatch job %s (action=%s): %v", next.JobID, next.Action, dispatchErr)
-			if next.Action == QueueActionStart {
-				// Mark job FAILED, remove queue entry
-				current.Status = StatusFailed
-				current.Error = fmt.Sprintf("failed to start queued download: %v", dispatchErr)
-				current.SpeedBytesPerSecond = 0
-				current.ETASeconds = 0
-				s.repo.Update(s.ctx, current)
-				s.queueRepo.Delete(s.ctx, next.JobID)
-			} else {
-				// QueueActionResume failure: Mark job PAUSED, retain queue entry for retry
-				current.Status = StatusPaused
-				current.Error = fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
-				current.SpeedBytesPerSecond = 0
-				current.ETASeconds = 0
-				s.repo.Update(s.ctx, current)
+		log.Printf("scheduler: engine failed for job %s (action=%s): %v", next.JobID, next.Action, dispatchErr)
+		now := time.Now()
+
+		if next.Action == QueueActionStart {
+			current.Status = StatusFailed
+			current.Error = fmt.Sprintf("failed to start queued download: %v", dispatchErr)
+			current.SpeedBytesPerSecond = 0
+			current.ETASeconds = 0
+			current.UpdatedAt = now
+			s.repo.Update(s.ctx, current)
+			s.queueRepo.Delete(s.ctx, next.JobID)
+			if s.bus != nil {
+				s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
 			}
-			// Continue loop to allow next valid job to run
+		} else {
+			// QueueActionResume failure: Mark job PAUSED, retain queue entry for user retry
+			current.Status = StatusPaused
+			current.Error = fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
+			current.SpeedBytesPerSecond = 0
+			current.ETASeconds = 0
+			current.UpdatedAt = now
+			s.repo.Update(s.ctx, current)
+			if s.bus != nil {
+				s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
+			}
 		}
 	}
 }

@@ -170,7 +170,7 @@ func TestRecovery_EngineUnavailable(t *testing.T) {
 	})
 	defer cleanup()
 
-	createTestJob(t, repo, "recover-6", StatusQueued, "gid-6")
+	createTestJob(t, repo, "recover-6", StatusDownloading, "gid-6")
 
 	ctx := context.Background()
 	// This should not panic
@@ -528,5 +528,100 @@ selectLoop:
 	}
 	if !failedEventReceived {
 		t.Error("expected EventJobFailed to be published when RemoveTorrent fails during recovery")
+	}
+}
+
+func TestRecovery_V05_DirectQueued_SurvivesRestart(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	createTestJob(t, repo, "queued-direct-1", StatusQueued, "")
+
+	m.recover(ctx)
+
+	got, _ := repo.GetByID(ctx, "queued-direct-1")
+	if got.Status != StatusQueued {
+		t.Errorf("expected QUEUED direct job to remain QUEUED across restart, got %s", got.Status)
+	}
+}
+
+func TestRecovery_V05_MediaQueued_SurvivesRestart(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	now := time.Now()
+	j := &Job{
+		ID:        "queued-media-1",
+		Source:    "https://example.com/video.mp4",
+		Name:      "test media",
+		Status:    StatusQueued,
+		Type:      TypeMedia,
+		Engine:    "ytdlp",
+		EngineID:  "",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	repo.Create(ctx, j)
+
+	m.recover(ctx)
+
+	got, _ := repo.GetByID(ctx, "queued-media-1")
+	if got.Status != StatusQueued {
+		t.Errorf("expected QUEUED media job to remain QUEUED across restart, got %s", got.Status)
+	}
+}
+
+func TestRecovery_V05_TorrentQueued_SurvivesRestart(t *testing.T) {
+	m, _, _, cleanup, fakeTorrent := setupManagerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var startDownloadCalled bool
+	fakeTorrent.startDownloadFunc = func(hash string) error {
+		startDownloadCalled = true
+		return nil
+	}
+	fakeTorrent.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{Status: StatusPaused}, nil
+	}
+
+	j := &Job{
+		ID:        "queued-torrent-1",
+		Source:    "magnet:?xt=urn:btih:hash-q-1",
+		Name:      "queued torrent",
+		Status:    StatusQueued,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		EngineID:  "hash-q-1",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(ctx, j)
+
+	m.recover(ctx)
+
+	got, _ := m.repo.GetByID(ctx, "queued-torrent-1")
+	if got.Status != StatusQueued {
+		t.Errorf("expected QUEUED torrent job to remain QUEUED across restart, got %s", got.Status)
+	}
+	if startDownloadCalled {
+		t.Error("StartDownload MUST NOT be called during restart recovery for queued torrent")
+	}
+}
+
+func TestRecovery_V05_PausedJob_SurvivesRestart(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	createTestJob(t, repo, "paused-job-1", StatusPaused, "")
+
+	m.recover(ctx)
+
+	got, _ := repo.GetByID(ctx, "paused-job-1")
+	if got.Status != StatusPaused {
+		t.Errorf("expected PAUSED job to remain PAUSED across restart, got %s", got.Status)
 	}
 }

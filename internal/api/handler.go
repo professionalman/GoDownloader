@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -306,7 +307,18 @@ func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpFile.Close()
 
-	j, err := h.manager.CreateTorrentFromFile(r.Context(), tmpPath)
+	priorityStr := r.FormValue("priority")
+	p := job.JobPriorityNormal
+	if priorityStr != "" {
+		p = job.JobPriority(priorityStr)
+		if !job.ValidJobPriority(p) {
+			os.Remove(tmpPath)
+			writeError(w, http.StatusBadRequest, job.ErrInvalidPriority, fmt.Sprintf("invalid priority: %s", priorityStr))
+			return
+		}
+	}
+
+	j, err := h.manager.CreateTorrentFromFileWithOptions(r.Context(), tmpPath, job.CreateOptions{Priority: p})
 	if err != nil {
 		os.Remove(tmpPath)
 		writeAppError(w, err)

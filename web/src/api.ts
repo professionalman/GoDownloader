@@ -159,9 +159,12 @@ export async function openFolder(): Promise<void> {
   await fetch(`${API_BASE}/open-folder`, { method: 'POST' });
 }
 
-export async function uploadTorrent(file: File): Promise<Job> {
+export async function uploadTorrent(file: File, priority?: JobPriority): Promise<Job> {
   const formData = new FormData();
   formData.append('torrent', file);
+  if (priority) {
+    formData.append('priority', priority);
+  }
   const res = await fetch(`${API_BASE}/jobs/torrent`, {
     method: 'POST',
     body: formData,

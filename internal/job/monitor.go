@@ -120,6 +120,9 @@ func (m *Monitor) recordFailure(ctx context.Context, j *Job, errMsg string) {
 		m.manager.removeActive(j.ID)
 		m.manager.publish(EventJobFailed, j)
 		m.CleanupJob(j.ID)
+		if m.manager.scheduler != nil {
+			m.manager.scheduler.Kick()
+		}
 	}
 }
 

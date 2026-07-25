@@ -69,6 +69,9 @@ func (m *Manager) SetSettingsService(s *settings.SettingsService) {
 // SetScheduler wires the scheduler instance.
 func (m *Manager) SetScheduler(s *Scheduler) {
 	m.scheduler = s
+	if s != nil {
+		s.SetEventBus(m.bus)
+	}
 }
 
 // StartBackgroundTasks starts recovery, queue cleanup, scheduler, and progress monitor.
@@ -232,19 +235,15 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 	// Standard download flow (aria2)
 	j.Type = TypeDownload
 
-	if err := m.repo.Create(ctx, j); err != nil {
-		return nil, fmt.Errorf("persist job: %w", err)
+	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue job: %v", err)}
 	}
 
-	if m.queueRepo != nil {
-		nextPos, _ := m.queueRepo.NextPosition(ctx, j.Priority)
-		m.queueRepo.Enqueue(ctx, &QueueEntry{
-			JobID:      j.ID,
-			Position:   nextPos,
-			Action:     QueueActionStart,
-			EnqueuedAt: now,
-			UpdatedAt:  now,
-		})
+	if err := m.repo.Create(ctx, j); err != nil {
+		if m.queueRepo != nil {
+			m.queueRepo.Delete(ctx, j.ID)
+		}
+		return nil, fmt.Errorf("persist job: %w", err)
 	}
 
 	// Fallback for test doubles created without scheduler
@@ -451,20 +450,20 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, 
 
 	// Set selected format & transition to StatusQueued
 	j.MediaInfo.SelectedFmt = formatID
+	oldStatus := j.Status
+
+	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue media job: %v", err)}
+	}
+
 	j.Status = StatusQueued
 	j.UpdatedAt = time.Now()
-	m.repo.Update(ctx, j)
-
-	if m.queueRepo != nil {
-		nextPos, _ := m.queueRepo.NextPosition(ctx, j.Priority)
-		now := time.Now()
-		m.queueRepo.Enqueue(ctx, &QueueEntry{
-			JobID:      j.ID,
-			Position:   nextPos,
-			Action:     QueueActionStart,
-			EnqueuedAt: now,
-			UpdatedAt:  now,
-		})
+	if err := m.repo.Update(ctx, j); err != nil {
+		if m.queueRepo != nil {
+			m.queueRepo.Delete(ctx, j.ID)
+		}
+		j.Status = oldStatus
+		return nil, fmt.Errorf("update job status: %w", err)
 	}
 
 	// Fallback for test doubles created without scheduler
@@ -573,26 +572,31 @@ func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, s
 }
 
 // CreateTorrentFromFile creates a torrent job from an uploaded .torrent file and persists it in DATA_DIR.
-func (m *Manager) CreateTorrentFromFile(ctx context.Context, tempFilePath string) (*Job, error) {
-	torrentsDir := filepath.Join(m.dataDir, "torrents")
-	if err := os.MkdirAll(torrentsDir, 0755); err != nil {
-		return nil, fmt.Errorf("create torrents dir: %w", err)
-	}
+func (m *Manager) CreateTorrentFromFile(ctx context.Context, torrentFilePath string) (*Job, error) {
+	return m.CreateTorrentFromFileWithOptions(ctx, torrentFilePath, CreateOptions{Priority: JobPriorityNormal})
+}
 
-	data, err := os.ReadFile(tempFilePath)
+// CreateTorrentFromFileWithOptions copies the uploaded .torrent file and creates a torrent job with options.
+func (m *Manager) CreateTorrentFromFileWithOptions(ctx context.Context, torrentFilePath string, opts CreateOptions) (*Job, error) {
+	data, err := os.ReadFile(torrentFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("read temp torrent file: %w", err)
+		return nil, fmt.Errorf("read uploaded torrent file: %w", err)
 	}
-	os.Remove(tempFilePath)
 
 	jobID := "job_" + uuid.New().String()[:8]
-	persistedPath := filepath.Join(torrentsDir, jobID+".torrent")
+	persistedPath := filepath.Join(m.dataDir, "torrents", jobID+".torrent")
+
+	if err := os.MkdirAll(filepath.Dir(persistedPath), 0755); err != nil {
+		return nil, fmt.Errorf("create torrents data dir: %w", err)
+	}
 
 	if err := os.WriteFile(persistedPath, data, 0644); err != nil {
 		return nil, fmt.Errorf("write persisted torrent file: %w", err)
 	}
 
-	return m.createTorrentJobWithID(ctx, jobID, "torrent://"+persistedPath, persistedPath)
+	os.Remove(torrentFilePath)
+
+	return m.createTorrentJobWithIDAndOptions(ctx, jobID, "torrent://"+persistedPath, persistedPath, opts)
 }
 
 // acquireTorrentMetadata adds the torrent to qBittorrent and polls for metadata.
@@ -860,18 +864,8 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
 	}
 
-	// 4. Start the torrent in qBittorrent
-	if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
-		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to start torrent: %v", err)}
-	}
-
-	// 4. Set SeedAfterComplete & transition to StatusQueued
+	// 4. Save selections & SeedAfterComplete to DB
 	j.SeedAfterComplete = seedAfterComplete
-	j.Status = StatusQueued
-	j.UpdatedAt = time.Now()
-	m.repo.Update(ctx, j)
-
-	// Save selections to DB
 	if m.torrentRepo != nil {
 		var records []TorrentFileRecord
 		for _, s := range selections {
@@ -891,16 +885,18 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 		}
 	}
 
-	if m.queueRepo != nil {
-		nextPos, _ := m.queueRepo.NextPosition(ctx, j.Priority)
-		now := time.Now()
-		m.queueRepo.Enqueue(ctx, &QueueEntry{
-			JobID:      j.ID,
-			Position:   nextPos,
-			Action:     QueueActionStart,
-			EnqueuedAt: now,
-			UpdatedAt:  now,
-		})
+	// 5. Enqueue queue entry FIRST before updating job status to QUEUED
+	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue torrent job: %v", err)}
+	}
+
+	j.Status = StatusQueued
+	j.UpdatedAt = time.Now()
+	if err := m.repo.Update(ctx, j); err != nil {
+		if m.queueRepo != nil {
+			m.queueRepo.Delete(ctx, j.ID)
+		}
+		return nil, fmt.Errorf("update job status: %w", err)
 	}
 
 	// Fallback for test doubles created without scheduler
@@ -910,6 +906,9 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 			j.Error = fmt.Sprintf("failed to start torrent: %v", err)
 			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
+			if m.queueRepo != nil {
+				m.queueRepo.Delete(ctx, j.ID)
+			}
 			m.publish(EventJobFailed, j)
 			return j, nil
 		}
@@ -1041,25 +1040,33 @@ func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
 
-	m.repo.Update(ctx, j)
+	j.Status = StatusPaused
+	j.SpeedBytesPerSecond = 0
+	j.ETASeconds = 0
+	j.UpdatedAt = time.Now()
+
 	m.removeActive(id)
 
+	var enqueueErr error
 	if m.queueRepo != nil {
-		nextPos, _ := m.queueRepo.NextPosition(ctx, j.Priority)
-		now := time.Now()
-		m.queueRepo.Enqueue(ctx, &QueueEntry{
-			JobID:      id,
-			Position:   nextPos,
-			Action:     QueueActionResume,
-			EnqueuedAt: now,
-			UpdatedAt:  now,
-		})
+		enqueueErr = m.enqueueJob(ctx, j, QueueActionResume)
+		if enqueueErr != nil {
+			j.Error = fmt.Sprintf("pause succeeded but failed to enqueue resume queue item: %v", enqueueErr)
+		}
+	}
+
+	if err := m.repo.Update(ctx, j); err != nil {
+		log.Printf("Pause: update job status for %s failed: %v", id, err)
 	}
 
 	m.publish(EventJobUpdated, j)
 
 	if m.scheduler != nil {
 		m.scheduler.Kick()
+	}
+
+	if enqueueErr != nil {
+		return j, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist queue entry for resume: %v", enqueueErr)}
 	}
 
 	return j, nil
@@ -1076,29 +1083,30 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot resume a %s job", j.Status)}
 	}
 
-	j.Status = StatusQueued
-	j.Error = ""
-	j.UpdatedAt = time.Now()
-	m.repo.Update(ctx, j)
-
 	action := QueueActionResume
 	if m.queueRepo != nil {
 		entry, _ := m.queueRepo.Get(ctx, id)
 		if entry != nil {
 			action = entry.Action
 			entry.UpdatedAt = time.Now()
-			m.queueRepo.Enqueue(ctx, entry)
+			if err := m.queueRepo.Enqueue(ctx, entry); err != nil {
+				return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to update queue entry: %v", err)}
+			}
 		} else {
-			nextPos, _ := m.queueRepo.NextPosition(ctx, j.Priority)
-			now := time.Now()
-			m.queueRepo.Enqueue(ctx, &QueueEntry{
-				JobID:      id,
-				Position:   nextPos,
-				Action:     QueueActionResume,
-				EnqueuedAt: now,
-				UpdatedAt:  now,
-			})
+			if err := m.enqueueJob(ctx, j, QueueActionResume); err != nil {
+				return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue resume queue item: %v", err)}
+			}
 		}
+	}
+
+	j.Status = StatusQueued
+	j.Error = ""
+	j.UpdatedAt = time.Now()
+	if err := m.repo.Update(ctx, j); err != nil {
+		if m.queueRepo != nil {
+			m.queueRepo.Delete(ctx, j.ID)
+		}
+		return nil, fmt.Errorf("update job status: %w", err)
 	}
 
 	// Fallback for test doubles created without scheduler
@@ -1194,22 +1202,16 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot retry a %s job", j.Status)}
 	}
 
-	// Clear old state
-	j.Error = ""
-	j.Progress = 0
-	j.CompletedBytes = 0
-	j.SpeedBytesPerSecond = 0
-	j.ETASeconds = 0
-	j.Status = StatusQueued
-	j.UpdatedAt = time.Now()
-
-	m.repo.Update(ctx, j)
-
 	// For media jobs, restart analysis
 	if j.Type == TypeMedia {
 		j.Status = StatusAnalyzing
 		j.Name = "Analyzing..."
 		j.MediaInfo = nil
+		j.Error = ""
+		j.Progress = 0
+		j.CompletedBytes = 0
+		j.SpeedBytesPerSecond = 0
+		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobUpdated, j)
@@ -1244,6 +1246,11 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		j.Name = "Fetching metadata..."
 		j.TorrentInfo = nil
 		j.EngineID = ""
+		j.Error = ""
+		j.Progress = 0
+		j.CompletedBytes = 0
+		j.SpeedBytesPerSecond = 0
+		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobUpdated, j)
@@ -1253,16 +1260,22 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 	}
 
 	// Standard download retry
-	if m.queueRepo != nil {
-		nextPos, _ := m.queueRepo.NextPosition(ctx, j.Priority)
-		now := time.Now()
-		m.queueRepo.Enqueue(ctx, &QueueEntry{
-			JobID:      j.ID,
-			Position:   nextPos,
-			Action:     QueueActionStart,
-			EnqueuedAt: now,
-			UpdatedAt:  now,
-		})
+	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue retry job: %v", err)}
+	}
+
+	j.Error = ""
+	j.Progress = 0
+	j.CompletedBytes = 0
+	j.SpeedBytesPerSecond = 0
+	j.ETASeconds = 0
+	j.Status = StatusQueued
+	j.UpdatedAt = time.Now()
+	if err := m.repo.Update(ctx, j); err != nil {
+		if m.queueRepo != nil {
+			m.queueRepo.Delete(ctx, j.ID)
+		}
+		return nil, fmt.Errorf("update job status: %w", err)
 	}
 
 	// Fallback for test doubles created without scheduler
@@ -1627,12 +1640,29 @@ func (m *Manager) ReorderQueue(ctx context.Context, priority JobPriority, jobIDs
 	if !ValidJobPriority(priority) {
 		return &AppError{Code: ErrInvalidPriority, Message: fmt.Sprintf("invalid priority: %s", priority)}
 	}
-	if len(jobIDs) == 0 {
-		return nil
-	}
 
 	if m.queueRepo == nil {
 		return nil
+	}
+
+	// Fetch all current queue items in this priority lane for full-lane validation
+	allQueueItems, err := m.queueRepo.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list queue for reorder validation: %w", err)
+	}
+
+	var expectedLaneIDs []string
+	expectedSet := make(map[string]bool)
+	for _, item := range allQueueItems {
+		j, err := m.repo.GetByID(ctx, item.JobID)
+		if err == nil && j != nil && j.Priority == priority && (j.Status == StatusQueued || j.Status == StatusPaused) {
+			expectedLaneIDs = append(expectedLaneIDs, item.JobID)
+			expectedSet[item.JobID] = true
+		}
+	}
+
+	if len(jobIDs) != len(expectedLaneIDs) {
+		return &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("reorder list length (%d) must match total jobs in priority lane (%d)", len(jobIDs), len(expectedLaneIDs))}
 	}
 
 	seen := make(map[string]bool)
@@ -1641,16 +1671,9 @@ func (m *Manager) ReorderQueue(ctx context.Context, priority JobPriority, jobIDs
 			return &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("duplicate job ID in reorder list: %s", id)}
 		}
 		seen[id] = true
-		j, err := m.repo.GetByID(ctx, id)
-		if err != nil || j == nil {
-			return &AppError{Code: ErrJobNotFound, Message: fmt.Sprintf("job %s not found", id)}
-		}
-		if j.Priority != priority {
-			return &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("job %s has priority %s, expected %s", id, j.Priority, priority)}
-		}
-		qEntry, err := m.queueRepo.Get(ctx, id)
-		if err != nil || qEntry == nil {
-			return &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("job %s does not have an active queue entry", id)}
+
+		if !expectedSet[id] {
+			return &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("job %s does not belong to priority lane %s", id, priority)}
 		}
 	}
 
@@ -1675,24 +1698,29 @@ func (m *Manager) SetJobPriority(ctx context.Context, id string, p JobPriority) 
 		return nil, err
 	}
 
-	if j.Priority == p {
-		return j, nil
-	}
-
+	oldPriority := j.Priority
 	j.Priority = p
 	j.UpdatedAt = time.Now()
-	if err := m.repo.Update(ctx, j); err != nil {
-		return nil, fmt.Errorf("update job priority: %w", err)
-	}
 
 	if m.queueRepo != nil {
-		entry, _ := m.queueRepo.Get(ctx, id)
-		if entry != nil {
-			nextPos, _ := m.queueRepo.NextPosition(ctx, p)
+		entry, err := m.queueRepo.Get(ctx, id)
+		if err == nil && entry != nil {
+			nextPos, err := m.queueRepo.NextPosition(ctx, p)
+			if err != nil {
+				j.Priority = oldPriority
+				return nil, fmt.Errorf("calculate next position: %w", err)
+			}
 			entry.Position = nextPos
 			entry.UpdatedAt = time.Now()
-			m.queueRepo.Enqueue(ctx, entry)
+			if err := m.queueRepo.Enqueue(ctx, entry); err != nil {
+				j.Priority = oldPriority
+				return nil, fmt.Errorf("update queue entry priority: %w", err)
+			}
 		}
+	}
+
+	if err := m.repo.Update(ctx, j); err != nil {
+		return nil, fmt.Errorf("update job priority: %w", err)
 	}
 
 	m.publish(EventJobUpdated, j)
@@ -1793,80 +1821,44 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 
 	eng, ok := m.engines.Get(j.Engine)
 	if !ok {
-		j.Status = StatusFailed
-		j.Error = fmt.Sprintf("engine %q not available", j.Engine)
-		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
-		if m.queueRepo != nil {
-			m.queueRepo.Delete(ctx, j.ID)
-		}
-		m.publish(EventJobFailed, j)
-		return nil
+		return fmt.Errorf("engine %q not available", j.Engine)
 	}
 
 	if qj.Action == QueueActionStart {
 		if j.Type == TypeTorrent {
 			torrentEng, ok := eng.(ITorrentEngine)
 			if !ok {
-				j.Status = StatusFailed
-				j.Error = "engine does not support torrent operations"
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				if m.queueRepo != nil {
-					m.queueRepo.Delete(ctx, j.ID)
-				}
-				m.publish(EventJobFailed, j)
-				return nil
+				return fmt.Errorf("engine %q does not support torrent operations", j.Engine)
 			}
 			if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
-				j.Status = StatusFailed
-				j.Error = fmt.Sprintf("failed to start torrent download: %v", err)
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				if m.queueRepo != nil {
-					m.queueRepo.Delete(ctx, j.ID)
-				}
-				m.publish(EventJobFailed, j)
-				return nil
+				return err
 			}
 		} else {
 			engineID, err := eng.Start(ctx, j, m.downloadDir)
 			if err != nil {
-				j.Status = StatusFailed
-				j.Error = fmt.Sprintf("Failed to start download: %v", err)
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				if m.queueRepo != nil {
-					m.queueRepo.Delete(ctx, j.ID)
-				}
-				m.publish(EventJobFailed, j)
-				return nil
+				return err
 			}
 			j.EngineID = engineID
 		}
 	} else {
 		// QueueActionResume
 		if err := eng.Resume(ctx, j); err != nil {
-			j.Status = StatusFailed
-			j.Error = fmt.Sprintf("Failed to resume download: %v", err)
-			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
-			if m.queueRepo != nil {
-				m.queueRepo.Delete(ctx, j.ID)
-			}
-			m.publish(EventJobFailed, j)
-			return nil
+			return err
 		}
 	}
 
 	j.Status = StatusDownloading
+	j.Error = ""
 	j.UpdatedAt = time.Now()
 	if err := m.repo.Update(ctx, j); err != nil {
-		log.Printf("dispatchQueuedJob: update job %s status: %v", j.ID, err)
+		log.Printf("dispatchQueuedJob: update job %s status to DOWNLOADING failed: %v", j.ID, err)
+		return fmt.Errorf("%w: %v", ErrDispatchPersistenceFailed, err)
 	}
 
 	if m.queueRepo != nil {
-		m.queueRepo.Delete(ctx, j.ID)
+		if delErr := m.queueRepo.Delete(ctx, j.ID); delErr != nil {
+			log.Printf("dispatchQueuedJob: delete queue entry for %s failed: %v", j.ID, delErr)
+		}
 	}
 
 	m.addActive(j)
@@ -1926,4 +1918,26 @@ func (m *Manager) publish(eventType string, j *Job) {
 		Type: eventType,
 		Job:  *j,
 	})
+}
+
+func (m *Manager) enqueueJob(ctx context.Context, j *Job, action QueueAction) error {
+	if m.queueRepo == nil {
+		return nil
+	}
+	nextPos, err := m.queueRepo.NextPosition(ctx, j.Priority)
+	if err != nil {
+		return fmt.Errorf("calculate next queue position: %w", err)
+	}
+	now := time.Now()
+	err = m.queueRepo.Enqueue(ctx, &QueueEntry{
+		JobID:      j.ID,
+		Position:   nextPos,
+		Action:     action,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue queue entry: %w", err)
+	}
+	return nil
 }
