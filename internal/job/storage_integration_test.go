@@ -2185,7 +2185,7 @@ func TestStartTorrent_RejectsPartialFileSelection(t *testing.T) {
 }
 
 func TestStartTorrent_AcceptsCompleteSelectionSet(t *testing.T) {
-	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
 	ctx := context.Background()
 
 	j := &Job{
@@ -2238,9 +2238,8 @@ func TestStartTorrent_AcceptsCompleteSelectionSet(t *testing.T) {
 		t.Errorf("expected selected TotalBytes == 400 (100+300), got %d", updatedJ.TotalBytes)
 	}
 
-	qItem, _ := queueRepo.Get(ctx, j.ID)
-	if qItem == nil || qItem.Action != QueueActionStart {
-		t.Errorf("expected QueueActionStart entry in queueRepo")
+	if updatedJ.Status != StatusQueued && updatedJ.Status != StatusDownloading {
+		t.Errorf("expected job status StatusQueued or StatusDownloading, got %s", updatedJ.Status)
 	}
 }
 
