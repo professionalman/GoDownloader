@@ -92,7 +92,7 @@ Configure max concurrent downloads from the UI or via environment variable. The 
 
 | Dependency | Version | Install |
 |---|---|---|
-| **Go** | 1.23+ | [go.dev](https://go.dev/dl/) |
+| **Go** | 1.25+ | [go.dev](https://go.dev/dl/) |
 | **Node.js** | 18+ | [nodejs.org](https://nodejs.org/) |
 | **aria2** | any | `winget install aria2` · `brew install aria2` · `apt install aria2` |
 | **yt-dlp** | any | `winget install yt-dlp` · `brew install yt-dlp` · `pip install yt-dlp` |

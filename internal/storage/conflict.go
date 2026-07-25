@@ -13,14 +13,47 @@ import (
 
 var (
 	finalizationMu sync.Mutex
+	renameFunc     = os.Rename
 )
 
 const WorkDirMarkerFilename = ".godownloader-workdir"
 
-// WriteWorkDirMarker creates the .godownloader-workdir marker inside workDir.
+// WriteWorkDirMarker creates or validates the .godownloader-workdir marker inside workDir safely.
 func WriteWorkDirMarker(workDir, jobID string) error {
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return fmt.Errorf("create workdir %s: %w", workDir, err)
+	if workDir == "" {
+		return fmt.Errorf("%w: work directory path is empty", ErrStorageError)
+	}
+
+	fi, err := os.Stat(workDir)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			return fmt.Errorf("%w: create workdir %s: %v", ErrStorageError, workDir, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("%w: stat workdir %s: %v", ErrStorageError, workDir, err)
+	} else if !fi.IsDir() {
+		return fmt.Errorf("%w: workdir path %s is not a directory", ErrStorageError, workDir)
+	} else {
+		// WorkDir exists. Check marker or directory contents.
+		markerErr := ValidateWorkDirMarker(workDir, jobID)
+		if markerErr == nil {
+			// Marker matches jobID, okay!
+		} else {
+			// Marker missing or mismatched. Check if directory contains non-marker files.
+			entries, readErr := os.ReadDir(workDir)
+			if readErr != nil {
+				return fmt.Errorf("%w: read workdir %s: %v", ErrStorageError, workDir, readErr)
+			}
+			nonMarkerCount := 0
+			for _, entry := range entries {
+				if entry.Name() != WorkDirMarkerFilename {
+					nonMarkerCount++
+				}
+			}
+			if nonMarkerCount > 0 {
+				return fmt.Errorf("%w: workdir %s already exists with existing unowned files: %v", ErrStorageError, workDir, markerErr)
+			}
+		}
 	}
 
 	markerPath := filepath.Join(workDir, WorkDirMarkerFilename)
@@ -86,7 +119,7 @@ func GenerateUniqueFilename(dstDir, filename string) string {
 	}
 }
 
-// MoveOrCopyFile moves src to dst, replacing dst if it exists (for ConflictPolicyOverwrite),
+// MoveOrCopyFile moves src to dst, replacing dst safely if it exists (for ConflictPolicyOverwrite),
 // with fallback to atomic copy+move for cross-device/filesystem moves or OS rename limitations (e.g. Windows).
 func MoveOrCopyFile(src, dst string) error {
 	if src == dst {
@@ -105,14 +138,14 @@ func MoveOrCopyFile(src, dst string) error {
 		}
 	}
 
-	// 1. Try atomic rename first if dst does NOT exist
+	// 1. Try fast atomic rename first if dst does NOT exist
 	if _, err := os.Stat(dst); os.IsNotExist(err) {
-		if err := os.Rename(src, dst); err == nil {
+		if err := renameFunc(src, dst); err == nil {
 			return nil
 		}
 	}
 
-	// 2. Safe copy-then-replace fallback (handles existing target on Windows & cross-volume moves)
+	// 2. Safe copy-then-replace with rollback protection
 	randBuf := make([]byte, 4)
 	rand.Read(randBuf)
 	tempPath := dst + ".tmp-" + hex.EncodeToString(randBuf)
@@ -144,21 +177,32 @@ func MoveOrCopyFile(src, dst string) error {
 		return fmt.Errorf("close temp file: %w", closeErr)
 	}
 
-	// Remove target dst if it exists before replacing (required on Windows)
+	// 3. Handle replacement if dst exists (using destination-side backup)
+	var backupPath string
+	hasBackup := false
 	if _, err := os.Stat(dst); err == nil {
-		if err := os.Remove(dst); err != nil {
+		backupPath = dst + ".bak-" + hex.EncodeToString(randBuf)
+		if err := renameFunc(dst, backupPath); err != nil {
 			os.Remove(tempPath)
-			return fmt.Errorf("remove existing target file %s: %w", dst, err)
+			return fmt.Errorf("backup existing target file %s: %w", dst, err)
 		}
+		hasBackup = true
 	}
 
-	// Rename temp file to final dst
-	if err := os.Rename(tempPath, dst); err != nil {
+	// 4. Rename temp file to final destination
+	if err := renameFunc(tempPath, dst); err != nil {
+		// Replacement failed! Rollback backup if present
 		os.Remove(tempPath)
+		if hasBackup {
+			_ = renameFunc(backupPath, dst)
+		}
 		return fmt.Errorf("rename temp file to dst: %w", err)
 	}
 
-	// Remove source file after successful replacement
+	// 5. Success! Clean up backup and remove source file
+	if hasBackup {
+		os.Remove(backupPath)
+	}
 	os.Remove(src)
 	return nil
 }

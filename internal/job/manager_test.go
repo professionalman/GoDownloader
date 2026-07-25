@@ -179,8 +179,9 @@ func (r *fakeEngineRegistry) Detect(url string) string {
 }
 
 type fakeJobRepository struct {
-	mu   sync.Mutex
-	jobs map[string]*Job
+	mu        sync.Mutex
+	jobs      map[string]*Job
+	updateErr error
 }
 
 func newFakeJobRepository() *fakeJobRepository {
@@ -198,6 +199,9 @@ func (f *fakeJobRepository) Create(ctx context.Context, j *Job) error {
 func (f *fakeJobRepository) Update(ctx context.Context, j *Job) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return f.updateErr
+	}
 	if _, exists := f.jobs[j.ID]; !exists {
 		return fmt.Errorf("job not found")
 	}

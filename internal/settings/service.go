@@ -16,18 +16,18 @@ const (
 	KeyMinimumFreeSpaceBytes    = "minimum_free_space_bytes"
 	KeyDefaultConflictPolicy    = "default_conflict_policy"
 
-	DefaultMaxConcurrent   = 3
-	MinMaxConcurrent       = 1
-	MaxMaxConcurrent       = 20
-	DefaultMinFreeSpace    = 1073741824 // 1 GiB
-	DefaultConflictPolicy  = "rename"
-	FallbackDownloadDir    = "./downloads"
-	FallbackDataDir        = "./data"
+	DefaultMaxConcurrent  = 3
+	MinMaxConcurrent      = 1
+	MaxMaxConcurrent      = 20
+	DefaultMinFreeSpace   = 1073741824 // 1 GiB
+	DefaultConflictPolicy = "rename"
+	FallbackDownloadDir   = "./downloads"
+	FallbackDataDir       = "./data"
 )
 
 // SettingsService manages application settings logic and environment overrides.
 type SettingsService struct {
-	repo               ISettingsRepository
+	repo                ISettingsRepository
 	fallbackDownloadDir string
 	fallbackDataDir     string
 }
@@ -53,7 +53,7 @@ func NewSettingsService(repo ISettingsRepository, initialDownloadDir, initialDat
 	}
 
 	return &SettingsService{
-		repo:               repo,
+		repo:                repo,
 		fallbackDownloadDir: dDir,
 		fallbackDataDir:     dataDir,
 	}

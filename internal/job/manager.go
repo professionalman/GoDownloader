@@ -1370,10 +1370,17 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 
 	// For media jobs, restart analysis
 	if j.Type == TypeMedia {
-		if m.storageService != nil && j.WorkDir != "" {
-			if err := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); err == nil {
-				if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
-					log.Printf("Retry: cleanup stale workdir error for job %s: %v", j.ID, err)
+		if j.WorkDir != "" {
+			if _, err := os.Stat(j.WorkDir); err == nil {
+				if validateErr := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); validateErr != nil {
+					log.Printf("Retry: unsafe workdir marker validation failed for job %s: %v", j.ID, validateErr)
+					return nil, &AppError{Code: ErrStorageError, Message: fmt.Sprintf("cannot retry media job: workdir safety marker invalid or missing: %v", validateErr)}
+				}
+				if m.storageService != nil {
+					if cleanupErr := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); cleanupErr != nil {
+						log.Printf("Retry: cleanup workdir failed for job %s: %v", j.ID, cleanupErr)
+						return nil, &AppError{Code: ErrStorageError, Message: fmt.Sprintf("cannot retry media job: cleanup workdir failed: %v", cleanupErr)}
+					}
 				}
 			}
 		}
@@ -1386,7 +1393,12 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+
+		if err := m.repo.Update(ctx, j); err != nil {
+			log.Printf("Retry: failed to persist ANALYZING state for job %s: %v", j.ID, err)
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist retry state: %v", err)}
+		}
+
 		m.publish(EventJobUpdated, j)
 
 		go m.analyzeMedia(ctx, j.ID, j.Source)
@@ -1619,7 +1631,24 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				}
 			}
 			if srcFile == "" {
-				entries, _ := os.ReadDir(j.WorkDir)
+				entries, err := os.ReadDir(j.WorkDir)
+				if err != nil {
+					log.Printf("UpdateJobFromEngine: failed to read workdir %s for job %s: %v", j.WorkDir, j.ID, err)
+					j.Status = StatusFailed
+					j.Error = fmt.Sprintf("failed to read media work directory: %v", err)
+					j.UpdatedAt = time.Now()
+					if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+						log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+						return
+					}
+					m.removeActive(j.ID)
+					m.publish(EventJobFailed, j)
+					if m.scheduler != nil {
+						m.scheduler.Kick()
+					}
+					return
+				}
+
 				var bestFile string
 				var bestSize int64
 				for _, entry := range entries {
@@ -1627,9 +1656,20 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 						continue
 					}
 					name := entry.Name()
-					if strings.HasSuffix(name, ".part") || strings.HasSuffix(name, ".ytdl") {
+					lowerName := strings.ToLower(name)
+
+					if strings.HasSuffix(lowerName, ".part") ||
+						strings.HasSuffix(lowerName, ".ytdl") ||
+						strings.HasSuffix(lowerName, ".vtt") ||
+						strings.HasSuffix(lowerName, ".srt") ||
+						strings.HasSuffix(lowerName, ".jpg") ||
+						strings.HasSuffix(lowerName, ".jpeg") ||
+						strings.HasSuffix(lowerName, ".png") ||
+						strings.HasSuffix(lowerName, ".webp") ||
+						strings.HasSuffix(lowerName, ".json") {
 						continue
 					}
+
 					info, err := entry.Info()
 					if err != nil {
 						continue
@@ -1647,7 +1687,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				j.Status = StatusFailed
 				j.Error = "media completed but final output file was not found"
 				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+					return
+				}
 				m.removeActive(j.ID)
 				m.publish(EventJobFailed, j)
 				if m.scheduler != nil {
@@ -1662,7 +1705,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				j.Status = StatusFailed
 				j.Error = fmt.Sprintf("file finalization failed: %v", err)
 				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+					return
+				}
 				m.removeActive(j.ID)
 				m.publish(EventJobFailed, j)
 				if m.scheduler != nil {
@@ -1688,15 +1734,6 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.UpdatedAt = time.Now()
 		if err := m.repo.Update(ctx, j); err != nil {
 			log.Printf("UpdateJobFromEngine: failed to update job %s to COMPLETED: %v", j.ID, err)
-			j.Status = StatusFailed
-			j.Error = fmt.Sprintf("failed to persist completion state: %v", err)
-			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
-			m.removeActive(j.ID)
-			m.publish(EventJobFailed, j)
-			if m.scheduler != nil {
-				m.scheduler.Kick()
-			}
 			return
 		}
 		m.removeActive(j.ID)
@@ -1717,7 +1754,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if err := m.repo.Update(ctx, j); err != nil {
+			log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, err)
+			return
+		}
 		m.removeActive(j.ID)
 		m.publish(EventJobFailed, j)
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
@@ -1735,7 +1775,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if err := m.repo.Update(ctx, j); err != nil {
+			log.Printf("UpdateJobFromEngine: failed to persist CANCELLED status for job %s: %v", j.ID, err)
+			return
+		}
 		m.removeActive(j.ID)
 		m.publish(EventJobCancelled, j)
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {

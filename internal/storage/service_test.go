@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -384,26 +385,141 @@ func TestFinalizeOverwrite_ExistingFile(t *testing.T) {
 	}
 }
 
+func TestFinalizeOverwrite_ReplacementFailureRestoresOriginal(t *testing.T) {
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+
+	targetFile := filepath.Join(destDir, "test_restore.txt")
+	os.WriteFile(targetFile, []byte("original target data"), 0644)
+
+	srcFile := filepath.Join(srcDir, "test_restore.txt")
+	os.WriteFile(srcFile, []byte("new replacement data"), 0644)
+
+	// Inject renameFunc failure specifically when renaming temp -> dst
+	reset := storage.SetRenameFuncForTest(func(oldPath, newPath string) error {
+		if strings.Contains(oldPath, ".tmp-") {
+			return errors.New("simulated temp rename failure")
+		}
+		return os.Rename(oldPath, newPath)
+	})
+	defer reset()
+
+	err := storage.MoveOrCopyFile(srcFile, targetFile)
+	if err == nil {
+		t.Fatalf("expected error when temp rename fails, got nil")
+	}
+
+	// 1. Original target file MUST be restored with original content
+	targetData, readErr := os.ReadFile(targetFile)
+	if readErr != nil || string(targetData) != "original target data" {
+		t.Errorf("original target file was lost or corrupted! got %q (err=%v)", string(targetData), readErr)
+	}
+
+	// 2. Source file MUST be preserved
+	srcData, srcErr := os.ReadFile(srcFile)
+	if srcErr != nil || string(srcData) != "new replacement data" {
+		t.Errorf("source file was lost when replacement failed! got %q (err=%v)", string(srcData), srcErr)
+	}
+
+	// 3. Backup and temp files must be cleaned up
+	entries, _ := os.ReadDir(destDir)
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp-") || strings.Contains(entry.Name(), ".bak-") {
+			t.Errorf("leftover temporary/backup file found in destination dir: %s", entry.Name())
+		}
+	}
+}
+
+func TestFinalizeOverwrite_FailurePreservesSource(t *testing.T) {
+	TestFinalizeOverwrite_ReplacementFailureRestoresOriginal(t)
+}
+
+func TestFinalizeOverwrite_DirectoryTargetFails(t *testing.T) {
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+
+	dirAsTarget := filepath.Join(destDir, "dir_target")
+	os.MkdirAll(dirAsTarget, 0755)
+
+	srcFile := filepath.Join(srcDir, "dir_target")
+	os.WriteFile(srcFile, []byte("file content"), 0644)
+
+	err := storage.MoveOrCopyFile(srcFile, dirAsTarget)
+	if !errors.Is(err, storage.ErrFileConflict) {
+		t.Errorf("expected ErrFileConflict when target destination is a directory, got %v", err)
+	}
+
+	// Source file must remain intact
+	if _, err := os.Stat(srcFile); os.IsNotExist(err) {
+		t.Errorf("source file was deleted when directory conflict occurred")
+	}
+}
+
 func TestFinalizeOverwrite_CrossDeviceFallback(t *testing.T) {
 	srcDir := t.TempDir()
 	destDir := t.TempDir()
 
 	targetFile := filepath.Join(destDir, "cross_dev.txt")
-	os.WriteFile(targetFile, []byte("original content"), 0644)
-
 	srcFile := filepath.Join(srcDir, "cross_dev.txt")
-	os.WriteFile(srcFile, []byte("cross device content"), 0644)
+	os.WriteFile(srcFile, []byte("simulated cross device content"), 0644)
+
+	// Inject simulated EXDEV error on direct rename
+	reset := storage.SetRenameFuncForTest(func(oldPath, newPath string) error {
+		if oldPath == srcFile && newPath == targetFile {
+			return errors.New("EXDEV: cross-device link")
+		}
+		return os.Rename(oldPath, newPath)
+	})
+	defer reset()
 
 	if err := storage.MoveOrCopyFile(srcFile, targetFile); err != nil {
-		t.Fatalf("MoveOrCopyFile failed: %v", err)
+		t.Fatalf("MoveOrCopyFile failed under simulated EXDEV: %v", err)
 	}
 
 	data, err := os.ReadFile(targetFile)
-	if err != nil || string(data) != "cross device content" {
+	if err != nil || string(data) != "simulated cross device content" {
 		t.Errorf("expected updated content, got %s (err=%v)", string(data), err)
 	}
 	if _, err := os.Stat(srcFile); !os.IsNotExist(err) {
-		t.Errorf("expected source file to be removed after move")
+		t.Errorf("expected source file to be removed after fallback move")
+	}
+}
+
+func TestStartupCleanup_RemoveFailureDoesNotAbort(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	staleParent := filepath.Join(tmpDir, "tmp")
+	os.MkdirAll(staleParent, 0755)
+
+	// Create 2 stale workdirs with markers inside dataDir/tmp
+	workDir1 := filepath.Join(staleParent, "stale_1")
+	workDir2 := filepath.Join(staleParent, "stale_2")
+	storage.WriteWorkDirMarker(workDir1, "job-1")
+	storage.WriteWorkDirMarker(workDir2, "job-2")
+
+	// Inject failure on removing stale_1
+	reset := storage.SetRemoveAllFuncForTest(func(path string) error {
+		if strings.Contains(path, "stale_1") {
+			return errors.New("simulated permission denied on remove")
+		}
+		return os.RemoveAll(path)
+	})
+	defer reset()
+
+	activeJobIDs := map[string]bool{} // no active jobs
+	err := svc.CleanupStaleWorkDirs(ctx, activeJobIDs)
+	if err != nil {
+		t.Fatalf("CleanupStaleWorkDirs should not abort on individual remove failure, got %v", err)
+	}
+
+	// stale_2 MUST be cleaned up even though stale_1 failed
+	if _, err := os.Stat(workDir2); !os.IsNotExist(err) {
+		t.Errorf("expected stale_2 to be removed during cleanup, but it still exists")
 	}
 }
 

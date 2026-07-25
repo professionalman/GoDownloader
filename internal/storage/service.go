@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"downloader/internal/settings"
+)
+
+var (
+	removeAllFunc = os.RemoveAll
 )
 
 var (
@@ -289,12 +294,19 @@ func (s *StorageService) CleanupStaleWorkDirs(ctx context.Context, activeJobIDs 
 		return fmt.Errorf("read tempDir: %w", err)
 	}
 
+	cleanTempDir := filepath.Clean(tempDir)
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 
 		workDir := filepath.Join(tempDir, entry.Name())
+		// Ensure workDir is an immediate child directory of tempDir
+		if filepath.Dir(filepath.Clean(workDir)) != cleanTempDir {
+			continue
+		}
+
 		markerPath := filepath.Join(workDir, WorkDirMarkerFilename)
 		data, err := os.ReadFile(markerPath)
 		if err != nil {
@@ -303,11 +315,13 @@ func (s *StorageService) CleanupStaleWorkDirs(ctx context.Context, activeJobIDs 
 
 		jobID := strings.TrimSpace(string(data))
 		if jobID == "" {
-			continue
+			continue // Invalid or empty marker
 		}
 
 		if !activeJobIDs[jobID] {
-			os.RemoveAll(workDir)
+			if err := removeAllFunc(workDir); err != nil {
+				log.Printf("CleanupStaleWorkDirs: failed to remove stale workdir %s for job %s: %v", workDir, jobID, err)
+			}
 		}
 	}
 
