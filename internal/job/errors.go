@@ -1,6 +1,9 @@
 package job
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // AppError represents an application-level error with a code.
 type AppError struct {
@@ -40,3 +43,23 @@ const (
 var (
 	ErrDispatchPersistenceFailed = errors.New("dispatch persistence failed")
 )
+
+// DispatchPersistenceError represents a failure to persist state after an engine operation succeeded.
+type DispatchPersistenceError struct {
+	JobID    string
+	EngineID string
+	Action   QueueAction
+	Err      error
+}
+
+func (e *DispatchPersistenceError) Error() string {
+	return fmt.Sprintf("dispatch persistence failed for job %s: %v", e.JobID, e.Err)
+}
+
+func (e *DispatchPersistenceError) Unwrap() error {
+	return e.Err
+}
+
+func (e *DispatchPersistenceError) Is(target error) bool {
+	return target == ErrDispatchPersistenceFailed
+}

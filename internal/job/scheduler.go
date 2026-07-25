@@ -15,16 +15,29 @@ type SchedulerDispatchFunc func(ctx context.Context, qj *QueuedJob) error
 // SchedulerLimitFunc returns the current effective maximum concurrent downloads.
 type SchedulerLimitFunc func(ctx context.Context) int
 
+// AddActiveFunc defines the callback for adding a job to Manager's active set.
+type AddActiveFunc func(j *Job)
+
+// DispatchReservation tracks in-flight and dirty dispatch state for a job.
+type DispatchReservation struct {
+	JobID    string
+	Action   QueueAction
+	EngineID string
+	Dirty    bool
+}
+
 // Scheduler manages queued download execution policy and capacity constraints.
 type Scheduler struct {
-	repo       IJobRepository
-	queueRepo  IQueueRepository
-	getLimit   SchedulerLimitFunc
-	dispatchFn SchedulerDispatchFunc
-	bus        IEventBus
+	repo        IJobRepository
+	queueRepo   IQueueRepository
+	getLimit    SchedulerLimitFunc
+	dispatchFn  SchedulerDispatchFunc
+	bus         IEventBus
+	engines     IEngineRegistry
+	addActiveFn AddActiveFunc
 
 	mu       sync.Mutex
-	inFlight map[string]struct{}
+	inFlight map[string]*DispatchReservation
 
 	kickCh chan struct{}
 	ctx    context.Context
@@ -44,7 +57,7 @@ func NewScheduler(
 		queueRepo:  queueRepo,
 		getLimit:   getLimit,
 		dispatchFn: dispatchFn,
-		inFlight:   make(map[string]struct{}),
+		inFlight:   make(map[string]*DispatchReservation),
 		kickCh:     make(chan struct{}, 1),
 	}
 }
@@ -52,6 +65,16 @@ func NewScheduler(
 // SetEventBus injects an optional event bus for publishing failure/update events.
 func (s *Scheduler) SetEventBus(bus IEventBus) {
 	s.bus = bus
+}
+
+// SetEngineRegistry injects the engine registry for status queries during reconciliation.
+func (s *Scheduler) SetEngineRegistry(engines IEngineRegistry) {
+	s.engines = engines
+}
+
+// SetAddActiveFunc injects the callback to register active jobs upon successful reconciliation.
+func (s *Scheduler) SetAddActiveFunc(fn AddActiveFunc) {
+	s.addActiveFn = fn
 }
 
 // Start launches the single scheduler background loop.
@@ -97,13 +120,16 @@ func (s *Scheduler) isInFlight(id string) bool {
 	return ok
 }
 
-func (s *Scheduler) reserveInFlight(id string) bool {
+func (s *Scheduler) reserveInFlight(id string, action QueueAction) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.inFlight[id]; ok {
 		return false
 	}
-	s.inFlight[id] = struct{}{}
+	s.inFlight[id] = &DispatchReservation{
+		JobID:  id,
+		Action: action,
+	}
 	return true
 }
 
@@ -111,6 +137,49 @@ func (s *Scheduler) releaseInFlight(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.inFlight, id)
+}
+
+func (s *Scheduler) markReservationDirty(id string, action QueueAction, engineID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if res, ok := s.inFlight[id]; ok {
+		res.Dirty = true
+		res.Action = action
+		if engineID != "" {
+			res.EngineID = engineID
+		}
+	} else {
+		s.inFlight[id] = &DispatchReservation{
+			JobID:    id,
+			Action:   action,
+			EngineID: engineID,
+			Dirty:    true,
+		}
+	}
+}
+
+func (s *Scheduler) hasUnresolvedReconciliations() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, res := range s.inFlight {
+		if res.Dirty {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scheduler) getDirtyReservations() []*DispatchReservation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var list []*DispatchReservation
+	for _, res := range s.inFlight {
+		if res.Dirty {
+			cp := *res
+			list = append(list, &cp)
+		}
+	}
+	return list
 }
 
 func (s *Scheduler) inFlightCount() int {
@@ -123,6 +192,13 @@ func (s *Scheduler) schedule() {
 	for {
 		if s.ctx.Err() != nil {
 			return
+		}
+
+		if s.hasUnresolvedReconciliations() {
+			s.reconcileAll(s.ctx)
+			if s.hasUnresolvedReconciliations() {
+				return
+			}
 		}
 
 		max := s.getLimit(s.ctx)
@@ -146,15 +222,14 @@ func (s *Scheduler) schedule() {
 			return
 		}
 
-		if !s.reserveInFlight(next.JobID) {
-			// Already in flight in another dispatch step
-			continue
+		if !s.reserveInFlight(next.JobID, next.Action) {
+			// Highest-priority runnable job is already reserved/in-flight.
+			// Return immediately to prevent tight CPU spin or skip-ahead.
+			return
 		}
 
 		if err := s.dispatchSingle(next); err != nil {
 			if errors.Is(err, ErrDispatchPersistenceFailed) {
-				// Stop fill loop: persistence is unreliable, do not dispatch more.
-				// In-flight reservation is retained to prevent double-dispatch.
 				log.Printf("scheduler: stopping fill loop due to persistence failure for job %s", next.JobID)
 				return
 			}
@@ -162,9 +237,77 @@ func (s *Scheduler) schedule() {
 	}
 }
 
+func (s *Scheduler) reconcileAll(ctx context.Context) {
+	dirtyList := s.getDirtyReservations()
+	for _, res := range dirtyList {
+		s.reconcileJob(ctx, res.JobID)
+	}
+}
+
+func (s *Scheduler) reconcileJob(ctx context.Context, jobID string) {
+	s.mu.Lock()
+	res, ok := s.inFlight[jobID]
+	if !ok || !res.Dirty {
+		s.mu.Unlock()
+		return
+	}
+	resCopy := *res
+	s.mu.Unlock()
+
+	current, err := s.repo.GetByID(ctx, jobID)
+	if err != nil || current == nil {
+		log.Printf("scheduler: reconciliation failed to fetch job %s: %v", jobID, err)
+		return
+	}
+
+	if current.EngineID == "" && resCopy.EngineID != "" {
+		current.EngineID = resCopy.EngineID
+	}
+
+	if s.engines == nil {
+		log.Printf("scheduler: cannot reconcile job %s: engine registry not set", jobID)
+		return
+	}
+
+	eng, ok := s.engines.Get(current.Engine)
+	if !ok || eng == nil {
+		log.Printf("scheduler: cannot reconcile job %s: engine %s unavailable", jobID, current.Engine)
+		return
+	}
+
+	status, err := eng.Status(ctx, current)
+	if err != nil {
+		log.Printf("scheduler: reconciliation engine Status query failed for job %s: %v", jobID, err)
+		return
+	}
+
+	if status != nil && (status.Status == StatusDownloading || status.Status == StatusSeeding || status.Status == StatusProcessing || status.Status == StatusCompleted) {
+		current.Status = StatusDownloading
+		if resCopy.EngineID != "" {
+			current.EngineID = resCopy.EngineID
+		}
+		current.UpdatedAt = time.Now()
+		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+			log.Printf("scheduler: reconciliation failed to persist DOWNLOADING for job %s: %v", jobID, updateErr)
+			return
+		}
+
+		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
+			log.Printf("scheduler: reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
+		}
+
+		if s.addActiveFn != nil {
+			s.addActiveFn(current)
+		}
+
+		s.releaseInFlight(current.ID)
+		log.Printf("scheduler: reconciliation succeeded for job %s, state restored to DOWNLOADING", current.ID)
+	} else {
+		log.Printf("scheduler: reconciliation engine status for job %s is not active (%v)", jobID, status)
+	}
+}
+
 func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
-	// NOTE: in-flight reservation is released here for all paths EXCEPT
-	// ErrDispatchPersistenceFailed, where it is retained to prevent double-dispatch.
 	releaseReservation := true
 	defer func() {
 		if releaseReservation {
@@ -172,7 +315,6 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		}
 	}()
 
-	// Revalidate job state immediately before dispatch
 	current, err := s.repo.GetByID(s.ctx, next.JobID)
 	if err != nil || current == nil || current.Status != StatusQueued {
 		log.Printf("scheduler: job %s is no longer queued (status=%v), skipping", next.JobID, currentStatus(current))
@@ -188,13 +330,17 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		return nil
 	}
 
-	// Dispatch execution to engine
 	dispatchErr := s.dispatchFn(s.ctx, next)
 	if dispatchErr != nil {
-		if errors.Is(dispatchErr, ErrDispatchPersistenceFailed) {
-			log.Printf("scheduler: reconciliation required for job %s: %v", next.JobID, dispatchErr)
-			// Retain in-flight reservation so the job cannot be double-dispatched
+		var pErr *DispatchPersistenceError
+		if errors.As(dispatchErr, &pErr) || errors.Is(dispatchErr, ErrDispatchPersistenceFailed) {
+			engineID := getEngineIDFromErr(dispatchErr)
+			log.Printf("scheduler: reconciliation required for job %s (engineID=%s): %v", next.JobID, engineID, dispatchErr)
+
 			releaseReservation = false
+			s.markReservationDirty(next.JobID, next.Action, engineID)
+			s.reconcileJob(s.ctx, next.JobID)
+
 			return dispatchErr
 		}
 
@@ -202,7 +348,6 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		now := time.Now()
 
 		if next.Action == QueueActionStart {
-			// START failure: mark FAILED, delete queue row only after persistence succeeds
 			current.Status = StatusFailed
 			current.Error = fmt.Sprintf("failed to start queued download: %v", dispatchErr)
 			current.SpeedBytesPerSecond = 0
@@ -210,15 +355,22 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 			current.UpdatedAt = now
 			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
 				log.Printf("scheduler: failed to persist FAILED state for job %s: %v", next.JobID, updateErr)
-				// Do NOT delete queue row — FAILED state was not persisted
+				releaseReservation = false
+				s.markReservationDirty(next.JobID, next.Action, "")
+				return &DispatchPersistenceError{
+					JobID:  next.JobID,
+					Action: next.Action,
+					Err:    updateErr,
+				}
 			} else {
-				s.queueRepo.Delete(s.ctx, next.JobID)
-			}
-			if s.bus != nil {
-				s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
+				if delErr := s.queueRepo.Delete(s.ctx, next.JobID); delErr != nil {
+					log.Printf("scheduler: failed to delete queue entry for failed job %s: %v", next.JobID, delErr)
+				}
+				if s.bus != nil {
+					s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
+				}
 			}
 		} else {
-			// RESUME failure: mark PAUSED, retain queue entry for user retry
 			current.Status = StatusPaused
 			current.Error = fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
 			current.SpeedBytesPerSecond = 0
@@ -226,13 +378,29 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 			current.UpdatedAt = now
 			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
 				log.Printf("scheduler: failed to persist PAUSED state for job %s: %v", next.JobID, updateErr)
-			}
-			if s.bus != nil {
-				s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
+				releaseReservation = false
+				s.markReservationDirty(next.JobID, next.Action, "")
+				return &DispatchPersistenceError{
+					JobID:  next.JobID,
+					Action: next.Action,
+					Err:    updateErr,
+				}
+			} else {
+				if s.bus != nil {
+					s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func getEngineIDFromErr(err error) string {
+	var pErr *DispatchPersistenceError
+	if errors.As(err, &pErr) {
+		return pErr.EngineID
+	}
+	return ""
 }
 
 func currentStatus(j *Job) string {

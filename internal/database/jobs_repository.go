@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"downloader/internal/job"
 )
@@ -106,6 +107,39 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 	)
 	if err != nil {
 		return fmt.Errorf("update job: %w", err)
+	}
+	return nil
+}
+
+// UpdateJobPriorityAndQueuePosition updates a job's priority and its queue position in a single transaction.
+func (r *SQLiteJobRepository) UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority job.JobPriority, newPosition int64) error {
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin priority tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	res1, err := tx.ExecContext(ctx, `UPDATE jobs SET priority = ?, updated_at = ? WHERE id = ?`, newPriority, now, jobID)
+	if err != nil {
+		return fmt.Errorf("update job priority: %w", err)
+	}
+	rows1, err := res1.RowsAffected()
+	if err != nil || rows1 == 0 {
+		return fmt.Errorf("job %s not found for priority update", jobID)
+	}
+
+	res2, err := tx.ExecContext(ctx, `UPDATE job_queue SET position = ?, updated_at = ? WHERE job_id = ?`, newPosition, now, jobID)
+	if err != nil {
+		return fmt.Errorf("update job queue position: %w", err)
+	}
+	rows2, err := res2.RowsAffected()
+	if err != nil || rows2 == 0 {
+		return fmt.Errorf("queue entry for job %s not found", jobID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit priority tx: %w", err)
 	}
 	return nil
 }

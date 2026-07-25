@@ -71,6 +71,8 @@ func (m *Manager) SetScheduler(s *Scheduler) {
 	m.scheduler = s
 	if s != nil {
 		s.SetEventBus(m.bus)
+		s.SetEngineRegistry(m.engines)
+		s.SetAddActiveFunc(m.addActive)
 	}
 }
 
@@ -1042,28 +1044,28 @@ func (m *Manager) Pause(ctx context.Context, id string) (*Job, error) {
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
 
-	m.removeActive(id)
-
 	var enqueueErr error
 	if m.queueRepo != nil {
 		enqueueErr = m.enqueueJob(ctx, j, QueueActionResume)
-		if enqueueErr != nil {
-			j.Error = fmt.Sprintf("pause succeeded but failed to enqueue resume queue item: %v", enqueueErr)
-		}
 	}
 
 	if err := m.repo.Update(ctx, j); err != nil {
 		log.Printf("Pause: update job status for %s failed: %v", id, err)
+		if enqueueErr != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue resume queue entry and update job status: %v", err)}
+		}
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("pause succeeded externally but failed to update job status in DB: %v", err)}
 	}
 
+	if enqueueErr != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue resume queue entry: %v", enqueueErr)}
+	}
+
+	m.removeActive(id)
 	m.publish(EventJobUpdated, j)
 
 	if m.scheduler != nil {
 		m.scheduler.Kick()
-	}
-
-	if enqueueErr != nil {
-		return j, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist queue entry for resume: %v", enqueueErr)}
 	}
 
 	return j, nil
@@ -1687,7 +1689,7 @@ func (m *Manager) ReorderQueue(ctx context.Context, priority JobPriority, jobIDs
 	return nil
 }
 
-// SetJobPriority changes a job's priority and moves its queue entry to the end of the new lane.
+// SetJobPriority changes a job's priority and moves its queue entry to the end of the new lane atomically.
 func (m *Manager) SetJobPriority(ctx context.Context, id string, p JobPriority) (*Job, error) {
 	if !ValidJobPriority(p) {
 		return nil, &AppError{Code: ErrInvalidPriority, Message: fmt.Sprintf("invalid job priority: %s", p)}
@@ -1699,43 +1701,39 @@ func (m *Manager) SetJobPriority(ctx context.Context, id string, p JobPriority) 
 	}
 
 	oldPriority := j.Priority
-	j.Priority = p
-	j.UpdatedAt = time.Now()
-
-	// Persist job priority first
-	if err := m.repo.Update(ctx, j); err != nil {
-		j.Priority = oldPriority
-		return nil, fmt.Errorf("update job priority: %w", err)
+	if oldPriority == p {
+		return j, nil
 	}
 
-	// Then update queue entry position to match new lane
+	// Read queue entry position if present
+	var entry *QueueEntry
 	if m.queueRepo != nil {
-		entry, getErr := m.queueRepo.Get(ctx, id)
+		var getErr error
+		entry, getErr = m.queueRepo.Get(ctx, id)
 		if getErr != nil {
-			// Rollback job priority since queue state is unknown
-			j.Priority = oldPriority
-			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
-			return nil, fmt.Errorf("read queue entry: %w", getErr)
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to read queue state: %v", getErr)}
 		}
-		if entry != nil {
-			nextPos, posErr := m.queueRepo.NextPosition(ctx, p)
-			if posErr != nil {
-				// Rollback job priority
-				j.Priority = oldPriority
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				return nil, fmt.Errorf("calculate next position: %w", posErr)
-			}
-			entry.Position = nextPos
-			entry.UpdatedAt = time.Now()
-			if enqErr := m.queueRepo.Enqueue(ctx, entry); enqErr != nil {
-				// Rollback job priority
-				j.Priority = oldPriority
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				return nil, fmt.Errorf("update queue entry priority: %w", enqErr)
-			}
+	}
+
+	if entry != nil && m.queueRepo != nil {
+		// Job has a queue entry - calculate next position in target lane and update atomically
+		nextPos, posErr := m.queueRepo.NextPosition(ctx, p)
+		if posErr != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to calculate next position: %v", posErr)}
+		}
+
+		if err := m.repo.UpdateJobPriorityAndQueuePosition(ctx, id, p, nextPos); err != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("atomic priority update failed: %v", err)}
+		}
+		j.Priority = p
+		j.UpdatedAt = time.Now()
+	} else {
+		// Job without queue entry (running or terminal)
+		j.Priority = p
+		j.UpdatedAt = time.Now()
+		if err := m.repo.Update(ctx, j); err != nil {
+			j.Priority = oldPriority
+			return nil, fmt.Errorf("update job priority: %w", err)
 		}
 	}
 
@@ -1868,7 +1866,12 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	j.UpdatedAt = time.Now()
 	if err := m.repo.Update(ctx, j); err != nil {
 		log.Printf("dispatchQueuedJob: update job %s status to DOWNLOADING failed: %v", j.ID, err)
-		return fmt.Errorf("%w: %v", ErrDispatchPersistenceFailed, err)
+		return &DispatchPersistenceError{
+			JobID:    j.ID,
+			EngineID: j.EngineID,
+			Action:   qj.Action,
+			Err:      err,
+		}
 	}
 
 	if m.queueRepo != nil {

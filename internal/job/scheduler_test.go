@@ -630,3 +630,413 @@ func TestScheduler_StartFailure_QueueNotDeletedBeforePersistence(t *testing.T) {
 		t.Errorf("expected queue entry to be deleted after successful FAILED persistence, but it still exists")
 	}
 }
+
+func TestScheduler_ReservedHeadDoesNotSpin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+
+	jA := &job.Job{
+		ID:        "job_a_reserved",
+		Source:    "http://example.com/a",
+		Name:      "Job A",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityHigh,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, jA)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      jA.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	jB := &job.Job{
+		ID:        "job_b_waiting",
+		Source:    "http://example.com/b",
+		Name:      "Job B",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, jB)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      jB.ID,
+		Position:   2,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	var dispatched []string
+	var mu sync.Mutex
+
+	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int { return 5 }, func(ctx context.Context, qj *job.QueuedJob) error {
+		mu.Lock()
+		dispatched = append(dispatched, qj.JobID)
+		mu.Unlock()
+		return &job.DispatchPersistenceError{JobID: qj.JobID, Action: qj.Action, Err: errors.New("db error")}
+	})
+
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	initialDispatches := len(dispatched)
+	mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 10; i++ {
+			sched.Kick()
+			time.Sleep(10 * time.Millisecond)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good!
+	case <-time.After(1 * time.Second):
+		t.Fatal("scheduler appeared stuck in reserved-job tight loop")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dispatched) != initialDispatches {
+		t.Fatalf("expected no further dispatches, but got %d (initial %d)", len(dispatched), initialDispatches)
+	}
+}
+
+func TestScheduler_PersistenceFailure_ReconcilesRunningJob(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "reconcile_job_1",
+		Source:    "http://example.com/rec",
+		Name:      "Reconcile Job",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	var startCount int32
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		atomic.AddInt32(&startCount, 1)
+		return &job.DispatchPersistenceError{
+			JobID:    qj.JobID,
+			EngineID: "gid_reconciled_123",
+			Action:   qj.Action,
+			Err:      errors.New("initial db update failed"),
+		}
+	}
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			return &job.EngineStatus{Status: job.StatusDownloading, TotalBytes: 100, CompletedBytes: 20}, nil
+		},
+	}
+	reg := &fakeRegistry{eng: fakeEng}
+
+	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(reg)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(300 * time.Millisecond)
+
+	if atomic.LoadInt32(&startCount) != 1 {
+		t.Fatalf("expected engine start to be called exactly once, got %d", atomic.LoadInt32(&startCount))
+	}
+
+	updated, err := jobRepo.GetByID(ctx, j.ID)
+	if err != nil || updated == nil {
+		t.Fatalf("failed to fetch updated job: %v", err)
+	}
+	if updated.Status != job.StatusDownloading {
+		t.Errorf("expected job status DOWNLOADING after reconciliation, got %s", updated.Status)
+	}
+	if updated.EngineID != "gid_reconciled_123" {
+		t.Errorf("expected EngineID 'gid_reconciled_123', got %s", updated.EngineID)
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry != nil {
+		t.Errorf("expected queue entry to be deleted after reconciliation, but it exists")
+	}
+}
+
+func TestScheduler_ReconciliationFailure_RemainsReserved(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "reconcile_fail_job",
+		Source:    "http://example.com/rec_fail",
+		Name:      "Reconcile Fail",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	var startCount int32
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		atomic.AddInt32(&startCount, 1)
+		return &job.DispatchPersistenceError{
+			JobID:    qj.JobID,
+			EngineID: "gid_fail_999",
+			Action:   qj.Action,
+			Err:      errors.New("persistent db failure"),
+		}
+	}
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			return nil, errors.New("engine status connection error")
+		},
+	}
+	reg := &fakeRegistry{eng: fakeEng}
+
+	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(reg)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		sched.Kick()
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&startCount) != 1 {
+		t.Fatalf("expected Start to be called exactly once despite reconciliation failures, got %d", atomic.LoadInt32(&startCount))
+	}
+
+	jDB, _ := jobRepo.GetByID(ctx, j.ID)
+	if jDB.Status != job.StatusQueued {
+		t.Errorf("expected job to remain QUEUED in DB, got %s", jDB.Status)
+	}
+}
+
+func TestScheduler_StartFailurePersistenceFailure_StopsAndRetainsReservation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "start_fail_persist_fail",
+		Source:    "http://example.com/sf",
+		Name:      "Start Fail Persist Fail",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	failWrapper := &failingUpdateJobRepoWrapper{IJobRepository: jobRepo}
+
+	var startCount int32
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		atomic.AddInt32(&startCount, 1)
+		return errors.New("engine start error")
+	}
+
+	sched := job.NewScheduler(failWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		sched.Kick()
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&startCount) != 1 {
+		t.Fatalf("expected engine Start to be called only once when FAILED persistence fails, got %d", atomic.LoadInt32(&startCount))
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry == nil {
+		t.Errorf("expected queue entry to remain when FAILED persistence fails")
+	}
+}
+
+func TestScheduler_ResumeFailurePersistenceFailure_StopsScheduler(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "resume_fail_persist_fail",
+		Source:    "http://example.com/rf",
+		Name:      "Resume Fail Persist Fail",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionResume,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	failWrapper := &failingUpdateJobRepoWrapper{IJobRepository: jobRepo}
+
+	var resumeCount int32
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		atomic.AddInt32(&resumeCount, 1)
+		return errors.New("engine resume error")
+	}
+
+	sched := job.NewScheduler(failWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		sched.Kick()
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&resumeCount) != 1 {
+		t.Fatalf("expected engine Resume to be called only once when PAUSED persistence fails, got %d", atomic.LoadInt32(&resumeCount))
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry == nil {
+		t.Errorf("expected queue entry to remain when PAUSED persistence fails")
+	}
+}
+
+type failingUpdateJobRepoWrapper struct {
+	job.IJobRepository
+}
+
+func (w *failingUpdateJobRepoWrapper) Update(ctx context.Context, j *job.Job) error {
+	return errors.New("simulated DB update failure")
+}
+
+func TestManager_SetPriority_AtomicSuccess(t *testing.T) {
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	reg := &fakeRegistry{eng: &fakeEngine{}}
+	bus := &fakeBus{}
+	m := job.NewManager(jobRepo, reg, bus, t.TempDir(), nil)
+	m.SetQueueRepository(queueRepo)
+
+	ctx := context.Background()
+	now := time.Now()
+	j := &job.Job{
+		ID:        "priority_atomic_job",
+		Source:    "http://example.com/prio",
+		Name:      "Prio Job",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	updated, err := m.SetJobPriority(ctx, j.ID, job.JobPriorityHigh)
+	if err != nil {
+		t.Fatalf("SetJobPriority failed: %v", err)
+	}
+	if updated.Priority != job.JobPriorityHigh {
+		t.Errorf("expected priority HIGH, got %s", updated.Priority)
+	}
+
+	jDB, _ := jobRepo.GetByID(ctx, j.ID)
+	if jDB.Priority != job.JobPriorityHigh {
+		t.Errorf("expected DB job priority HIGH, got %s", jDB.Priority)
+	}
+
+	qDB, _ := queueRepo.Get(ctx, j.ID)
+	if qDB.Position != 1 {
+		t.Errorf("expected queue position 1 in high lane, got %d", qDB.Position)
+	}
+}

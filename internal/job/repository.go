@@ -6,6 +6,7 @@ import "context"
 type IJobRepository interface {
 	Create(ctx context.Context, j *Job) error
 	Update(ctx context.Context, j *Job) error
+	UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority JobPriority, newPosition int64) error
 	GetByID(ctx context.Context, id string) (*Job, error)
 	List(ctx context.Context) ([]Job, error)
 	ListRecoverable(ctx context.Context) ([]Job, error)

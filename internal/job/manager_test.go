@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -202,6 +203,18 @@ func (f *fakeJobRepository) Update(ctx context.Context, j *Job) error {
 	}
 	jCopy := *j
 	f.jobs[j.ID] = &jCopy
+	return nil
+}
+
+func (f *fakeJobRepository) UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority JobPriority, newPosition int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, exists := f.jobs[jobID]
+	if !exists {
+		return fmt.Errorf("job not found")
+	}
+	j.Priority = newPriority
+	j.UpdatedAt = time.Now()
 	return nil
 }
 
@@ -1903,4 +1916,170 @@ func TestManager_CancelOrderingAndErrorHandling(t *testing.T) {
 			t.Errorf("expected sequence [engine, local], got %v", gotSeq)
 		}
 	})
+}
+
+func TestManager_PauseActive_UpdateFailureReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	failRepo := &failingUpdateJobRepo{jobs: make(map[string]*Job)}
+	fakeEng := &fakeEngine{}
+	reg := &fakeEngineRegistry{engines: map[string]IEngine{"aria2": fakeEng}}
+	bus := newFakeEventBus()
+
+	m := NewManager(failRepo, reg, bus, tmpDir, nil)
+
+	j := &Job{
+		ID:        "job_pause_fail",
+		Source:    "http://example.com/pause",
+		Status:    StatusDownloading,
+		Engine:    "aria2",
+		EngineID:  "gid_123",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	failRepo.Create(context.Background(), j)
+	m.addActive(j)
+
+	_, err := m.Pause(context.Background(), j.ID)
+	if err == nil {
+		t.Fatal("expected Pause to return error when DB update fails, got nil")
+	}
+
+	events := bus.events
+	for _, ev := range events {
+		if ev.Type == EventJobUpdated && ev.Job.ID == j.ID && ev.Job.Status == StatusPaused {
+			t.Errorf("expected EventJobUpdated(PAUSED) to NOT be published on DB failure")
+		}
+	}
+}
+
+func TestManager_SetPriority_AtomicRollback(t *testing.T) {
+	ctx := context.Background()
+	j := &Job{
+		ID:        "prio_rollback_job",
+		Source:    "http://example.com/roll",
+		Status:    StatusQueued,
+		Priority:  JobPriorityNormal,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	failRepo := &failingUpdateJobRepo{jobs: map[string]*Job{j.ID: j}}
+	mockQueueRepo := &fakeQueueRepo{
+		entries: map[string]*QueueEntry{
+			j.ID: {JobID: j.ID, Position: 5, Action: QueueActionStart},
+		},
+	}
+
+	m := NewManager(failRepo, &fakeEngineRegistry{}, newFakeEventBus(), t.TempDir(), nil)
+	m.SetQueueRepository(mockQueueRepo)
+
+	_, err := m.SetJobPriority(ctx, j.ID, JobPriorityHigh)
+	if err == nil {
+		t.Fatal("expected SetJobPriority to fail when atomic update fails")
+	}
+
+	gotJ, _ := failRepo.GetByID(ctx, j.ID)
+	if gotJ.Priority != JobPriorityNormal {
+		t.Errorf("expected priority to remain NORMAL on failure, got %s", gotJ.Priority)
+	}
+}
+
+func TestManager_SetPriority_QueueReadFailure(t *testing.T) {
+	ctx := context.Background()
+	j := &Job{
+		ID:        "prio_read_fail_job",
+		Source:    "http://example.com/read_fail",
+		Status:    StatusQueued,
+		Priority:  JobPriorityNormal,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	mockJobRepo := newFakeJobRepository()
+	mockJobRepo.Create(ctx, j)
+
+	failQueueRepo := &fakeQueueRepo{getErr: errors.New("simulated queue read error")}
+
+	m := NewManager(mockJobRepo, &fakeEngineRegistry{}, newFakeEventBus(), t.TempDir(), nil)
+	m.SetQueueRepository(failQueueRepo)
+
+	_, err := m.SetJobPriority(ctx, j.ID, JobPriorityHigh)
+	if err == nil {
+		t.Fatal("expected SetJobPriority to fail when queue read fails")
+	}
+
+	gotJ, _ := mockJobRepo.GetByID(ctx, j.ID)
+	if gotJ.Priority != JobPriorityNormal {
+		t.Errorf("expected priority to remain NORMAL on queue read failure, got %s", gotJ.Priority)
+	}
+}
+
+type fakeQueueRepo struct {
+	entries map[string]*QueueEntry
+	getErr  error
+}
+
+func (f *fakeQueueRepo) Enqueue(ctx context.Context, entry *QueueEntry) error {
+	if f.entries == nil {
+		f.entries = make(map[string]*QueueEntry)
+	}
+	f.entries[entry.JobID] = entry
+	return nil
+}
+func (f *fakeQueueRepo) Get(ctx context.Context, jobID string) (*QueueEntry, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.entries[jobID], nil
+}
+func (f *fakeQueueRepo) Delete(ctx context.Context, jobID string) error {
+	delete(f.entries, jobID)
+	return nil
+}
+func (f *fakeQueueRepo) NextRunnable(ctx context.Context) (*QueuedJob, error) {
+	return nil, nil
+}
+func (f *fakeQueueRepo) List(ctx context.Context) ([]QueuedJob, error) {
+	return nil, nil
+}
+func (f *fakeQueueRepo) NextPosition(ctx context.Context, priority JobPriority) (int64, error) {
+	return 10, nil
+}
+func (f *fakeQueueRepo) Reorder(ctx context.Context, priority JobPriority, orderedJobIDs []string) error {
+	return nil
+}
+
+type failingUpdateJobRepo struct {
+	mu   sync.Mutex
+	jobs map[string]*Job
+}
+
+func (f *failingUpdateJobRepo) Create(ctx context.Context, j *Job) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jobs == nil {
+		f.jobs = make(map[string]*Job)
+	}
+	f.jobs[j.ID] = j
+	return nil
+}
+func (f *failingUpdateJobRepo) Update(ctx context.Context, j *Job) error {
+	return errors.New("simulated DB update failure")
+}
+func (f *failingUpdateJobRepo) UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority JobPriority, newPosition int64) error {
+	return errors.New("simulated DB atomic update failure")
+}
+func (f *failingUpdateJobRepo) GetByID(ctx context.Context, id string) (*Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.jobs[id], nil
+}
+func (f *failingUpdateJobRepo) List(ctx context.Context) ([]Job, error) {
+	return nil, nil
+}
+func (f *failingUpdateJobRepo) ListRecoverable(ctx context.Context) ([]Job, error) {
+	return nil, nil
+}
+func (f *failingUpdateJobRepo) CountDownloading(ctx context.Context) (int, error) {
+	return 0, nil
 }
