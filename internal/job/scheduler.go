@@ -18,12 +18,23 @@ type SchedulerLimitFunc func(ctx context.Context) int
 // AddActiveFunc defines the callback for adding a job to Manager's active set.
 type AddActiveFunc func(j *Job)
 
+// ReconciliationKind distinguishes external execution failure from state persistence failure.
+type ReconciliationKind string
+
+const (
+	ReconciliationExternalExecution ReconciliationKind = "external_execution"
+	ReconciliationStatePersistence  ReconciliationKind = "state_persistence"
+)
+
 // DispatchReservation tracks in-flight and dirty dispatch state for a job.
 type DispatchReservation struct {
-	JobID    string
-	Action   QueueAction
-	EngineID string
-	Dirty    bool
+	JobID        string
+	Action       QueueAction
+	EngineID     string
+	Dirty        bool
+	Kind         ReconciliationKind
+	TargetStatus JobStatus
+	TargetError  string
 }
 
 // Scheduler manages queued download execution policy and capacity constraints.
@@ -139,12 +150,13 @@ func (s *Scheduler) releaseInFlight(id string) {
 	delete(s.inFlight, id)
 }
 
-func (s *Scheduler) markReservationDirty(id string, action QueueAction, engineID string) {
+func (s *Scheduler) markReservationDirtyExternal(id string, action QueueAction, engineID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if res, ok := s.inFlight[id]; ok {
 		res.Dirty = true
 		res.Action = action
+		res.Kind = ReconciliationExternalExecution
 		if engineID != "" {
 			res.EngineID = engineID
 		}
@@ -154,6 +166,28 @@ func (s *Scheduler) markReservationDirty(id string, action QueueAction, engineID
 			Action:   action,
 			EngineID: engineID,
 			Dirty:    true,
+			Kind:     ReconciliationExternalExecution,
+		}
+	}
+}
+
+func (s *Scheduler) markReservationDirtyState(id string, action QueueAction, targetStatus JobStatus, targetError string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if res, ok := s.inFlight[id]; ok {
+		res.Dirty = true
+		res.Action = action
+		res.Kind = ReconciliationStatePersistence
+		res.TargetStatus = targetStatus
+		res.TargetError = targetError
+	} else {
+		s.inFlight[id] = &DispatchReservation{
+			JobID:        id,
+			Action:       action,
+			Dirty:        true,
+			Kind:         ReconciliationStatePersistence,
+			TargetStatus: targetStatus,
+			TargetError:  targetError,
 		}
 	}
 }
@@ -254,56 +288,162 @@ func (s *Scheduler) reconcileJob(ctx context.Context, jobID string) {
 	resCopy := *res
 	s.mu.Unlock()
 
-	current, err := s.repo.GetByID(ctx, jobID)
+	switch resCopy.Kind {
+	case ReconciliationExternalExecution:
+		s.reconcileExternalExecution(ctx, resCopy)
+	case ReconciliationStatePersistence:
+		s.reconcileStatePersistence(ctx, resCopy)
+	default:
+		log.Printf("scheduler: unknown reconciliation kind %q for job %s", resCopy.Kind, jobID)
+	}
+}
+
+func (s *Scheduler) reconcileStatePersistence(ctx context.Context, res DispatchReservation) {
+	current, err := s.repo.GetByID(ctx, res.JobID)
 	if err != nil || current == nil {
-		log.Printf("scheduler: reconciliation failed to fetch job %s: %v", jobID, err)
+		log.Printf("scheduler: state reconciliation failed to fetch job %s: %v", res.JobID, err)
 		return
 	}
 
-	if current.EngineID == "" && resCopy.EngineID != "" {
-		current.EngineID = resCopy.EngineID
+	current.Status = res.TargetStatus
+	current.Error = res.TargetError
+	current.SpeedBytesPerSecond = 0
+	current.ETASeconds = 0
+	current.UpdatedAt = time.Now()
+
+	if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+		log.Printf("scheduler: state reconciliation failed to persist %s state for job %s: %v", res.TargetStatus, res.JobID, updateErr)
+		return
+	}
+
+	if res.TargetStatus == StatusFailed {
+		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
+			log.Printf("scheduler: state reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
+		}
+		if s.bus != nil {
+			s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
+		}
+	} else if res.TargetStatus == StatusPaused {
+		if s.bus != nil {
+			s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
+		}
+	}
+
+	s.releaseInFlight(current.ID)
+	log.Printf("scheduler: state reconciliation succeeded for job %s (%s)", current.ID, res.TargetStatus)
+	s.Kick()
+}
+
+func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res DispatchReservation) {
+	current, err := s.repo.GetByID(ctx, res.JobID)
+	if err != nil || current == nil {
+		log.Printf("scheduler: external reconciliation failed to fetch job %s: %v", res.JobID, err)
+		return
+	}
+
+	if current.EngineID == "" && res.EngineID != "" {
+		current.EngineID = res.EngineID
+	}
+
+	if res.Action == QueueActionStart && current.EngineID == "" {
+		log.Printf("scheduler: cannot reconcile external execution for job %s: missing engine ID", res.JobID)
+		return
 	}
 
 	if s.engines == nil {
-		log.Printf("scheduler: cannot reconcile job %s: engine registry not set", jobID)
+		log.Printf("scheduler: cannot reconcile job %s: engine registry not set", res.JobID)
 		return
 	}
 
 	eng, ok := s.engines.Get(current.Engine)
 	if !ok || eng == nil {
-		log.Printf("scheduler: cannot reconcile job %s: engine %s unavailable", jobID, current.Engine)
+		log.Printf("scheduler: cannot reconcile job %s: engine %s unavailable", res.JobID, current.Engine)
 		return
 	}
 
 	status, err := eng.Status(ctx, current)
 	if err != nil {
-		log.Printf("scheduler: reconciliation engine Status query failed for job %s: %v", jobID, err)
+		log.Printf("scheduler: external reconciliation engine Status query failed for job %s: %v", res.JobID, err)
 		return
 	}
 
-	if status != nil && (status.Status == StatusDownloading || status.Status == StatusSeeding || status.Status == StatusProcessing || status.Status == StatusCompleted) {
+	if status == nil {
+		log.Printf("scheduler: external reconciliation engine returned nil status for job %s", res.JobID)
+		return
+	}
+
+	now := time.Now()
+	switch status.Status {
+	case StatusDownloading:
 		current.Status = StatusDownloading
-		if resCopy.EngineID != "" {
-			current.EngineID = resCopy.EngineID
-		}
-		current.UpdatedAt = time.Now()
+		current.UpdatedAt = now
 		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
-			log.Printf("scheduler: reconciliation failed to persist DOWNLOADING for job %s: %v", jobID, updateErr)
+			log.Printf("scheduler: external reconciliation failed to persist DOWNLOADING for job %s: %v", res.JobID, updateErr)
 			return
 		}
-
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
-			log.Printf("scheduler: reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
+			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
 		}
-
 		if s.addActiveFn != nil {
 			s.addActiveFn(current)
 		}
-
 		s.releaseInFlight(current.ID)
-		log.Printf("scheduler: reconciliation succeeded for job %s, state restored to DOWNLOADING", current.ID)
-	} else {
-		log.Printf("scheduler: reconciliation engine status for job %s is not active (%v)", jobID, status)
+		log.Printf("scheduler: external reconciliation succeeded for job %s, status=DOWNLOADING", current.ID)
+		s.Kick()
+
+	case StatusProcessing:
+		current.Status = StatusProcessing
+		current.UpdatedAt = now
+		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+			log.Printf("scheduler: external reconciliation failed to persist PROCESSING for job %s: %v", res.JobID, updateErr)
+			return
+		}
+		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
+			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
+		}
+		if s.addActiveFn != nil {
+			s.addActiveFn(current)
+		}
+		s.releaseInFlight(current.ID)
+		log.Printf("scheduler: external reconciliation succeeded for job %s, status=PROCESSING", current.ID)
+		s.Kick()
+
+	case StatusSeeding:
+		current.Status = StatusSeeding
+		current.UpdatedAt = now
+		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+			log.Printf("scheduler: external reconciliation failed to persist SEEDING for job %s: %v", res.JobID, updateErr)
+			return
+		}
+		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
+			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
+		}
+		if s.addActiveFn != nil {
+			s.addActiveFn(current)
+		}
+		s.releaseInFlight(current.ID)
+		log.Printf("scheduler: external reconciliation succeeded for job %s, status=SEEDING", current.ID)
+		s.Kick()
+
+	case StatusCompleted:
+		current.Status = StatusCompleted
+		current.UpdatedAt = now
+		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+			log.Printf("scheduler: external reconciliation failed to persist COMPLETED for job %s: %v", res.JobID, updateErr)
+			return
+		}
+		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
+			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
+		}
+		s.releaseInFlight(current.ID)
+		if s.bus != nil {
+			s.bus.Publish(Event{Type: EventJobCompleted, Job: *current})
+		}
+		log.Printf("scheduler: external reconciliation succeeded for job %s, status=COMPLETED", current.ID)
+		s.Kick()
+
+	default:
+		log.Printf("scheduler: external reconciliation engine status for job %s is non-active (%v), keeping reservation", res.JobID, status.Status)
 	}
 }
 
@@ -338,7 +478,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 			log.Printf("scheduler: reconciliation required for job %s (engineID=%s): %v", next.JobID, engineID, dispatchErr)
 
 			releaseReservation = false
-			s.markReservationDirty(next.JobID, next.Action, engineID)
+			s.markReservationDirtyExternal(next.JobID, next.Action, engineID)
 			s.reconcileJob(s.ctx, next.JobID)
 
 			return dispatchErr
@@ -348,15 +488,16 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		now := time.Now()
 
 		if next.Action == QueueActionStart {
+			targetErr := fmt.Sprintf("failed to start queued download: %v", dispatchErr)
 			current.Status = StatusFailed
-			current.Error = fmt.Sprintf("failed to start queued download: %v", dispatchErr)
+			current.Error = targetErr
 			current.SpeedBytesPerSecond = 0
 			current.ETASeconds = 0
 			current.UpdatedAt = now
 			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
 				log.Printf("scheduler: failed to persist FAILED state for job %s: %v", next.JobID, updateErr)
 				releaseReservation = false
-				s.markReservationDirty(next.JobID, next.Action, "")
+				s.markReservationDirtyState(next.JobID, next.Action, StatusFailed, targetErr)
 				return &DispatchPersistenceError{
 					JobID:  next.JobID,
 					Action: next.Action,
@@ -371,15 +512,16 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 				}
 			}
 		} else {
+			targetErr := fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
 			current.Status = StatusPaused
-			current.Error = fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
+			current.Error = targetErr
 			current.SpeedBytesPerSecond = 0
 			current.ETASeconds = 0
 			current.UpdatedAt = now
 			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
 				log.Printf("scheduler: failed to persist PAUSED state for job %s: %v", next.JobID, updateErr)
 				releaseReservation = false
-				s.markReservationDirty(next.JobID, next.Action, "")
+				s.markReservationDirtyState(next.JobID, next.Action, StatusPaused, targetErr)
 				return &DispatchPersistenceError{
 					JobID:  next.JobID,
 					Action: next.Action,

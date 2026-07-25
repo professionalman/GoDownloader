@@ -370,9 +370,16 @@ func TestScheduler_CancelBeforeDispatchRace(t *testing.T) {
 	}
 }
 
-type fakeBus struct{}
+type fakeBus struct {
+	mu     sync.Mutex
+	events []job.Event
+}
 
-func (f *fakeBus) Publish(event job.Event)                               {}
+func (f *fakeBus) Publish(event job.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, event)
+}
 func (f *fakeBus) Subscribe() <-chan job.Event                           { return nil }
 func (f *fakeBus) Unsubscribe(ch <-chan job.Event)                       {}
 func (f *fakeBus) SubscribeType(eventType string) <-chan job.Event       { return nil }
@@ -867,7 +874,7 @@ func TestScheduler_ReconciliationFailure_RemainsReserved(t *testing.T) {
 	}
 }
 
-func TestScheduler_StartFailurePersistenceFailure_StopsAndRetainsReservation(t *testing.T) {
+func TestScheduler_StartFailurePersistence_ReconcilesFailedState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -876,9 +883,9 @@ func TestScheduler_StartFailurePersistenceFailure_StopsAndRetainsReservation(t *
 
 	now := time.Now()
 	j := &job.Job{
-		ID:        "start_fail_persist_fail",
-		Source:    "http://example.com/sf",
-		Name:      "Start Fail Persist Fail",
+		ID:        "sf_reconcile_job",
+		Source:    "http://example.com/sf_rec",
+		Name:      "SF Reconcile Job",
 		Status:    job.StatusQueued,
 		Type:      job.TypeDownload,
 		Engine:    "aria2",
@@ -895,7 +902,7 @@ func TestScheduler_StartFailurePersistenceFailure_StopsAndRetainsReservation(t *
 		UpdatedAt:  now,
 	})
 
-	failWrapper := &failingUpdateJobRepoWrapper{IJobRepository: jobRepo}
+	toggleWrapper := &toggleFailingUpdateJobRepoWrapper{IJobRepository: jobRepo, failUpdate: true}
 
 	var startCount int32
 	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
@@ -903,7 +910,126 @@ func TestScheduler_StartFailurePersistenceFailure_StopsAndRetainsReservation(t *
 		return errors.New("engine start error")
 	}
 
-	sched := job.NewScheduler(failWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			t.Error("eng.Status must NOT be called for state persistence reconciliation")
+			return nil, errors.New("should not be called")
+		},
+	}
+
+	sched := job.NewScheduler(toggleWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(&fakeRegistry{eng: fakeEng})
+	bus := &fakeBus{}
+	sched.SetEventBus(bus)
+
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	if atomic.LoadInt32(&startCount) != 1 {
+		t.Fatalf("expected engine Start to be called once, got %d", atomic.LoadInt32(&startCount))
+	}
+
+	toggleWrapper.setFail(false)
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	if atomic.LoadInt32(&startCount) != 1 {
+		t.Fatalf("expected engine Start to stay at 1 call, got %d", atomic.LoadInt32(&startCount))
+	}
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != job.StatusFailed {
+		t.Errorf("expected job status FAILED, got %s", updated.Status)
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry != nil {
+		t.Errorf("expected queue entry to be deleted after FAILED reconciliation")
+	}
+
+	bus.mu.Lock()
+	events := bus.events
+	bus.mu.Unlock()
+
+	foundFailed := false
+	for _, ev := range events {
+		if ev.Type == job.EventJobFailed && ev.Job.ID == j.ID {
+			foundFailed = true
+		}
+	}
+	if !foundFailed {
+		t.Errorf("expected EventJobFailed to be published after state reconciliation")
+	}
+}
+
+func TestScheduler_StartFailurePersistence_RemainsReserved(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j1 := &job.Job{
+		ID:        "sf_remain_1",
+		Source:    "http://example.com/sf1",
+		Name:      "SF Remain 1",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityHigh,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	j2 := &job.Job{
+		ID:        "sf_remain_2",
+		Source:    "http://example.com/sf2",
+		Name:      "SF Remain 2",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j1)
+	jobRepo.Create(ctx, j2)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{JobID: j1.ID, Position: 1, Action: job.QueueActionStart})
+	queueRepo.Enqueue(ctx, &job.QueueEntry{JobID: j2.ID, Position: 2, Action: job.QueueActionStart})
+
+	toggleWrapper := &toggleFailingUpdateJobRepoWrapper{IJobRepository: jobRepo, failUpdate: true}
+
+	var dispatched []string
+	var mu sync.Mutex
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		mu.Lock()
+		dispatched = append(dispatched, qj.JobID)
+		mu.Unlock()
+		if qj.JobID == j1.ID {
+			return errors.New("engine start error")
+		}
+		j, _ := jobRepo.GetByID(ctx, qj.JobID)
+		if j != nil {
+			j.Status = job.StatusDownloading
+			jobRepo.Update(ctx, j)
+			queueRepo.Delete(ctx, j.ID)
+		}
+		return nil
+	}
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			t.Error("eng.Status must NOT be called")
+			return nil, errors.New("no status")
+		},
+	}
+
+	sched := job.NewScheduler(toggleWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(&fakeRegistry{eng: fakeEng})
 	sched.Start(ctx)
 	defer sched.Stop()
 
@@ -915,17 +1041,27 @@ func TestScheduler_StartFailurePersistenceFailure_StopsAndRetainsReservation(t *
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if atomic.LoadInt32(&startCount) != 1 {
-		t.Fatalf("expected engine Start to be called only once when FAILED persistence fails, got %d", atomic.LoadInt32(&startCount))
+	mu.Lock()
+	dispLen := len(dispatched)
+	mu.Unlock()
+	if dispLen != 1 || dispatched[0] != j1.ID {
+		t.Fatalf("expected only j1 dispatched initially, got %v", dispatched)
 	}
 
-	qEntry, _ := queueRepo.Get(ctx, j.ID)
-	if qEntry == nil {
-		t.Errorf("expected queue entry to remain when FAILED persistence fails")
+	toggleWrapper.setFail(false)
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	finalDispatched := append([]string(nil), dispatched...)
+	mu.Unlock()
+
+	if len(finalDispatched) != 2 || finalDispatched[1] != j2.ID {
+		t.Fatalf("expected j2 to start after j1 state reconciled, got %v", finalDispatched)
 	}
 }
 
-func TestScheduler_ResumeFailurePersistenceFailure_StopsScheduler(t *testing.T) {
+func TestScheduler_ResumeFailurePersistence_ReconcilesPausedState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -934,12 +1070,13 @@ func TestScheduler_ResumeFailurePersistenceFailure_StopsScheduler(t *testing.T) 
 
 	now := time.Now()
 	j := &job.Job{
-		ID:        "resume_fail_persist_fail",
-		Source:    "http://example.com/rf",
-		Name:      "Resume Fail Persist Fail",
+		ID:        "rf_reconcile_job",
+		Source:    "http://example.com/rf_rec",
+		Name:      "RF Reconcile Job",
 		Status:    job.StatusQueued,
 		Type:      job.TypeDownload,
 		Engine:    "aria2",
+		EngineID:  "existing_gid_123",
 		Priority:  job.JobPriorityNormal,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -953,7 +1090,7 @@ func TestScheduler_ResumeFailurePersistenceFailure_StopsScheduler(t *testing.T) 
 		UpdatedAt:  now,
 	})
 
-	failWrapper := &failingUpdateJobRepoWrapper{IJobRepository: jobRepo}
+	toggleWrapper := &toggleFailingUpdateJobRepoWrapper{IJobRepository: jobRepo, failUpdate: true}
 
 	var resumeCount int32
 	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
@@ -961,34 +1098,254 @@ func TestScheduler_ResumeFailurePersistenceFailure_StopsScheduler(t *testing.T) 
 		return errors.New("engine resume error")
 	}
 
-	sched := job.NewScheduler(failWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			t.Error("eng.Status must NOT be called for resume state persistence reconciliation")
+			return nil, errors.New("should not be called")
+		},
+	}
+
+	sched := job.NewScheduler(toggleWrapper, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(&fakeRegistry{eng: fakeEng})
+	bus := &fakeBus{}
+	sched.SetEventBus(bus)
+
 	sched.Start(ctx)
 	defer sched.Stop()
 
 	sched.Kick()
 	time.Sleep(200 * time.Millisecond)
 
-	for i := 0; i < 5; i++ {
-		sched.Kick()
-		time.Sleep(20 * time.Millisecond)
+	if atomic.LoadInt32(&resumeCount) != 1 {
+		t.Fatalf("expected engine Resume to be called once, got %d", atomic.LoadInt32(&resumeCount))
 	}
 
+	toggleWrapper.setFail(false)
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
 	if atomic.LoadInt32(&resumeCount) != 1 {
-		t.Fatalf("expected engine Resume to be called only once when PAUSED persistence fails, got %d", atomic.LoadInt32(&resumeCount))
+		t.Fatalf("expected engine Resume to stay at 1 call, got %d", atomic.LoadInt32(&resumeCount))
+	}
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != job.StatusPaused {
+		t.Errorf("expected job status PAUSED, got %s", updated.Status)
 	}
 
 	qEntry, _ := queueRepo.Get(ctx, j.ID)
-	if qEntry == nil {
-		t.Errorf("expected queue entry to remain when PAUSED persistence fails")
+	if qEntry == nil || qEntry.Action != job.QueueActionResume {
+		t.Errorf("expected RESUME queue entry to remain for PAUSED job, got %v", qEntry)
 	}
 }
 
-type failingUpdateJobRepoWrapper struct {
-	job.IJobRepository
+func TestScheduler_ExternalReconciliation_PreservesProcessing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "rec_processing_job",
+		Source:    "http://example.com/proc",
+		Name:      "Processing Job",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "ytdlp",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		return &job.DispatchPersistenceError{
+			JobID:    qj.JobID,
+			EngineID: "ytdlp_proc_gid",
+			Action:   qj.Action,
+			Err:      errors.New("db error"),
+		}
+	}
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			return &job.EngineStatus{Status: job.StatusProcessing, TotalBytes: 100, CompletedBytes: 50}, nil
+		},
+	}
+
+	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(&fakeRegistry{eng: fakeEng})
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != job.StatusProcessing {
+		t.Errorf("expected job status PROCESSING, got %s", updated.Status)
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry != nil {
+		t.Errorf("expected queue entry to be deleted after PROCESSING reconciliation")
+	}
 }
 
-func (w *failingUpdateJobRepoWrapper) Update(ctx context.Context, j *job.Job) error {
-	return errors.New("simulated DB update failure")
+func TestScheduler_ExternalReconciliation_PreservesSeeding(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "rec_seeding_job",
+		Source:    "magnet:?xt=urn:btih:seed123",
+		Name:      "Seeding Job",
+		Status:    job.StatusQueued,
+		Type:      job.TypeTorrent,
+		Engine:    "qbittorrent",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		return &job.DispatchPersistenceError{
+			JobID:    qj.JobID,
+			EngineID: "hash_seed_123",
+			Action:   qj.Action,
+			Err:      errors.New("db error"),
+		}
+	}
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			return &job.EngineStatus{Status: job.StatusSeeding}, nil
+		},
+	}
+
+	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(&fakeRegistry{eng: fakeEng})
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != job.StatusSeeding {
+		t.Errorf("expected job status SEEDING, got %s", updated.Status)
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry != nil {
+		t.Errorf("expected queue entry to be deleted after SEEDING reconciliation")
+	}
+}
+
+func TestScheduler_ExternalReconciliation_PreservesCompleted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	j := &job.Job{
+		ID:        "rec_completed_job",
+		Source:    "http://example.com/done",
+		Name:      "Completed Job",
+		Status:    job.StatusQueued,
+		Type:      job.TypeDownload,
+		Engine:    "aria2",
+		Priority:  job.JobPriorityNormal,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &job.QueueEntry{
+		JobID:      j.ID,
+		Position:   1,
+		Action:     job.QueueActionStart,
+		EnqueuedAt: now,
+		UpdatedAt:  now,
+	})
+
+	dispatchFn := func(ctx context.Context, qj *job.QueuedJob) error {
+		return &job.DispatchPersistenceError{
+			JobID:    qj.JobID,
+			EngineID: "aria2_done_gid",
+			Action:   qj.Action,
+			Err:      errors.New("db error"),
+		}
+	}
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *job.Job) (*job.EngineStatus, error) {
+			return &job.EngineStatus{Status: job.StatusCompleted}, nil
+		},
+	}
+
+	sched := job.NewScheduler(jobRepo, queueRepo, func(ctx context.Context) int { return 3 }, dispatchFn)
+	sched.SetEngineRegistry(&fakeRegistry{eng: fakeEng})
+	bus := &fakeBus{}
+	sched.SetEventBus(bus)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+	time.Sleep(200 * time.Millisecond)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != job.StatusCompleted {
+		t.Errorf("expected job status COMPLETED, got %s", updated.Status)
+	}
+
+	qEntry, _ := queueRepo.Get(ctx, j.ID)
+	if qEntry != nil {
+		t.Errorf("expected queue entry to be deleted after COMPLETED reconciliation")
+	}
+}
+
+type toggleFailingUpdateJobRepoWrapper struct {
+	job.IJobRepository
+	mu         sync.Mutex
+	failUpdate bool
+}
+
+func (w *toggleFailingUpdateJobRepoWrapper) setFail(fail bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.failUpdate = fail
+}
+
+func (w *toggleFailingUpdateJobRepoWrapper) Update(ctx context.Context, j *job.Job) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failUpdate {
+		return errors.New("simulated DB update failure")
+	}
+	return w.IJobRepository.Update(ctx, j)
 }
 
 func TestManager_SetPriority_AtomicSuccess(t *testing.T) {
