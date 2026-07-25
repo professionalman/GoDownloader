@@ -378,8 +378,47 @@ func TestMediaRetry_InvalidWorkDirMarkerReturnsError(t *testing.T) {
 }
 
 func TestMediaRetry_WorkDirCleanupFailureReturnsError(t *testing.T) {
-	// Refusal on invalid marker proves cleanup failure handling before analysis
-	TestMediaRetry_InvalidWorkDirMarkerReturnsError(t)
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_cleanup_fail")
+	storageSvc.PrepareWorkDir(ctx, "job-retry-cleanup-fail", workDir)
+
+	j := &Job{
+		ID:             "job-retry-cleanup-fail",
+		Source:         "https://youtube.com/watch?v=777",
+		Name:           "Failed Media Job",
+		Status:         StatusFailed,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	// Inject error on removeAllFunc (which is called inside CleanupWorkDir)
+	reset := storage.SetRemoveAllFuncForTest(func(path string) error {
+		return errors.New("simulated cleanup error")
+	})
+	defer reset()
+
+	_, err := mgr.Retry(ctx, j.ID)
+	if err == nil {
+		t.Fatalf("expected Retry to fail when CleanupWorkDir returns an error, got nil")
+	}
+
+	appErr, ok := err.(*AppError)
+	if !ok || appErr.Code != ErrStorageError {
+		t.Errorf("expected ErrStorageError on cleanup failure, got %v", err)
+	}
+
+	// Verify status in repo is STILL FAILED (analysis did not start)
+	inRepo, _ := jobRepo.GetByID(ctx, j.ID)
+	if inRepo.Status != StatusFailed {
+		t.Errorf("expected job status to remain FAILED when cleanup fails, got %s", inRepo.Status)
+	}
 }
 
 func TestMediaRetry_CleansValidWorkDirBeforeAnalysis(t *testing.T) {
@@ -613,5 +652,492 @@ func TestMediaCancelled_PersistenceFailurePreservesWorkDir(t *testing.T) {
 	// WorkDir must NOT be cleaned up
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		t.Errorf("WorkDir was cleaned up when DB persistence failed!")
+	}
+}
+
+func TestManager_Cancel_PersistenceFailureDoesNotPublishOrCleanup(t *testing.T) {
+	mgr, jobRepo, queueRepo, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_cancel_pers_fail")
+	storageSvc.PrepareWorkDir(ctx, "job-cancel-pers-fail", workDir)
+
+	j := &Job{
+		ID:             "job-cancel-pers-fail",
+		Source:         "https://youtube.com/watch?v=888",
+		Name:           "Cancel Persist Fail Video",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.entries[j.ID] = &QueueEntry{JobID: j.ID, Action: QueueActionStart}
+
+	// Inject error on repo.Update
+	jobRepo.updateErr = errors.New("simulated DB update failure")
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	_, err := mgr.Cancel(ctx, j.ID)
+	if err == nil {
+		t.Fatalf("expected Cancel to fail when DB update fails, got nil")
+	}
+
+	// 1. EventJobCancelled MUST NOT be emitted
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobCancelled {
+			t.Errorf("EventJobCancelled was emitted even though DB update failed!")
+		}
+	default:
+	}
+
+	// 2. WorkDir MUST NOT be deleted
+	if _, statErr := os.Stat(workDir); os.IsNotExist(statErr) {
+		t.Errorf("WorkDir was deleted even though DB update failed!")
+	}
+
+	// 3. Queue row MUST NOT be deleted
+	if _, exists := queueRepo.entries[j.ID]; !exists {
+		t.Errorf("Queue entry was deleted even though DB update failed!")
+	}
+}
+
+func TestManager_Cancel_PersistsBeforeQueueDeleteAndCleanup(t *testing.T) {
+	mgr, jobRepo, queueRepo, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_cancel_order")
+	storageSvc.PrepareWorkDir(ctx, "job-cancel-order", workDir)
+
+	j := &Job{
+		ID:             "job-cancel-order",
+		Source:         "https://youtube.com/watch?v=999",
+		Name:           "Cancel Order Video",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.entries[j.ID] = &QueueEntry{JobID: j.ID, Action: QueueActionStart}
+
+	var publishedEvent Event
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	cancelledJ, err := mgr.Cancel(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	if cancelledJ.Status != StatusCancelled {
+		t.Errorf("expected status CANCELLED, got %s", cancelledJ.Status)
+	}
+
+	select {
+	case publishedEvent = <-ch:
+	default:
+	}
+
+	if publishedEvent.Type != EventJobCancelled {
+		t.Errorf("expected EventJobCancelled, got %s", publishedEvent.Type)
+	}
+
+	// Queue entry must be cleaned up after successful durable cancellation
+	if _, exists := queueRepo.entries[j.ID]; exists {
+		t.Errorf("expected queue entry to be deleted after cancellation")
+	}
+
+	// WorkDir must be cleaned up
+	if _, statErr := os.Stat(workDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected WorkDir to be cleaned up after cancellation")
+	}
+}
+
+func TestDispatch_PreflightStartPersistenceFailureKeepsQueue(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, _, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "preflight-start-fail",
+		Source:         "https://example.com/huge.iso",
+		Name:           "Huge Iso",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     10 * 1024 * 1024 * 1024 * 1024, // 10 TB requirement (fails preflight)
+		DestinationDir: t.TempDir(),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionStart}
+	queueRepo.entries[j.ID] = &QueueEntry{JobID: j.ID, Action: QueueActionStart}
+
+	// Inject DB persistence error
+	jobRepo.updateErr = errors.New("simulated DB update failure")
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	err := mgr.DispatchQueuedJob(ctx, qj)
+	if err == nil {
+		t.Fatalf("expected dispatch to fail, got nil")
+	}
+
+	// Queue entry MUST remain
+	if _, exists := queueRepo.entries[j.ID]; !exists {
+		t.Errorf("queue row was deleted when DB persistence failed!")
+	}
+
+	// EventJobFailed MUST NOT be published
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobFailed {
+			t.Errorf("EventJobFailed was published when DB persistence failed!")
+		}
+	default:
+	}
+}
+
+func TestDispatch_PreflightResumePersistenceFailureKeepsResumeRow(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, _, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "preflight-resume-fail",
+		Source:         "https://example.com/huge.iso",
+		Name:           "Huge Iso Resume",
+		Status:         StatusPaused,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     10 * 1024 * 1024 * 1024 * 1024, // 10 TB
+		DestinationDir: t.TempDir(),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionResume}
+	queueRepo.entries[j.ID] = &QueueEntry{JobID: j.ID, Action: QueueActionResume}
+
+	// Inject DB persistence error
+	jobRepo.updateErr = errors.New("simulated DB update failure")
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	err := mgr.DispatchQueuedJob(ctx, qj)
+	if err == nil {
+		t.Fatalf("expected dispatch to fail, got nil")
+	}
+
+	// QueueActionResume row MUST remain
+	if entry, exists := queueRepo.entries[j.ID]; !exists || entry.Action != QueueActionResume {
+		t.Errorf("QueueActionResume row was removed or modified!")
+	}
+
+	// No false PAUSED event published
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobUpdated {
+			t.Errorf("EventJobUpdated was published when DB persistence failed!")
+		}
+	default:
+	}
+}
+
+func TestDispatch_PrepareWorkDirStartPersistenceFailure(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	// Make workDir path invalid to force PrepareWorkDir failure
+	workDir := filepath.Join(dataDir, "invalid_path_fail\x00")
+
+	j := &Job{
+		ID:             "prepare-start-fail",
+		Source:         "https://youtube.com/watch?v=000",
+		Name:           "Prepare Fail",
+		Status:         StatusQueued,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionStart}
+	queueRepo.entries[j.ID] = &QueueEntry{JobID: j.ID, Action: QueueActionStart}
+
+	// Inject DB update error
+	jobRepo.updateErr = errors.New("simulated DB update failure")
+
+	err := mgr.DispatchQueuedJob(ctx, qj)
+	if err == nil {
+		t.Fatalf("expected PrepareWorkDir dispatch to fail, got nil")
+	}
+
+	// Queue row MUST remain when persistence fails
+	if _, exists := queueRepo.entries[j.ID]; !exists {
+		t.Errorf("queue row was deleted when DB persistence failed!")
+	}
+}
+
+func TestDispatch_PrepareWorkDirResumePersistenceFailure(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, dataDir := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(dataDir, "invalid_path_fail\x00")
+
+	j := &Job{
+		ID:             "prepare-resume-fail",
+		Source:         "https://youtube.com/watch?v=000",
+		Name:           "Prepare Resume Fail",
+		Status:         StatusPaused,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionResume}
+	queueRepo.entries[j.ID] = &QueueEntry{JobID: j.ID, Action: QueueActionResume}
+
+	// Inject DB update error
+	jobRepo.updateErr = errors.New("simulated DB update failure")
+
+	err := mgr.DispatchQueuedJob(ctx, qj)
+	if err == nil {
+		t.Fatalf("expected PrepareWorkDir dispatch to fail, got nil")
+	}
+
+	// QueueActionResume row MUST remain
+	if entry, exists := queueRepo.entries[j.ID]; !exists || entry.Action != QueueActionResume {
+		t.Errorf("QueueActionResume row was removed or modified!")
+	}
+}
+
+func TestMediaCompletion_PersistenceFailureRetriesTerminalState(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_completion_retry")
+	storageSvc.PrepareWorkDir(ctx, "job-comp-retry", workDir)
+	srcFile := filepath.Join(workDir, "video.mp4")
+	os.WriteFile(srcFile, []byte("video content"), 0644)
+
+	j := &Job{
+		ID:             "job-comp-retry",
+		Source:         "https://youtube.com/watch?v=comp1",
+		Name:           "Video",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp-comp1",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	status := &EngineStatus{
+		Status:     StatusCompleted,
+		Progress:   100,
+		OutputPath: srcFile,
+	}
+
+	// First attempt: DB persistence fails
+	jobRepo.updateErr = errors.New("temporary DB write error")
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
+
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted during persistence failure!")
+		}
+	default:
+	}
+
+	if _, statErr := os.Stat(workDir); os.IsNotExist(statErr) {
+		t.Errorf("WorkDir deleted during persistence failure!")
+	}
+
+	// Second attempt: DB persistence succeeds
+	jobRepo.updateErr = nil
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
+
+	var ev Event
+	select {
+	case ev = <-ch:
+	default:
+	}
+
+	if ev.Type != EventJobCompleted {
+		t.Errorf("expected EventJobCompleted on retried persistence success, got %s", ev.Type)
+	}
+
+	// WorkDir should be cleaned up after successful completion persistence
+	if _, statErr := os.Stat(workDir); !os.IsNotExist(statErr) {
+		t.Errorf("WorkDir survived after successful completion persistence!")
+	}
+}
+
+func TestMediaFailure_PersistenceFailureRetriesTerminalState(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_fail_retry")
+	storageSvc.PrepareWorkDir(ctx, "job-fail-retry", workDir)
+
+	j := &Job{
+		ID:             "job-fail-retry",
+		Source:         "https://youtube.com/watch?v=fail1",
+		Name:           "Video Fail",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	status := &EngineStatus{Status: StatusFailed, Error: "download error"}
+
+	// First attempt: DB update fails
+	jobRepo.updateErr = errors.New("temp error")
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
+
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobFailed {
+			t.Errorf("EventJobFailed emitted during persistence failure!")
+		}
+	default:
+	}
+
+	// Second attempt: DB update succeeds
+	jobRepo.updateErr = nil
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
+
+	var ev Event
+	select {
+	case ev = <-ch:
+	default:
+	}
+
+	if ev.Type != EventJobFailed {
+		t.Errorf("expected EventJobFailed on retried persistence success, got %s", ev.Type)
+	}
+}
+
+func TestMediaCancelled_PersistenceFailureRetriesTerminalState(t *testing.T) {
+	mgr, jobRepo, _, storageSvc, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	workDir := filepath.Join(t.TempDir(), "workdir_cancel_retry")
+	storageSvc.PrepareWorkDir(ctx, "job-cancel-retry", workDir)
+
+	j := &Job{
+		ID:             "job-cancel-retry",
+		Source:         "https://youtube.com/watch?v=canc1",
+		Name:           "Video Cancel",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		WorkDir:        workDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	status := &EngineStatus{Status: StatusCancelled}
+
+	// First attempt: DB update fails
+	jobRepo.updateErr = errors.New("temp error")
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
+
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobCancelled {
+			t.Errorf("EventJobCancelled emitted during persistence failure!")
+		}
+	default:
+	}
+
+	// Second attempt: DB update succeeds
+	jobRepo.updateErr = nil
+	mgr.UpdateJobFromEngine(ctx, j, status, true)
+
+	var ev Event
+	select {
+	case ev = <-ch:
+	default:
+	}
+
+	if ev.Type != EventJobCancelled {
+		t.Errorf("expected EventJobCancelled on retried persistence success, got %s", ev.Type)
+	}
+}
+
+func TestMonitor_StatusFailurePersistenceFailureDoesNotPublish(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job-mon-fail-pers",
+		Source:         "https://youtube.com/watch?v=mon1",
+		Name:           "Monitor Fail",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	mon := NewMonitor(mgr, 1*time.Second)
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Inject DB persistence error
+	jobRepo.updateErr = errors.New("simulated DB update error")
+
+	// Max out consecutive failures
+	for i := 0; i < maxConsecutiveFailures; i++ {
+		mon.recordFailure(ctx, j, "Engine lost connection")
+	}
+
+	// EventJobFailed MUST NOT be published when DB persistence fails
+	select {
+	case ev := <-ch:
+		if ev.Type == EventJobFailed {
+			t.Errorf("EventJobFailed emitted when DB update failed in Monitor!")
+		}
+	default:
 	}
 }

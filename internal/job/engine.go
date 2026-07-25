@@ -48,6 +48,11 @@ type IMediaAnalyzer interface {
 	Analyze(ctx context.Context, url string) (*MediaInfo, error)
 }
 
+// ICleanupableEngine is optionally implemented by engines that maintain in-memory tracking state after terminal status.
+type ICleanupableEngine interface {
+	Cleanup(jobID string)
+}
+
 // IEngineRegistry manages available download engines and URL routing.
 type IEngineRegistry interface {
 	// Get returns the engine registered under the given name.

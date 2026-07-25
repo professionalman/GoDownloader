@@ -279,7 +279,7 @@ func (s *StorageService) CleanupWorkDir(ctx context.Context, jobID, workDir stri
 		return fmt.Errorf("refusing workdir cleanup for job %s: %w", jobID, err)
 	}
 
-	return os.RemoveAll(workDir)
+	return removeAllFunc(workDir)
 }
 
 // CleanupStaleWorkDirs removes orphaned work directories in tempDir whose job is inactive or absent.

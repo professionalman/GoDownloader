@@ -1331,18 +1331,31 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 
 	m.triggerCancel(id)
 
-	if m.queueRepo != nil {
-		m.queueRepo.Delete(ctx, id)
-	}
-
 	j.Status = StatusCancelled
 	j.SpeedBytesPerSecond = 0
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
 
-	m.repo.Update(ctx, j)
+	// Persist CANCELLED status FIRST before deleting queue entry or publishing event
+	if err := m.repo.Update(ctx, j); err != nil {
+		log.Printf("Cancel: external cancellation succeeded for job %s but CANCELLED state persistence failed: %v", id, err)
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist cancel state: %v", err)}
+	}
+
+	if m.queueRepo != nil {
+		if delErr := m.queueRepo.Delete(ctx, id); delErr != nil {
+			log.Printf("Cancel: queue delete failed for job %s: %v", id, delErr)
+		}
+	}
+
 	m.removeActive(id)
 	m.publish(EventJobCancelled, j)
+
+	if eng, ok := m.engines.Get(j.Engine); ok {
+		if cleanupEng, ok := eng.(ICleanupableEngine); ok {
+			cleanupEng.Cleanup(j.ID)
+		}
+	}
 
 	if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
 		if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
@@ -2134,6 +2147,37 @@ func (m *Manager) GetScheduler() *Scheduler {
 	return m.scheduler
 }
 
+func (m *Manager) persistDispatchFailure(ctx context.Context, j *Job, qj *QueuedJob, targetStatus JobStatus, dispatchErr error) error {
+	j.Status = targetStatus
+	j.Error = dispatchErr.Error()
+	j.SpeedBytesPerSecond = 0
+	j.ETASeconds = 0
+	j.UpdatedAt = time.Now()
+
+	if err := m.repo.Update(ctx, j); err != nil {
+		log.Printf("persistDispatchFailure: failed to persist %s for job %s: %v", targetStatus, j.ID, err)
+		return &DispatchPersistenceError{
+			JobID:  j.ID,
+			Action: qj.Action,
+			Err:    err,
+		}
+	}
+
+	if qj.Action == QueueActionStart {
+		if m.queueRepo != nil {
+			if delErr := m.queueRepo.Delete(ctx, j.ID); delErr != nil {
+				log.Printf("persistDispatchFailure: delete queue entry for %s failed: %v", j.ID, delErr)
+			}
+		}
+		m.publish(EventJobFailed, j)
+	} else {
+		// QueueActionResume: retain QueueActionResume row, publish update
+		m.publish(EventJobUpdated, j)
+	}
+
+	return dispatchErr
+}
+
 // DispatchQueuedJob dispatches a queued job to its target engine.
 func (m *Manager) DispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	return m.dispatchQueuedJob(ctx, qj)
@@ -2165,47 +2209,21 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	if m.storageService != nil {
 		if preflightErr := m.storageService.Preflight(ctx, targetDir, j.WorkDir, j.TotalBytes, j.CompletedBytes); preflightErr != nil {
 			log.Printf("dispatchQueuedJob: storage preflight failed for job %s (action=%s): %v", j.ID, qj.Action, preflightErr)
+			targetStatus := StatusPaused
 			if qj.Action == QueueActionStart {
-				j.Status = StatusFailed
-				j.Error = preflightErr.Error()
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				if m.queueRepo != nil {
-					m.queueRepo.Delete(ctx, j.ID)
-				}
-				m.publish(EventJobFailed, j)
-			} else {
-				// QueueActionResume: revert to PAUSED, keep queue entry with QueueActionResume
-				j.Status = StatusPaused
-				j.Error = preflightErr.Error()
-				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
-				m.publish(EventJobUpdated, j)
+				targetStatus = StatusFailed
 			}
-			return preflightErr
+			return m.persistDispatchFailure(ctx, j, qj, targetStatus, preflightErr)
 		}
 
 		if j.WorkDir != "" {
 			if prepareErr := m.storageService.PrepareWorkDir(ctx, j.ID, j.WorkDir); prepareErr != nil {
 				log.Printf("dispatchQueuedJob: prepare workdir failed for job %s (action=%s): %v", j.ID, qj.Action, prepareErr)
+				targetStatus := StatusPaused
 				if qj.Action == QueueActionStart {
-					j.Status = StatusFailed
-					j.Error = fmt.Sprintf("failed to prepare work directory: %v", prepareErr)
-					j.UpdatedAt = time.Now()
-					m.repo.Update(ctx, j)
-					if m.queueRepo != nil {
-						m.queueRepo.Delete(ctx, j.ID)
-					}
-					m.publish(EventJobFailed, j)
-				} else {
-					// QueueActionResume: revert to PAUSED, keep queue entry with QueueActionResume
-					j.Status = StatusPaused
-					j.Error = fmt.Sprintf("failed to prepare work directory: %v", prepareErr)
-					j.UpdatedAt = time.Now()
-					m.repo.Update(ctx, j)
-					m.publish(EventJobUpdated, j)
+					targetStatus = StatusFailed
 				}
-				return prepareErr
+				return m.persistDispatchFailure(ctx, j, qj, targetStatus, prepareErr)
 			}
 		}
 	}

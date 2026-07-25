@@ -18,6 +18,36 @@ var (
 
 const WorkDirMarkerFilename = ".godownloader-workdir"
 
+type WorkDirMarkerState int
+
+const (
+	MarkerMissing WorkDirMarkerState = iota
+	MarkerMatches
+	MarkerMismatch
+)
+
+// InspectWorkDirMarker inspects the status of the .godownloader-workdir marker in workDir.
+func InspectWorkDirMarker(workDir, jobID string) (WorkDirMarkerState, string, error) {
+	if workDir == "" {
+		return MarkerMissing, "", fmt.Errorf("work directory path is empty")
+	}
+
+	markerPath := filepath.Join(workDir, WorkDirMarkerFilename)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MarkerMissing, "", nil
+		}
+		return MarkerMissing, "", err
+	}
+
+	content := strings.TrimSpace(string(data))
+	if content == jobID {
+		return MarkerMatches, content, nil
+	}
+	return MarkerMismatch, content, nil
+}
+
 // WriteWorkDirMarker creates or validates the .godownloader-workdir marker inside workDir safely.
 func WriteWorkDirMarker(workDir, jobID string) error {
 	if workDir == "" {
@@ -34,24 +64,26 @@ func WriteWorkDirMarker(workDir, jobID string) error {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("%w: workdir path %s is not a directory", ErrStorageError, workDir)
 	} else {
-		// WorkDir exists. Check marker or directory contents.
-		markerErr := ValidateWorkDirMarker(workDir, jobID)
-		if markerErr == nil {
+		// WorkDir exists. Inspect marker explicitly.
+		state, existingJobID, err := InspectWorkDirMarker(workDir, jobID)
+		if err != nil {
+			return fmt.Errorf("%w: read workdir marker %s: %v", ErrStorageError, workDir, err)
+		}
+
+		switch state {
+		case MarkerMatches:
 			// Marker matches jobID, okay!
-		} else {
-			// Marker missing or mismatched. Check if directory contains non-marker files.
+		case MarkerMismatch:
+			// Marker exists but belongs to a different job! NEVER overwrite foreign markers!
+			return fmt.Errorf("%w: workdir %s is owned by another job (expected %s, got %s)", ErrStorageError, workDir, jobID, existingJobID)
+		case MarkerMissing:
+			// Marker missing. Check if directory contains any files.
 			entries, readErr := os.ReadDir(workDir)
 			if readErr != nil {
 				return fmt.Errorf("%w: read workdir %s: %v", ErrStorageError, workDir, readErr)
 			}
-			nonMarkerCount := 0
-			for _, entry := range entries {
-				if entry.Name() != WorkDirMarkerFilename {
-					nonMarkerCount++
-				}
-			}
-			if nonMarkerCount > 0 {
-				return fmt.Errorf("%w: workdir %s already exists with existing unowned files: %v", ErrStorageError, workDir, markerErr)
+			if len(entries) > 0 {
+				return fmt.Errorf("%w: workdir %s exists and contains unowned files", ErrStorageError, workDir)
 			}
 		}
 	}
@@ -190,13 +222,15 @@ func MoveOrCopyFile(src, dst string) error {
 	}
 
 	// 4. Rename temp file to final destination
-	if err := renameFunc(tempPath, dst); err != nil {
+	if replaceErr := renameFunc(tempPath, dst); replaceErr != nil {
 		// Replacement failed! Rollback backup if present
 		os.Remove(tempPath)
 		if hasBackup {
-			_ = renameFunc(backupPath, dst)
+			if restoreErr := renameFunc(backupPath, dst); restoreErr != nil {
+				return fmt.Errorf("replacement failed (%v) and backup restoration failed (%v); original target data preserved at %s", replaceErr, restoreErr, backupPath)
+			}
 		}
-		return fmt.Errorf("rename temp file to dst: %w", err)
+		return fmt.Errorf("rename temp file to dst: %w", replaceErr)
 	}
 
 	// 5. Success! Clean up backup and remove source file

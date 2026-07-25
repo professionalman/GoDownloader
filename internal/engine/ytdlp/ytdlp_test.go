@@ -67,48 +67,54 @@ func TestDownloadState_CancelledStatus(t *testing.T) {
 	}
 }
 
-func TestEngine_StatusCleanupAndShutdown(t *testing.T) {
+func TestYTDLP_TerminalStatusRemainsUntilExplicitCleanup(t *testing.T) {
+	eng := NewEngine("ytdlp", "ffmpeg")
+
+	state := &downloadState{
+		done:     true,
+		progress: progressInfo{Percent: 100, TotalBytes: 5000},
+	}
+	eng.downloads["job-idempotent-test"] = state
+
+	j := &job.Job{ID: "job-idempotent-test"}
+
+	// 1. First status read returns COMPLETED
+	s1, err := eng.Status(context.Background(), j)
+	if err != nil || s1.Status != job.StatusCompleted {
+		t.Fatalf("first status read failed or returned wrong status: %v, status=%v", err, s1)
+	}
+
+	// 2. Second status read MUST still return COMPLETED (idempotent status)
+	s2, err := eng.Status(context.Background(), j)
+	if err != nil || s2.Status != job.StatusCompleted {
+		t.Fatalf("second status read failed; status must be idempotent: %v, status=%v", err, s2)
+	}
+
+	// 3. Explicit cleanup removes tracking
+	eng.Cleanup("job-idempotent-test")
+
+	// 4. Status read after explicit cleanup fails
+	_, err = eng.Status(context.Background(), j)
+	if err == nil {
+		t.Error("expected Status to fail after explicit Cleanup()")
+	}
+}
+
+func TestEngine_ShutdownCancelsActiveJobs(t *testing.T) {
 	eng := NewEngine("ytdlp", "ffmpeg")
 
 	var cancelled bool
 	state := &downloadState{
-		done: true,
-		cancel: func() {
-			cancelled = true
-		},
-		progress: progressInfo{Percent: 100, TotalBytes: 5000},
-	}
-	eng.downloads["job-clean-test"] = state
-
-	j := &job.Job{ID: "job-clean-test"}
-
-	// 1. Final status is observable
-	status, err := eng.Status(context.Background(), j)
-	if err != nil {
-		t.Fatalf("expected Status to succeed, got %v", err)
-	}
-	if status.Status != job.StatusCompleted {
-		t.Errorf("expected StatusCompleted, got %s", status.Status)
-	}
-
-	// 2. Next status read confirms download state was cleaned up
-	_, err = eng.Status(context.Background(), j)
-	if err == nil {
-		t.Error("expected Status to fail after completed state was cleaned up")
-	}
-
-	// 3. Test Shutdown() cancels remaining active process contexts
-	stateActive := &downloadState{
 		done: false,
 		cancel: func() {
 			cancelled = true
 		},
 	}
-	eng.downloads["job-shutdown-test"] = stateActive
+	eng.downloads["job-shutdown-test"] = state
 
 	eng.Shutdown()
 	if !cancelled {
-		t.Error("expected active download context to be cancelled on Shutdown")
+		t.Error("expected active download cancel function to be called on Shutdown()")
 	}
 	if len(eng.downloads) != 0 {
 		t.Errorf("expected downloads map to be empty after Shutdown, got len %d", len(eng.downloads))

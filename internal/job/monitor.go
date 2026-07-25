@@ -116,7 +116,10 @@ func (m *Monitor) recordFailure(ctx context.Context, j *Job, errMsg string) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.manager.repo.Update(ctx, j)
+		if err := m.manager.repo.Update(ctx, j); err != nil {
+			log.Printf("monitor: failed to persist FAILED status for job %s: %v", j.ID, err)
+			return
+		}
 		m.manager.removeActive(j.ID)
 		m.manager.publish(EventJobFailed, j)
 		m.CleanupJob(j.ID)

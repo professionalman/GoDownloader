@@ -143,7 +143,6 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 	}
 
 	if state.done {
-		defer e.Cleanup(j.ID)
 		if state.cancelled {
 			return &job.EngineStatus{
 				Status:     job.StatusCancelled,

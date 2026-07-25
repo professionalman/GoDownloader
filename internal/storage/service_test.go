@@ -590,3 +590,80 @@ func TestCategoryDelete_PreservesDestinationSnapshot(t *testing.T) {
 	// Re-verify DestinationDir preservation on job after category deletion
 	TestCategoryDelete_ClearsJobReference(t)
 }
+
+func TestPrepareWorkDir_WrongMarkerCannotBeTakenOver(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	workDir := filepath.Join(tmpDir, "workdir_owned_by_A")
+	if err := storage.WriteWorkDirMarker(workDir, "job-A"); err != nil {
+		t.Fatalf("failed to write initial marker: %v", err)
+	}
+
+	// Attempt to prepare workdir for job-B
+	err := svc.PrepareWorkDir(ctx, "job-B", workDir)
+	if err == nil {
+		t.Fatalf("expected PrepareWorkDir to fail when marker belongs to another job, got nil")
+	}
+
+	if !errors.Is(err, storage.ErrStorageError) && !strings.Contains(err.Error(), "owned by another job") {
+		t.Errorf("expected error indicating ownership conflict, got %v", err)
+	}
+
+	// Verify marker still contains job-A
+	data, readErr := os.ReadFile(filepath.Join(workDir, storage.WorkDirMarkerFilename))
+	if readErr != nil || strings.TrimSpace(string(data)) != "job-A" {
+		t.Errorf("marker was altered or deleted! got content %q (err=%v)", string(data), readErr)
+	}
+}
+
+func TestFinalizeOverwrite_BackupRestoreFailurePreservesBackup(t *testing.T) {
+	srcDir := t.TempDir()
+	destDir := t.TempDir()
+
+	targetFile := filepath.Join(destDir, "test_backup_fail.txt")
+	os.WriteFile(targetFile, []byte("original target data"), 0644)
+
+	srcFile := filepath.Join(srcDir, "test_backup_fail.txt")
+	os.WriteFile(srcFile, []byte("new replacement data"), 0644)
+
+	// Inject renameFunc failure on BOTH temp -> dst AND backup -> dst
+	var backupPath string
+	reset := storage.SetRenameFuncForTest(func(oldPath, newPath string) error {
+		if strings.Contains(oldPath, ".tmp-") {
+			return errors.New("simulated temp rename failure")
+		}
+		if strings.Contains(oldPath, ".bak-") {
+			backupPath = oldPath
+			return errors.New("simulated backup restore failure")
+		}
+		return os.Rename(oldPath, newPath)
+	})
+	defer reset()
+
+	err := storage.MoveOrCopyFile(srcFile, targetFile)
+	if err == nil {
+		t.Fatalf("expected error when replacement and backup restore fail, got nil")
+	}
+
+	// 1. Error message must identify backup path
+	if !strings.Contains(err.Error(), "original target data preserved at") || !strings.Contains(err.Error(), backupPath) {
+		t.Errorf("error message does not identify backup path! got %v", err)
+	}
+
+	// 2. Backup file MUST still exist with original content
+	backupData, readErr := os.ReadFile(backupPath)
+	if readErr != nil || string(backupData) != "original target data" {
+		t.Errorf("backup file was lost or corrupted on restore failure! got %q (err=%v)", string(backupData), readErr)
+	}
+
+	// 3. Source file MUST be preserved
+	srcData, srcErr := os.ReadFile(srcFile)
+	if srcErr != nil || string(srcData) != "new replacement data" {
+		t.Errorf("source file was lost! got %q (err=%v)", string(srcData), srcErr)
+	}
+}
