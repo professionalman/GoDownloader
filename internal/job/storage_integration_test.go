@@ -1141,3 +1141,458 @@ func TestMonitor_StatusFailurePersistenceFailureDoesNotPublish(t *testing.T) {
 	default:
 	}
 }
+
+type fakeCleanupEngine struct {
+	fakeEngine
+	cleaned   map[string]bool
+	statusMap map[string]*EngineStatus
+}
+
+func (f *fakeCleanupEngine) Cleanup(jobID string) {
+	if f.cleaned == nil {
+		f.cleaned = make(map[string]bool)
+	}
+	f.cleaned[jobID] = true
+	if f.statusMap != nil {
+		delete(f.statusMap, jobID)
+	}
+}
+
+func (f *fakeCleanupEngine) Status(ctx context.Context, j *Job) (*EngineStatus, error) {
+	if f.statusMap != nil {
+		if st, ok := f.statusMap[j.ID]; ok {
+			return st, nil
+		}
+	}
+	return &EngineStatus{Status: StatusQueued}, nil
+}
+
+func TestScheduler_Dispatch_StartPreflightSuccess_HandledOnce(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	// Job A will fail preflight (huge total bytes > disk)
+	jA := &Job{
+		ID:             "job-sched-pf-start-a",
+		Source:         "https://example.com/fileA.zip",
+		Name:           "Job A",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     10 * 1024 * 1024 * 1024 * 1024 * 1024, // 10 PB (exceeds disk)
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, jA)
+
+	// Job B is normal
+	jB := &Job{
+		ID:             "job-sched-pf-start-b",
+		Source:         "https://example.com/fileB.zip",
+		Name:           "Job B",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     1024,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, jB)
+
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: jA.ID, Action: QueueActionStart})
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: jB.ID, Action: QueueActionStart})
+
+	startCalled := false
+	eng := &fakeEngine{
+		startFunc: func(ctx context.Context, j *Job, dir string) (string, error) {
+			startCalled = true
+			return "gid_b", nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = eng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(bus)
+	mgr.scheduler = sched
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	// Wait for processing
+	time.Sleep(300 * time.Millisecond)
+
+	// Assert Job A: FAILED, queue entry removed, EventJobFailed emitted
+	updatedA, _ := jobRepo.GetByID(ctx, jA.ID)
+	if updatedA.Status != StatusFailed {
+		t.Errorf("expected Job A status FAILED, got %s", updatedA.Status)
+	}
+
+	qA, _ := queueRepo.Get(ctx, jA.ID)
+	if qA != nil {
+		t.Errorf("expected queue entry for Job A to be deleted")
+	}
+
+	// Count failed events for A
+	failEventCount := 0
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Job.ID == jA.ID && ev.Type == EventJobFailed {
+			failEventCount++
+		}
+	}
+	if failEventCount != 1 {
+		t.Errorf("expected EventJobFailed exactly once for Job A, got %d", failEventCount)
+	}
+
+	// Job B should have been dispatched cleanly after A's reservation was released
+	updatedB, _ := jobRepo.GetByID(ctx, jB.ID)
+	if updatedB.Status != StatusDownloading {
+		t.Errorf("expected Job B to dispatch and reach DOWNLOADING, got %s", updatedB.Status)
+	}
+
+	_ = startCalled
+}
+
+func TestScheduler_Dispatch_ResumePreflightSuccess_HandledOnce(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job-sched-pf-resume",
+		Source:         "https://example.com/fileResume.zip",
+		Name:           "Job Resume",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     10 * 1024 * 1024 * 1024 * 1024 * 1024, // 10 PB
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: j.ID, Action: QueueActionResume})
+
+	resumeCalled := false
+	eng := &fakeEngine{
+		resumeFunc: func(ctx context.Context, j *Job) error {
+			resumeCalled = true
+			return nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = eng
+
+	bus := mgr.bus.(*fakeEventBus)
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(bus)
+	mgr.scheduler = sched
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	time.Sleep(200 * time.Millisecond)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusPaused {
+		t.Errorf("expected Job status PAUSED on resume preflight failure, got %s", updated.Status)
+	}
+
+	// QueueActionResume row MUST be retained
+	qItem, _ := queueRepo.Get(ctx, j.ID)
+	if qItem == nil || qItem.Action != QueueActionResume {
+		t.Errorf("expected QueueActionResume entry to be retained")
+	}
+
+	if resumeCalled {
+		t.Errorf("eng.Resume MUST NOT be called when preflight fails")
+	}
+}
+
+func TestScheduler_Dispatch_StartPreflightPersistenceFailure_StatePersistence(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	jA := &Job{
+		ID:             "job-pf-pers-fail-a",
+		Source:         "https://example.com/filePF.zip",
+		Name:           "Job A PF Fail",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     10 * 1024 * 1024 * 1024 * 1024 * 1024, // 10 PB
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, jA)
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: jA.ID, Action: QueueActionStart})
+
+	eng := &fakeEngine{}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = eng
+
+	bus := mgr.bus.(*fakeEventBus)
+
+	// Inject DB persistence error
+	jobRepo.updateErr = errors.New("simulated DB update error")
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(bus)
+	mgr.scheduler = sched
+
+	qj := &QueuedJob{JobID: jA.ID, Action: QueueActionStart}
+	sched.reserveInFlight(jA.ID, QueueActionStart)
+	sched.dispatchSingle(qj)
+
+	// Reservation must be StatePersistence (NOT ExternalExecution)
+	sched.mu.Lock()
+	res, ok := sched.inFlight[jA.ID]
+	if !ok {
+		t.Fatalf("expected dirty reservation for %s", jA.ID)
+	}
+	if res.Kind != ReconciliationStatePersistence {
+		t.Errorf("expected ReconciliationStatePersistence, got %v", res.Kind)
+	}
+	sched.mu.Unlock()
+
+	// Recover DB
+	jobRepo.updateErr = nil
+
+	// Reconcile
+	sched.reconcileJob(ctx, jA.ID)
+
+	// After DB recovery, FAILED state is persisted and reservation released
+	updatedA, _ := jobRepo.GetByID(ctx, jA.ID)
+	if updatedA.Status != StatusFailed {
+		t.Errorf("expected status FAILED after reconciliation, got %s", updatedA.Status)
+	}
+
+	qA, _ := queueRepo.Get(ctx, jA.ID)
+	if qA != nil {
+		t.Errorf("expected queue entry to be deleted after successful state reconciliation")
+	}
+}
+
+func TestScheduler_Dispatch_ResumePreflightPersistenceFailure_StatePersistence(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job-pf-resume-pers-fail",
+		Source:         "https://example.com/fileResumePF.zip",
+		Name:           "Job Resume PF Fail",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     10 * 1024 * 1024 * 1024 * 1024 * 1024,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: j.ID, Action: QueueActionResume})
+
+	eng := &fakeEngine{}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = eng
+
+	bus := mgr.bus.(*fakeEventBus)
+
+	jobRepo.updateErr = errors.New("simulated DB update error")
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(bus)
+	mgr.scheduler = sched
+
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionResume}
+	sched.reserveInFlight(j.ID, QueueActionResume)
+	sched.dispatchSingle(qj)
+
+	sched.mu.Lock()
+	res, ok := sched.inFlight[j.ID]
+	if !ok || res.Kind != ReconciliationStatePersistence {
+		t.Fatalf("expected ReconciliationStatePersistence reservation, got %v", res.Kind)
+	}
+	sched.mu.Unlock()
+
+	jobRepo.updateErr = nil
+	sched.reconcileJob(ctx, j.ID)
+
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusPaused {
+		t.Errorf("expected status PAUSED after reconciliation, got %s", updated.Status)
+	}
+
+	qItem, _ := queueRepo.Get(ctx, j.ID)
+	if qItem == nil || qItem.Action != QueueActionResume {
+		t.Errorf("expected QueueActionResume entry to remain")
+	}
+}
+
+func TestMediaCompletion_SuccessCleansTerminalEngineState(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job-comp-cleanup",
+		Source:         "https://youtube.com/watch?v=clean1",
+		Name:           "Test Cleanup",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Update job from engine -> COMPLETED
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	// Assert event emitted
+	select {
+	case ev := <-ch:
+		if ev.Type != EventJobCompleted {
+			t.Errorf("expected EventJobCompleted, got %s", ev.Type)
+		}
+	default:
+		t.Errorf("expected EventJobCompleted event")
+	}
+
+	// Assert cleanup called
+	if !cleanEng.cleaned[j.ID] {
+		t.Errorf("expected ICleanupableEngine.Cleanup to be called for job %s", j.ID)
+	}
+}
+
+func TestMediaCompletion_PersistenceFailurePreservesTerminalEngineState(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job-comp-pers-fail",
+		Source:         "https://youtube.com/watch?v=clean2",
+		Name:           "Test Cleanup Pers Fail",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	// Inject DB persistence failure
+	jobRepo.updateErr = errors.New("simulated DB error")
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	// Event MUST NOT be emitted
+	select {
+	case ev := <-ch:
+		t.Errorf("unexpected event %s emitted on persistence failure", ev.Type)
+	default:
+	}
+
+	// Engine MUST NOT be cleaned up
+	if cleanEng.cleaned[j.ID] {
+		t.Errorf("ICleanupableEngine.Cleanup MUST NOT be called when DB persistence fails")
+	}
+
+	// Recover DB
+	jobRepo.updateErr = nil
+
+	// Second attempt succeeds
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	if !cleanEng.cleaned[j.ID] {
+		t.Errorf("ICleanupableEngine.Cleanup expected after DB recovery and persistence success")
+	}
+}
+
+func TestScheduler_ReconciliationCOMPLETED_CleansTerminalEngineState(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "reconcile_completed_cleanup",
+		Source:         "https://example.com/fileDone.zip",
+		Name:           "Reconcile Done Cleanup",
+		Status:         StatusDownloading,
+		Engine:         "ytdlp",
+		EngineID:       "ytdlp_gid_done",
+		Type:           TypeMedia,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: j.ID, Action: QueueActionStart})
+
+	cleanEng := &fakeCleanupEngine{
+		statusMap: map[string]*EngineStatus{
+			j.ID: {Status: StatusCompleted, Progress: 100},
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["ytdlp"] = cleanEng
+
+	bus := mgr.bus.(*fakeEventBus)
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(bus)
+	mgr.scheduler = sched
+
+	// Simulate dirty external reservation
+	sched.markReservationDirtyExternal(j.ID, QueueActionStart, j.EngineID)
+
+	// Reconcile
+	sched.reconcileJob(ctx, j.ID)
+
+	// Assert status COMPLETED and engine cleaned
+	updated, _ := jobRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted after reconciliation, got %s", updated.Status)
+	}
+
+	if !cleanEng.cleaned[j.ID] {
+		t.Errorf("expected ICleanupableEngine.Cleanup to be called during external reconciliation of COMPLETED status")
+	}
+}

@@ -439,6 +439,13 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 		if s.bus != nil {
 			s.bus.Publish(Event{Type: EventJobCompleted, Job: *current})
 		}
+		if s.engines != nil {
+			if eng, ok := s.engines.Get(current.Engine); ok && eng != nil {
+				if cleanupEng, ok := eng.(ICleanupableEngine); ok {
+					cleanupEng.Cleanup(current.ID)
+				}
+			}
+		}
 		log.Printf("scheduler: external reconciliation succeeded for job %s, status=COMPLETED", current.ID)
 		s.Kick()
 
@@ -456,7 +463,15 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 	}()
 
 	current, err := s.repo.GetByID(s.ctx, next.JobID)
-	if err != nil || current == nil || current.Status != StatusQueued {
+	if err != nil || current == nil {
+		log.Printf("scheduler: failed to fetch job %s for dispatch: %v", next.JobID, err)
+		if s.queueRepo != nil {
+			s.queueRepo.Delete(s.ctx, next.JobID)
+		}
+		return err
+	}
+
+	if !IsRecoverable(current.Status) && current.Status != StatusQueued {
 		log.Printf("scheduler: job %s is no longer queued (status=%v), skipping", next.JobID, currentStatus(current))
 		if current != nil && (current.Status == StatusCompleted || current.Status == StatusFailed || current.Status == StatusCancelled || current.Status == StatusDownloading || current.Status == StatusProcessing || current.Status == StatusSeeding) {
 			s.queueRepo.Delete(s.ctx, next.JobID)
@@ -472,10 +487,26 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 
 	dispatchErr := s.dispatchFn(s.ctx, next)
 	if dispatchErr != nil {
+		var handledErr *DispatchHandledError
+		if errors.As(dispatchErr, &handledErr) {
+			log.Printf("scheduler: local dispatch failure for job %s already handled by manager: %v", next.JobID, handledErr.Err)
+			// Manager already durably persisted FAILED/PAUSED, updated queue, and published event.
+			// Release reservation and return nil so scheduler continues normally without duplicate processing.
+			return nil
+		}
+
 		var pErr *DispatchPersistenceError
 		if errors.As(dispatchErr, &pErr) || errors.Is(dispatchErr, ErrDispatchPersistenceFailed) {
+			if pErr != nil && pErr.Kind == DispatchFailureStatePersistence {
+				log.Printf("scheduler: state persistence reconciliation required for job %s (%s): %v", next.JobID, pErr.TargetStatus, dispatchErr)
+				releaseReservation = false
+				s.markReservationDirtyState(next.JobID, next.Action, pErr.TargetStatus, pErr.TargetError)
+				s.reconcileJob(s.ctx, next.JobID)
+				return dispatchErr
+			}
+
 			engineID := getEngineIDFromErr(dispatchErr)
-			log.Printf("scheduler: reconciliation required for job %s (engineID=%s): %v", next.JobID, engineID, dispatchErr)
+			log.Printf("scheduler: external execution reconciliation required for job %s (engineID=%s): %v", next.JobID, engineID, dispatchErr)
 
 			releaseReservation = false
 			s.markReservationDirtyExternal(next.JobID, next.Action, engineID)
@@ -499,9 +530,12 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 				releaseReservation = false
 				s.markReservationDirtyState(next.JobID, next.Action, StatusFailed, targetErr)
 				return &DispatchPersistenceError{
-					JobID:  next.JobID,
-					Action: next.Action,
-					Err:    updateErr,
+					JobID:        next.JobID,
+					Action:       next.Action,
+					Kind:         DispatchFailureStatePersistence,
+					TargetStatus: StatusFailed,
+					TargetError:  targetErr,
+					Err:          updateErr,
 				}
 			} else {
 				if delErr := s.queueRepo.Delete(s.ctx, next.JobID); delErr != nil {
@@ -523,9 +557,12 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 				releaseReservation = false
 				s.markReservationDirtyState(next.JobID, next.Action, StatusPaused, targetErr)
 				return &DispatchPersistenceError{
-					JobID:  next.JobID,
-					Action: next.Action,
-					Err:    updateErr,
+					JobID:        next.JobID,
+					Action:       next.Action,
+					Kind:         DispatchFailureStatePersistence,
+					TargetStatus: StatusPaused,
+					TargetError:  targetErr,
+					Err:          updateErr,
 				}
 			} else {
 				if s.bus != nil {

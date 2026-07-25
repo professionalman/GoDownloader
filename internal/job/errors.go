@@ -49,14 +49,42 @@ const (
 // Sentinel errors for scheduler reconciliation
 var (
 	ErrDispatchPersistenceFailed = errors.New("dispatch persistence failed")
+	ErrDispatchFailureHandled    = errors.New("dispatch failure already handled")
 )
 
-// DispatchPersistenceError represents a failure to persist state after an engine operation succeeded.
+type DispatchFailureKind string
+
+const (
+	DispatchFailureExternalExecutionPersistence DispatchFailureKind = "external_execution_persistence"
+	DispatchFailureStatePersistence             DispatchFailureKind = "state_persistence"
+)
+
+// DispatchHandledError indicates that a dispatch failure was already durably persisted to DB and published by Manager.
+type DispatchHandledError struct {
+	Err error
+}
+
+func (e *DispatchHandledError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *DispatchHandledError) Unwrap() error {
+	return e.Err
+}
+
+func (e *DispatchHandledError) Is(target error) bool {
+	return target == ErrDispatchFailureHandled
+}
+
+// DispatchPersistenceError represents a failure to persist state during dispatch.
 type DispatchPersistenceError struct {
-	JobID    string
-	EngineID string
-	Action   QueueAction
-	Err      error
+	JobID        string
+	EngineID     string
+	Action       QueueAction
+	Kind         DispatchFailureKind
+	TargetStatus JobStatus
+	TargetError  string
+	Err          error
 }
 
 func (e *DispatchPersistenceError) Error() string {

@@ -1307,6 +1307,17 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 }
 
 // Cancel cancels a download.
+func (m *Manager) cleanupTerminalEngineState(j *Job) {
+	if j == nil || j.Engine == "" {
+		return
+	}
+	if eng, ok := m.engines.Get(j.Engine); ok && eng != nil {
+		if cleanupEng, ok := eng.(ICleanupableEngine); ok {
+			cleanupEng.Cleanup(j.ID)
+		}
+	}
+}
+
 func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
@@ -1350,12 +1361,7 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 
 	m.removeActive(id)
 	m.publish(EventJobCancelled, j)
-
-	if eng, ok := m.engines.Get(j.Engine); ok {
-		if cleanupEng, ok := eng.(ICleanupableEngine); ok {
-			cleanupEng.Cleanup(j.ID)
-		}
-	}
+	m.cleanupTerminalEngineState(j)
 
 	if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
 		if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
@@ -1751,6 +1757,8 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		}
 		m.removeActive(j.ID)
 		m.publish(EventJobCompleted, j)
+		m.cleanupTerminalEngineState(j)
+
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
 			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
 				log.Printf("UpdateJobFromEngine: cleanup workdir error for completed job %s: %v", j.ID, err)
@@ -1773,6 +1781,8 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		}
 		m.removeActive(j.ID)
 		m.publish(EventJobFailed, j)
+		m.cleanupTerminalEngineState(j)
+
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
 			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
 				log.Printf("UpdateJobFromEngine: cleanup workdir error for failed job %s: %v", j.ID, err)
@@ -1794,6 +1804,8 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		}
 		m.removeActive(j.ID)
 		m.publish(EventJobCancelled, j)
+		m.cleanupTerminalEngineState(j)
+
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
 			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
 				log.Printf("UpdateJobFromEngine: cleanup workdir error for cancelled job %s: %v", j.ID, err)
@@ -2157,9 +2169,12 @@ func (m *Manager) persistDispatchFailure(ctx context.Context, j *Job, qj *Queued
 	if err := m.repo.Update(ctx, j); err != nil {
 		log.Printf("persistDispatchFailure: failed to persist %s for job %s: %v", targetStatus, j.ID, err)
 		return &DispatchPersistenceError{
-			JobID:  j.ID,
-			Action: qj.Action,
-			Err:    err,
+			JobID:        j.ID,
+			Action:       qj.Action,
+			Kind:         DispatchFailureStatePersistence,
+			TargetStatus: targetStatus,
+			TargetError:  dispatchErr.Error(),
+			Err:          err,
 		}
 	}
 
@@ -2175,7 +2190,7 @@ func (m *Manager) persistDispatchFailure(ctx context.Context, j *Job, qj *Queued
 		m.publish(EventJobUpdated, j)
 	}
 
-	return dispatchErr
+	return &DispatchHandledError{Err: dispatchErr}
 }
 
 // DispatchQueuedJob dispatches a queued job to its target engine.
