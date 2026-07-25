@@ -12,12 +12,16 @@ import (
 	"downloader/internal/events"
 	"downloader/internal/job"
 	"downloader/internal/settings"
+	"downloader/internal/storage"
 )
 
 // NewRouter sets up the HTTP router with API routes, SSE, and static file serving.
-func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler, settingsService ...*settings.SettingsService) http.Handler {
+func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler, settingsService *settings.SettingsService, catRepo ...storage.ICategoryRepository) http.Handler {
 	r := mux.NewRouter()
-	h := NewHandler(manager, settingsService...)
+	h := NewHandler(manager, settingsService)
+	if len(catRepo) > 0 {
+		h.SetCategoryRepository(catRepo[0])
+	}
 
 	// API routes
 	api := r.PathPrefix("/api/v1").Subrouter()
@@ -36,6 +40,11 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/jobs/{id}/retry", h.RetryJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/cancel", h.CancelJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/format", h.SelectFormat).Methods("POST")
+
+	api.HandleFunc("/categories", h.GetCategories).Methods("GET")
+	api.HandleFunc("/categories", h.CreateCategory).Methods("POST")
+	api.HandleFunc("/categories/{id}", h.UpdateCategory).Methods("PUT")
+	api.HandleFunc("/categories/{id}", h.DeleteCategory).Methods("DELETE")
 
 	api.HandleFunc("/queue", h.GetQueueSnapshot).Methods("GET")
 	api.HandleFunc("/queue/reorder", h.ReorderQueue).Methods("PUT")

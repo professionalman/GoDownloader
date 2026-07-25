@@ -188,3 +188,24 @@ func parseETAString(s string) int64 {
 
 	return total
 }
+
+// parseOutputPathLine extracts file output path from yt-dlp progress/merger output lines.
+func parseOutputPathLine(line string) string {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "[download] Destination: ") {
+		return strings.TrimSpace(strings.TrimPrefix(line, "[download] Destination: "))
+	}
+	if strings.HasPrefix(line, "[Merger] Merging formats into \"") {
+		s := strings.TrimPrefix(line, "[Merger] Merging formats into \"")
+		return strings.TrimSuffix(s, "\"")
+	}
+	if strings.HasPrefix(line, "[VideoConvertor] Converting video to \"") {
+		s := strings.TrimPrefix(line, "[VideoConvertor] Converting video to \"")
+		return strings.TrimSuffix(s, "\"")
+	}
+	if strings.HasPrefix(line, "[download] ") && strings.HasSuffix(line, " has already been downloaded") {
+		s := strings.TrimPrefix(line, "[download] ")
+		return strings.TrimSuffix(s, " has already been downloaded")
+	}
+	return ""
+}

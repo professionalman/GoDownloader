@@ -13,12 +13,16 @@ import (
 
 	"downloader/internal/job"
 	"downloader/internal/settings"
+	"downloader/internal/storage"
 )
 
 // createJobRequest is the request body for POST /api/v1/jobs.
 type createJobRequest struct {
-	Source   string          `json:"source"`
-	Priority job.JobPriority `json:"priority,omitempty"`
+	Source         string                     `json:"source"`
+	Priority       job.JobPriority            `json:"priority,omitempty"`
+	CategoryID     string                     `json:"categoryId,omitempty"`
+	DestinationDir string                     `json:"destinationDir,omitempty"`
+	ConflictPolicy job.FilenameConflictPolicy `json:"conflictPolicy,omitempty"`
 }
 
 type selectFormatRequest struct {
@@ -37,8 +41,9 @@ type errorBody struct {
 
 // Handler contains HTTP handlers for the download API.
 type Handler struct {
-	manager  *job.Manager
-	settings *settings.SettingsService
+	manager      *job.Manager
+	settings     *settings.SettingsService
+	categoryRepo storage.ICategoryRepository
 }
 
 // NewHandler creates a new API handler.
@@ -68,7 +73,12 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := h.manager.Create(r.Context(), req.Source, req.Priority)
+	j, err := h.manager.CreateWithOptions(r.Context(), req.Source, job.CreateOptions{
+		Priority:       req.Priority,
+		CategoryID:     req.CategoryID,
+		DestinationDir: req.DestinationDir,
+		ConflictPolicy: req.ConflictPolicy,
+	})
 	if err != nil {
 		writeAppError(w, err)
 		return
@@ -308,6 +318,9 @@ func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
 	tmpFile.Close()
 
 	priorityStr := r.FormValue("priority")
+	categoryID := r.FormValue("categoryId")
+	destinationDir := r.FormValue("destinationDir")
+
 	p := job.JobPriorityNormal
 	if priorityStr != "" {
 		p = job.JobPriority(priorityStr)
@@ -318,7 +331,12 @@ func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	j, err := h.manager.CreateTorrentFromFileWithOptions(r.Context(), tmpPath, job.CreateOptions{Priority: p})
+	j, err := h.manager.CreateTorrentFromFileWithOptions(r.Context(), tmpPath, job.CreateOptions{
+		Priority:       p,
+		CategoryID:     categoryID,
+		DestinationDir: destinationDir,
+		ConflictPolicy: job.ConflictPolicyEngineManaged,
+	})
 	if err != nil {
 		os.Remove(tmpPath)
 		writeAppError(w, err)
@@ -462,16 +480,37 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req settings.UpdateQueueSettingsRequest
+	var req settings.UpdateSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
 		return
 	}
 
-	st, err := h.settings.UpdateQueueSettings(r.Context(), req.Queue.MaxConcurrentDownloads)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
-		return
+	var st *settings.AppSettings
+	var err error
+
+	if req.Queue != nil && req.Queue.MaxConcurrentDownloads > 0 {
+		st, err = h.settings.UpdateQueueSettings(r.Context(), req.Queue.MaxConcurrentDownloads)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+			return
+		}
+	}
+
+	if req.Storage != nil {
+		st, err = h.settings.UpdateStorageSettings(r.Context(), &req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+			return
+		}
+	}
+
+	if st == nil {
+		st, err = h.settings.GetSettings(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, job.ErrInternalError, err.Error())
+			return
+		}
 	}
 
 	if m := h.manager; m != nil {

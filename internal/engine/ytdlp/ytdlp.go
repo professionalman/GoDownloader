@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"downloader/internal/job"
@@ -13,13 +14,14 @@ import (
 
 // downloadState tracks an active yt-dlp download process.
 type downloadState struct {
-	cancel    context.CancelFunc
-	progress  progressInfo
-	mu        sync.Mutex
-	done      bool
-	cancelled bool
-	err       string
-	postProc  bool // true when FFmpeg is post-processing
+	cancel     context.CancelFunc
+	progress   progressInfo
+	mu         sync.Mutex
+	done       bool
+	cancelled  bool
+	err        string
+	postProc   bool // true when FFmpeg is post-processing
+	outputPath string
 }
 
 var (
@@ -135,19 +137,28 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	var fileName string
+	if state.outputPath != "" {
+		fileName = filepath.Base(state.outputPath)
+	}
+
 	if state.done {
 		defer e.Cleanup(j.ID)
 		if state.cancelled {
 			return &job.EngineStatus{
-				Status:   job.StatusCancelled,
-				Progress: state.progress.Percent,
+				Status:     job.StatusCancelled,
+				Progress:   state.progress.Percent,
+				FileName:   fileName,
+				OutputPath: state.outputPath,
 			}, nil
 		}
 		if state.err != "" {
 			return &job.EngineStatus{
-				Status:   job.StatusFailed,
-				Error:    state.err,
-				Progress: state.progress.Percent,
+				Status:     job.StatusFailed,
+				Error:      state.err,
+				Progress:   state.progress.Percent,
+				FileName:   fileName,
+				OutputPath: state.outputPath,
 			}, nil
 		}
 		return &job.EngineStatus{
@@ -155,6 +166,8 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 			Progress:       100,
 			TotalBytes:     state.progress.TotalBytes,
 			CompletedBytes: state.progress.TotalBytes,
+			FileName:       fileName,
+			OutputPath:     state.outputPath,
 		}, nil
 	}
 
@@ -164,6 +177,8 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 			Progress:       state.progress.Percent,
 			TotalBytes:     state.progress.TotalBytes,
 			CompletedBytes: state.progress.DownloadedBytes,
+			FileName:       fileName,
+			OutputPath:     state.outputPath,
 		}, nil
 	}
 
@@ -174,6 +189,8 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 		CompletedBytes:      state.progress.DownloadedBytes,
 		SpeedBytesPerSecond: state.progress.Speed,
 		ETASeconds:          state.progress.ETASeconds,
+		FileName:            fileName,
+		OutputPath:          state.outputPath,
 	}, nil
 }
 
@@ -219,6 +236,12 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		if outPath := parseOutputPathLine(line); outPath != "" {
+			state.mu.Lock()
+			state.outputPath = outPath
+			state.mu.Unlock()
+		}
 
 		// Check for post-processing markers
 		if isPostProcessingLine(line) {

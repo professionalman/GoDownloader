@@ -25,7 +25,23 @@ func NewEngine(rpcURL, secret string) *Aria2Engine {
 
 // Start begins a new download via aria2.
 func (e *Aria2Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {
-	gid, err := e.client.AddURI(j.Source, downloadDir)
+	opts := map[string]string{
+		"dir": downloadDir,
+	}
+
+	switch j.ConflictPolicy {
+	case job.ConflictPolicyOverwrite:
+		opts["auto-file-renaming"] = "false"
+		opts["allow-overwrite"] = "true"
+	case job.ConflictPolicyFail:
+		opts["auto-file-renaming"] = "false"
+		opts["allow-overwrite"] = "false"
+	case job.ConflictPolicyRename, job.ConflictPolicyEngineManaged, "":
+		opts["auto-file-renaming"] = "true"
+		opts["allow-overwrite"] = "false"
+	}
+
+	gid, err := e.client.AddURIWithOptions(j.Source, opts)
 	if err != nil {
 		return "", fmt.Errorf("aria2 addUri failed: %w", err)
 	}

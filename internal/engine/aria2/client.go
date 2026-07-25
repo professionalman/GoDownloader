@@ -118,9 +118,14 @@ func (c *Client) call(method string, params ...interface{}) (json.RawMessage, er
 
 // AddURI sends a download request to aria2 and returns the GID.
 func (c *Client) AddURI(uri string, dir string) (string, error) {
+	return c.AddURIWithOptions(uri, map[string]string{"dir": dir})
+}
+
+// AddURIWithOptions sends a download request to aria2 with custom options and returns the GID.
+func (c *Client) AddURIWithOptions(uri string, opts map[string]string) (string, error) {
 	uris := []string{uri}
-	opts := map[string]string{
-		"dir": dir,
+	if opts == nil {
+		opts = make(map[string]string)
 	}
 
 	result, err := c.call("aria2.addUri", uris, opts)

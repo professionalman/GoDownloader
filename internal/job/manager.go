@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"downloader/internal/settings"
+	"downloader/internal/storage"
 
 	"github.com/google/uuid"
 )
@@ -20,15 +21,17 @@ import (
 // Manager is the central orchestrator for job lifecycle management.
 // All state transitions go through the Manager.
 type Manager struct {
-	repo        IJobRepository
-	engines     IEngineRegistry
-	bus         IEventBus
-	downloadDir string
-	dataDir     string
-	torrentRepo ITorrentRepository
-	queueRepo   IQueueRepository
-	settings    *settings.SettingsService
-	scheduler   *Scheduler
+	repo           IJobRepository
+	engines        IEngineRegistry
+	bus            IEventBus
+	downloadDir    string
+	dataDir        string
+	torrentRepo    ITorrentRepository
+	queueRepo      IQueueRepository
+	settings       *settings.SettingsService
+	storageService storage.IStorageService
+	categoryRepo   storage.ICategoryRepository
+	scheduler      *Scheduler
 
 	mu            sync.RWMutex
 	activeJobs    map[string]*Job // id -> job (in-memory cache for active jobs)
@@ -56,6 +59,11 @@ func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, dow
 	return m
 }
 
+// GetDefaultDownloadDir returns the manager's fallback default download directory.
+func (m *Manager) GetDefaultDownloadDir() string {
+	return m.downloadDir
+}
+
 // SetQueueRepository wires the queue repository.
 func (m *Manager) SetQueueRepository(queueRepo IQueueRepository) {
 	m.queueRepo = queueRepo
@@ -64,6 +72,16 @@ func (m *Manager) SetQueueRepository(queueRepo IQueueRepository) {
 // SetSettingsService wires the settings service.
 func (m *Manager) SetSettingsService(s *settings.SettingsService) {
 	m.settings = s
+}
+
+// SetStorageService wires the storage service.
+func (m *Manager) SetStorageService(svc storage.IStorageService) {
+	m.storageService = svc
+}
+
+// SetCategoryRepository wires the category repository.
+func (m *Manager) SetCategoryRepository(catRepo storage.ICategoryRepository) {
+	m.categoryRepo = catRepo
 }
 
 // SetScheduler wires the scheduler instance.
@@ -153,9 +171,37 @@ func (m *Manager) triggerCancel(jobID string) {
 }
 
 type CreateOptions struct {
-	Priority      JobPriority
-	BatchID       string
-	DeferSchedule bool
+	Priority       JobPriority
+	BatchID        string
+	DeferSchedule  bool
+	CategoryID     string
+	DestinationDir string
+	ConflictPolicy FilenameConflictPolicy
+}
+
+func (m *Manager) resolveJobStorage(ctx context.Context, categoryID, customDest string, policy FilenameConflictPolicy, jobID string, isMedia bool) (*storage.StorageResolution, error) {
+	if m.storageService != nil {
+		return m.storageService.ResolveDestination(ctx, categoryID, customDest, storage.FilenameConflictPolicy(policy), jobID, isMedia)
+	}
+
+	dest := m.downloadDir
+	if customDest != "" {
+		dest = customDest
+	}
+	pol := policy
+	if pol == "" {
+		pol = ConflictPolicyRename
+	}
+	workDir := ""
+	if isMedia {
+		workDir = filepath.Join(m.dataDir, "tmp", jobID)
+	}
+	return &storage.StorageResolution{
+		CategoryID:     categoryID,
+		DestinationDir: dest,
+		WorkDir:        workDir,
+		ConflictPolicy: storage.FilenameConflictPolicy(pol),
+	}, nil
 }
 
 // Create validates the URL, creates a job, and enqueues or starts it.
@@ -199,6 +245,12 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 	// Detect engine
 	engineName := m.engines.Detect(source)
 
+	jobID := "job_" + uuid.New().String()[:8]
+	res, resErr := m.resolveJobStorage(ctx, opts.CategoryID, opts.DestinationDir, opts.ConflictPolicy, jobID, engineName == "ytdlp")
+	if resErr != nil {
+		return nil, &AppError{Code: ErrInvalidStorageSelection, Message: resErr.Error()}
+	}
+
 	// Extract filename from URL
 	name := path.Base(u.Path)
 	if name == "" || name == "." || name == "/" {
@@ -207,16 +259,20 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 
 	now := time.Now()
 	j := &Job{
-		ID:        "job_" + uuid.New().String()[:8],
-		Source:    source,
-		Name:      name,
-		Status:    StatusQueued,
-		Type:      TypeDownload,
-		Engine:    engineName,
-		Priority:  opts.Priority,
-		BatchID:   opts.BatchID,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             jobID,
+		Source:         source,
+		Name:           name,
+		Status:         StatusQueued,
+		Type:           TypeDownload,
+		Engine:         engineName,
+		Priority:       opts.Priority,
+		BatchID:        opts.BatchID,
+		CategoryID:     res.CategoryID,
+		DestinationDir: res.DestinationDir,
+		WorkDir:        res.WorkDir,
+		ConflictPolicy: FilenameConflictPolicy(res.ConflictPolicy),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	// For media engine, set type and start analysis
@@ -293,6 +349,19 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 
 // CreateBatch creates multiple jobs best-effort from a batch submission.
 func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*CreateBatchResponse, error) {
+	if len(req.Inputs) == 0 && len(req.Sources) > 0 {
+		req.Inputs = make([]BatchInput, len(req.Sources))
+		for i, s := range req.Sources {
+			req.Inputs[i] = BatchInput{
+				Source:         s,
+				Priority:       req.Priority,
+				CategoryID:     req.CategoryID,
+				DestinationDir: req.DestinationDir,
+				ConflictPolicy: req.ConflictPolicy,
+			}
+		}
+	}
+
 	if len(req.Inputs) == 0 {
 		return nil, &AppError{Code: ErrInvalidRequest, Message: "batch inputs cannot be empty"}
 	}
@@ -317,15 +386,33 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*Cre
 			continue
 		}
 
+		catID := input.CategoryID
+		if catID == "" {
+			catID = req.CategoryID
+		}
+		destDir := input.DestinationDir
+		if destDir == "" {
+			destDir = req.DestinationDir
+		}
+		conflictPol := input.ConflictPolicy
+		if conflictPol == "" {
+			conflictPol = req.ConflictPolicy
+		}
 		p := input.Priority
+		if p == "" {
+			p = req.Priority
+		}
 		if p == "" {
 			p = JobPriorityNormal
 		}
 
 		j, err := m.CreateWithOptions(ctx, source, CreateOptions{
-			Priority:      p,
-			BatchID:       batchID,
-			DeferSchedule: true,
+			Priority:       p,
+			BatchID:        batchID,
+			DeferSchedule:  true,
+			CategoryID:     catID,
+			DestinationDir: destDir,
+			ConflictPolicy: conflictPol,
 		})
 
 		if err != nil {
@@ -547,18 +634,27 @@ func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, s
 		}
 	}
 
+	res, resErr := m.resolveJobStorage(ctx, opts.CategoryID, opts.DestinationDir, ConflictPolicyEngineManaged, jobID, false)
+	if resErr != nil {
+		return nil, &AppError{Code: ErrInvalidStorageSelection, Message: resErr.Error()}
+	}
+
 	now := time.Now()
 	j := &Job{
-		ID:        jobID,
-		Source:    source,
-		Name:      "Fetching metadata...",
-		Status:    StatusAnalyzing,
-		Type:      TypeTorrent,
-		Engine:    engineName,
-		Priority:  opts.Priority,
-		BatchID:   opts.BatchID,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             jobID,
+		Source:         source,
+		Name:           "Fetching metadata...",
+		Status:         StatusAnalyzing,
+		Type:           TypeTorrent,
+		Engine:         engineName,
+		Priority:       opts.Priority,
+		BatchID:        opts.BatchID,
+		CategoryID:     res.CategoryID,
+		DestinationDir: res.DestinationDir,
+		WorkDir:        "",
+		ConflictPolicy: ConflictPolicyEngineManaged,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	if err := m.repo.Create(ctx, j); err != nil {
@@ -643,11 +739,16 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 	}
 
 	// Add torrent to qBittorrent (stopped)
+	saveDir := j.DestinationDir
+	if saveDir == "" {
+		saveDir = m.downloadDir
+	}
+
 	var infoHash string
 	if torrentFilePath != "" {
-		infoHash, err = torrentEng.AddTorrentFile(ctx, torrentFilePath, m.downloadDir, jobID)
+		infoHash, err = torrentEng.AddTorrentFile(ctx, torrentFilePath, saveDir, jobID)
 	} else {
-		infoHash, err = torrentEng.AddMagnet(ctx, source, m.downloadDir, jobID)
+		infoHash, err = torrentEng.AddMagnet(ctx, source, saveDir, jobID)
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -1431,6 +1532,49 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				}
 			}
 		}
+		// Handle media finalization before marking StatusCompleted
+		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" && j.FinalPath == "" {
+			srcFile := status.OutputPath
+			if srcFile == "" && status.FileName != "" {
+				srcFile = filepath.Join(j.WorkDir, status.FileName)
+			}
+			if srcFile == "" {
+				entries, _ := os.ReadDir(j.WorkDir)
+				for _, entry := range entries {
+					if !entry.IsDir() && entry.Name() != storage.WorkDirMarkerFilename {
+						srcFile = filepath.Join(j.WorkDir, entry.Name())
+						break
+					}
+				}
+			}
+
+			if srcFile != "" {
+				finalPath, err := m.storageService.FinalizeFile(ctx, srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
+				if err != nil {
+					log.Printf("UpdateJobFromEngine: media finalization failed for job %s: %v", j.ID, err)
+					j.Status = StatusFailed
+					j.Error = fmt.Sprintf("file finalization failed: %v", err)
+					j.UpdatedAt = time.Now()
+					m.repo.Update(ctx, j)
+					m.removeActive(j.ID)
+					m.publish(EventJobFailed, j)
+					if m.scheduler != nil {
+						m.scheduler.Kick()
+					}
+					return
+				}
+				j.FinalPath = finalPath
+				j.Name = filepath.Base(finalPath)
+				m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir)
+			}
+		}
+
+		if j.Type == TypeDownload && status.FileName != "" {
+			j.FinalPath = filepath.Join(j.DestinationDir, status.FileName)
+		} else if j.Type == TypeTorrent {
+			j.FinalPath = j.DestinationDir
+		}
+
 		// Normal completion
 		j.Status = StatusCompleted
 		j.Progress = 100
@@ -1838,6 +1982,46 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		return fmt.Errorf("engine %q not available", j.Engine)
 	}
 
+	targetDir := j.DestinationDir
+	if targetDir == "" {
+		targetDir = m.downloadDir
+	}
+
+	if m.storageService != nil {
+		if preflightErr := m.storageService.Preflight(ctx, targetDir, j.WorkDir, j.TotalBytes, j.CompletedBytes); preflightErr != nil {
+			log.Printf("dispatchQueuedJob: storage preflight failed for job %s (action=%s): %v", j.ID, qj.Action, preflightErr)
+			if qj.Action == QueueActionStart {
+				j.Status = StatusFailed
+				j.Error = preflightErr.Error()
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				if m.queueRepo != nil {
+					m.queueRepo.Delete(ctx, j.ID)
+				}
+				m.publish(EventJobFailed, j)
+			} else {
+				// QueueActionResume: revert to PAUSED, keep queue entry with QueueActionResume
+				j.Status = StatusPaused
+				j.Error = preflightErr.Error()
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobUpdated, j)
+			}
+			return preflightErr
+		}
+
+		if j.WorkDir != "" {
+			if prepareErr := m.storageService.PrepareWorkDir(ctx, j.ID, j.WorkDir); prepareErr != nil {
+				log.Printf("dispatchQueuedJob: prepare workdir failed for job %s: %v", j.ID, prepareErr)
+			}
+		}
+	}
+
+	execDir := targetDir
+	if j.Type == TypeMedia && j.WorkDir != "" {
+		execDir = j.WorkDir
+	}
+
 	if qj.Action == QueueActionStart {
 		if j.Type == TypeTorrent {
 			torrentEng, ok := eng.(ITorrentEngine)
@@ -1848,7 +2032,7 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 				return err
 			}
 		} else {
-			engineID, err := eng.Start(ctx, j, m.downloadDir)
+			engineID, err := eng.Start(ctx, j, execDir)
 			if err != nil {
 				return err
 			}
