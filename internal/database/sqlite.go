@@ -79,8 +79,8 @@ func (db *DB) migrate() error {
 	if err := db.migrateToV06(); err != nil {
 		return fmt.Errorf("migrate to V0.6: %w", err)
 	}
-	if err := db.migrateToV07(); err != nil {
-		return fmt.Errorf("migrate to V0.7: %w", err)
+	if err := db.migrateV06EngineCleanupPending(); err != nil {
+		return fmt.Errorf("migrate V0.6 engine cleanup lifecycle: %w", err)
 	}
 
 	return nil
@@ -457,7 +457,7 @@ func (db *DB) migrateToV06() error {
 	return nil
 }
 
-func (db *DB) migrateToV07() error {
+func (db *DB) migrateV06EngineCleanupPending() error {
 	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
 	if err != nil {
 		return fmt.Errorf("query pragma table_info(jobs): %w", err)

@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -1127,7 +1128,8 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 	}
 	j.SeedAfterComplete = false
 	if err := m.finalizeCompletedTorrent(ctx, j); err != nil {
-		if j.Status == StatusCompleted && j.EngineCleanupPending {
+		var finErr *TorrentFinalizeError
+		if errors.As(err, &finErr) && finErr.Kind == TorrentFinalizeCleanupFailure {
 			return j, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("torrent completed but qBittorrent cleanup is pending: %v", err)}
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist completed status: %v", err)}
@@ -2351,31 +2353,45 @@ func (m *Manager) removeCompletedTorrent(ctx context.Context, j *Job) error {
 }
 
 func (m *Manager) finalizeCompletedTorrent(ctx context.Context, j *Job) error {
-	j.FinalPath = j.DestinationDir
-	j.Status = StatusCompleted
-	j.Progress = 100
-	j.SpeedBytesPerSecond = 0
-	j.ETASeconds = 0
-	j.EngineCleanupPending = true
-	j.UpdatedAt = time.Now()
+	candidate := *j
+	candidate.FinalPath = candidate.DestinationDir
+	candidate.Status = StatusCompleted
+	candidate.Progress = 100
+	candidate.SpeedBytesPerSecond = 0
+	candidate.ETASeconds = 0
+	candidate.EngineCleanupPending = true
+	candidate.UpdatedAt = time.Now()
 
-	if err := m.repo.Update(ctx, j); err != nil {
+	if err := m.repo.Update(ctx, &candidate); err != nil {
 		log.Printf("finalizeCompletedTorrent: failed to update job %s to COMPLETED: %v", j.ID, err)
-		return fmt.Errorf("persist completed status: %w", err)
+		return &TorrentFinalizeError{
+			Kind: TorrentFinalizePersistenceFailure,
+			Err:  fmt.Errorf("persist completed status: %w", err),
+		}
 	}
+
+	*j = candidate
 
 	err := m.removeCompletedTorrent(ctx, j)
 	if err != nil {
 		log.Printf("finalizeCompletedTorrent: qBittorrent removal pending for job %s: %v", j.ID, err)
-		return fmt.Errorf("torrent completed but daemon cleanup is pending: %w", err)
+		return &TorrentFinalizeError{
+			Kind: TorrentFinalizeCleanupFailure,
+			Err:  fmt.Errorf("torrent completed but daemon cleanup is pending: %w", err),
+		}
 	}
 
-	j.EngineCleanupPending = false
-	j.UpdatedAt = time.Now()
-	if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+	candidate.EngineCleanupPending = false
+	candidate.UpdatedAt = time.Now()
+	if updateErr := m.repo.Update(ctx, &candidate); updateErr != nil {
 		log.Printf("finalizeCompletedTorrent: failed to clear engine_cleanup_pending for job %s: %v", j.ID, updateErr)
+		return &TorrentFinalizeError{
+			Kind: TorrentFinalizePersistenceFailure,
+			Err:  fmt.Errorf("failed to clear engine_cleanup_pending: %w", updateErr),
+		}
 	}
 
+	*j = candidate
 	m.removeActive(j.ID)
 	m.publish(EventJobCompleted, j)
 	if m.scheduler != nil {
@@ -2395,14 +2411,16 @@ func (m *Manager) retryPendingEngineCleanup(ctx context.Context, j *Job) error {
 		return err
 	}
 
-	j.EngineCleanupPending = false
-	j.UpdatedAt = time.Now()
-	if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+	candidate := *j
+	candidate.EngineCleanupPending = false
+	candidate.UpdatedAt = time.Now()
+	if updateErr := m.repo.Update(ctx, &candidate); updateErr != nil {
 		log.Printf("retryPendingEngineCleanup: failed to clear engine_cleanup_pending for job %s: %v", j.ID, updateErr)
+		return updateErr
 	}
 
+	*j = candidate
 	m.removeActive(j.ID)
-	m.publish(EventJobCompleted, j)
 	if m.scheduler != nil {
 		m.scheduler.Kick()
 	}

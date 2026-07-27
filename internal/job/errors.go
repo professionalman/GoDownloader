@@ -46,6 +46,27 @@ const (
 	ErrStorageError            = "STORAGE_ERROR"
 )
 
+type TorrentFinalizeFailureKind string
+
+const (
+	TorrentFinalizePersistenceFailure TorrentFinalizeFailureKind = "persistence"
+	TorrentFinalizeCleanupFailure     TorrentFinalizeFailureKind = "cleanup"
+)
+
+// TorrentFinalizeError represents a failure during torrent finalization.
+type TorrentFinalizeError struct {
+	Kind TorrentFinalizeFailureKind
+	Err  error
+}
+
+func (e *TorrentFinalizeError) Error() string {
+	return fmt.Sprintf("torrent finalization failed (%s): %v", e.Kind, e.Err)
+}
+
+func (e *TorrentFinalizeError) Unwrap() error {
+	return e.Err
+}
+
 // Sentinel errors for scheduler reconciliation
 var (
 	ErrDispatchPersistenceFailed = errors.New("dispatch persistence failed")

@@ -19,6 +19,9 @@ type Monitor struct {
 	mu                  sync.Mutex
 	lastPersisted       map[string]time.Time
 	consecutiveFailures map[string]int
+
+	lastCleanupSweep     time.Time
+	cleanupSweepInterval time.Duration
 }
 
 // persistInterval controls how often progress is written to DB (vs SSE which is every tick).
@@ -30,12 +33,20 @@ const maxConsecutiveFailures = 5
 // NewMonitor creates a new progress monitor.
 func NewMonitor(manager *Manager, interval time.Duration) *Monitor {
 	return &Monitor{
-		manager:             manager,
-		interval:            interval,
-		stopCh:              make(chan struct{}),
-		lastPersisted:       make(map[string]time.Time),
-		consecutiveFailures: make(map[string]int),
+		manager:              manager,
+		interval:             interval,
+		stopCh:               make(chan struct{}),
+		lastPersisted:        make(map[string]time.Time),
+		consecutiveFailures:  make(map[string]int),
+		cleanupSweepInterval: 15 * time.Second,
 	}
+}
+
+// SetCleanupSweepInterval allows overriding the default 15s cleanup retry throttle interval.
+func (m *Monitor) SetCleanupSweepInterval(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupSweepInterval = d
 }
 
 // Start begins the progress monitoring loop.
@@ -69,6 +80,20 @@ func (m *Monitor) run(ctx context.Context) {
 }
 
 func (m *Monitor) tick(ctx context.Context) {
+	m.mu.Lock()
+	interval := m.cleanupSweepInterval
+	lastSweep := m.lastCleanupSweep
+	now := time.Now()
+	shouldSweep := interval > 0 && now.Sub(lastSweep) >= interval
+	if shouldSweep {
+		m.lastCleanupSweep = now
+	}
+	m.mu.Unlock()
+
+	if shouldSweep && m.manager != nil {
+		m.manager.processPendingEngineCleanups(ctx)
+	}
+
 	activeJobs := m.manager.GetActiveJobs()
 	if len(activeJobs) == 0 {
 		return

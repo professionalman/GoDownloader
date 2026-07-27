@@ -2676,13 +2676,10 @@ func TestTorrentCleanupPending_RetrySucceeds(t *testing.T) {
 	}
 	jobRepo.Create(ctx, j)
 
-	var attempts int
+	var removeCalls int
 	torrentEng := &fakeTorrentEngine{
 		removeTorrentFunc: func(hash string, deleteFiles bool) error {
-			attempts++
-			if attempts == 1 {
-				return errors.New("temporary error")
-			}
+			removeCalls++
 			return nil
 		},
 	}
@@ -2692,15 +2689,12 @@ func TestTorrentCleanupPending_RetrySucceeds(t *testing.T) {
 	bus := mgr.bus.(*fakeEventBus)
 	ch := bus.Subscribe()
 
-	// First retry: fails
 	mgr.processPendingEngineCleanups(ctx)
-	mid, _ := jobRepo.GetByID(ctx, j.ID)
-	if !mid.EngineCleanupPending {
-		t.Error("expected EngineCleanupPending == true after first failed retry")
+
+	if removeCalls != 1 {
+		t.Errorf("expected RemoveTorrent to be called once, got %d", removeCalls)
 	}
 
-	// Second retry: succeeds
-	mgr.processPendingEngineCleanups(ctx)
 	after, _ := jobRepo.GetByID(ctx, j.ID)
 	if after.EngineCleanupPending {
 		t.Error("expected EngineCleanupPending == false after successful retry")
@@ -2709,6 +2703,7 @@ func TestTorrentCleanupPending_RetrySucceeds(t *testing.T) {
 		t.Errorf("expected StatusCompleted, got %s", after.Status)
 	}
 
+	// CRITICAL: Cleanup retry MUST NOT publish EventJobCompleted!
 	var completedEvents int
 	for len(ch) > 0 {
 		ev := <-ch
@@ -2716,8 +2711,8 @@ func TestTorrentCleanupPending_RetrySucceeds(t *testing.T) {
 			completedEvents++
 		}
 	}
-	if completedEvents != 1 {
-		t.Errorf("expected EventJobCompleted exactly once upon successful cleanup retry, got %d", completedEvents)
+	if completedEvents != 0 {
+		t.Errorf("expected EventJobCompleted count == 0 during cleanup retry, got %d", completedEvents)
 	}
 }
 
@@ -2767,15 +2762,12 @@ func TestRecovery_CompletedTorrentCleanupPending_RetriesRemoval(t *testing.T) {
 		t.Error("expected EngineCleanupPending == false after startup cleanup retry")
 	}
 
-	var completedEvents int
+	// Startup cleanup retry MUST NOT emit historical completion events
 	for len(ch) > 0 {
 		ev := <-ch
 		if ev.Type == EventJobCompleted {
-			completedEvents++
+			t.Errorf("expected 0 EventJobCompleted during startup cleanup retry, got event %s", ev.Type)
 		}
-	}
-	if completedEvents != 1 {
-		t.Errorf("expected EventJobCompleted exactly once on startup cleanup retry, got %d", completedEvents)
 	}
 }
 
@@ -2798,9 +2790,13 @@ func TestStopSeeding_PersistenceFailureDoesNotRemoveTorrent(t *testing.T) {
 	}
 	jobRepo.Create(ctx, j)
 
+	var stopDownloadCalled bool
 	var removeCalled bool
 	torrentEng := &fakeTorrentEngine{
-		stopDownloadFunc: func(hash string) error { return nil },
+		stopDownloadFunc: func(hash string) error {
+			stopDownloadCalled = true
+			return nil
+		},
 		removeTorrentFunc: func(hash string, deleteFiles bool) error {
 			removeCalled = true
 			return nil
@@ -2809,15 +2805,46 @@ func TestStopSeeding_PersistenceFailureDoesNotRemoveTorrent(t *testing.T) {
 	reg := mgr.engines.(*fakeEngineRegistry)
 	reg.engines["qbittorrent"] = torrentEng
 
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
 	jobRepo.updateErr = errors.New("simulated DB update failure")
 
-	_, err := mgr.StopSeeding(ctx, j.ID)
+	returnedJob, err := mgr.StopSeeding(ctx, j.ID)
 	if err == nil {
 		t.Fatalf("expected StopSeeding to fail when DB update fails")
 	}
 
+	appErr, ok := err.(*AppError)
+	if !ok || appErr.Code != ErrInternalError {
+		t.Errorf("expected AppError with code INTERNAL_ERROR, got %v", err)
+	}
+
+	if returnedJob != nil && returnedJob.Status == StatusCompleted {
+		t.Errorf("returned Job must NOT claim StatusCompleted when persistence fails, got %v", returnedJob)
+	}
+
+	if !stopDownloadCalled {
+		t.Error("expected StopDownload to be called")
+	}
+
 	if removeCalled {
 		t.Error("RemoveTorrent MUST NOT be called when DB persistence fails in StopSeeding")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted MUST NOT be emitted on persistence failure")
+		}
+	}
+
+	inDB, _ := jobRepo.GetByID(ctx, j.ID)
+	if inDB.Status != StatusSeeding {
+		t.Errorf("expected DB status to remain StatusSeeding, got %s", inDB.Status)
+	}
+	if inDB.EngineCleanupPending {
+		t.Error("expected DB EngineCleanupPending == false on persistence failure")
 	}
 }
 
@@ -2857,8 +2884,13 @@ func TestStopSeeding_RemoveFailureLeavesCleanupPending(t *testing.T) {
 		t.Fatalf("expected StopSeeding to return error when RemoveTorrent fails")
 	}
 
-	if returnedJob == nil {
-		t.Fatalf("expected StopSeeding to return non-nil job on daemon cleanup error")
+	appErr, ok := err.(*AppError)
+	if !ok || appErr.Code != ErrEngineError {
+		t.Errorf("expected AppError code ENGINE_ERROR on cleanup failure, got %v", err)
+	}
+
+	if returnedJob == nil || returnedJob.Status != StatusCompleted {
+		t.Fatalf("expected StopSeeding to return non-nil job with StatusCompleted on daemon cleanup error")
 	}
 
 	after, _ := jobRepo.GetByID(ctx, j.ID)
@@ -2944,5 +2976,325 @@ func TestStopSeeding_CleanupSuccessOrdering(t *testing.T) {
 	}
 	if completedEvents != 1 {
 		t.Errorf("expected EventJobCompleted exactly once in StopSeeding, got %d", completedEvents)
+	}
+}
+
+type toggleMarkerFailJobRepo struct {
+	IJobRepository
+	updateCount      int
+	failSecondUpdate bool
+}
+
+func (t *toggleMarkerFailJobRepo) Update(ctx context.Context, j *Job) error {
+	t.updateCount++
+	if t.failSecondUpdate && t.updateCount == 2 {
+		return errors.New("simulated DB update failure on clearing EngineCleanupPending")
+	}
+	return t.IJobRepository.Update(ctx, j)
+}
+
+func TestTorrentCompletion_CleanupMarkerPersistenceFailureDoesNotPublishCompleted(t *testing.T) {
+	mgr, baseJobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	toggleRepo := &toggleMarkerFailJobRepo{IJobRepository: baseJobRepo, failSecondUpdate: true}
+	mgr.repo = toggleRepo
+
+	j := &Job{
+		ID:                "job_torrent_marker_fail",
+		Source:            "magnet:?xt=urn:btih:markerfail111122223333",
+		Name:              "Marker Fail Test",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "markerfail111122223333",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	baseJobRepo.Create(ctx, j)
+
+	var removeCalled bool
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			removeCalled = true
+			return nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusSeeding, Progress: 100}, true)
+
+	if !removeCalled {
+		t.Error("expected RemoveTorrent to be called")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted when marker clear persistence failed!")
+		}
+	}
+
+	inDB, _ := baseJobRepo.GetByID(ctx, j.ID)
+	if inDB.Status != StatusCompleted || !inDB.EngineCleanupPending {
+		t.Errorf("expected DB status COMPLETED and EngineCleanupPending true, got status=%s pending=%v", inDB.Status, inDB.EngineCleanupPending)
+	}
+
+	toggleRepo.failSecondUpdate = false
+	mgr.processPendingEngineCleanups(ctx)
+
+	after, _ := baseJobRepo.GetByID(ctx, j.ID)
+	if after.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == false after retry")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted during cleanup retry!")
+		}
+	}
+}
+
+func TestTorrentCleanupPending_MarkerPersistenceFailureRemainsPending(t *testing.T) {
+	mgr, baseJobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	toggleRepo := &toggleMarkerFailJobRepo{IJobRepository: baseJobRepo, failSecondUpdate: true, updateCount: 1}
+	mgr.repo = toggleRepo
+
+	j := &Job{
+		ID:                   "job_retry_marker_fail",
+		Source:               "magnet:?xt=urn:btih:retrymarkerfail11112222",
+		Name:                 "Retry Marker Fail",
+		Status:               StatusCompleted,
+		Engine:               "qbittorrent",
+		EngineID:             "retrymarkerfail11112222",
+		Type:                 TypeTorrent,
+		SeedAfterComplete:    false,
+		DestinationDir:       downloadDir,
+		FinalPath:            downloadDir,
+		EngineCleanupPending: true,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
+	}
+	baseJobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	err := mgr.retryPendingEngineCleanup(ctx, j)
+	if err == nil {
+		t.Fatalf("expected error when clearing marker fails in retry")
+	}
+
+	inDB, _ := baseJobRepo.GetByID(ctx, j.ID)
+	if inDB.Status != StatusCompleted || !inDB.EngineCleanupPending {
+		t.Errorf("expected DB to remain COMPLETED and EngineCleanupPending true, got status=%s pending=%v", inDB.Status, inDB.EngineCleanupPending)
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted during failed retry!")
+		}
+	}
+
+	toggleRepo.failSecondUpdate = false
+	err = mgr.retryPendingEngineCleanup(ctx, j)
+	if err != nil {
+		t.Fatalf("expected second retry to succeed, got %v", err)
+	}
+
+	after, _ := baseJobRepo.GetByID(ctx, j.ID)
+	if after.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == false after successful retry")
+	}
+}
+
+func TestMonitor_RetriesPendingEngineCleanupDuringRuntime(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                   "job_runtime_pending_test",
+		Source:               "magnet:?xt=urn:btih:runtimepending11112222",
+		Name:                 "Runtime Pending Test",
+		Status:               StatusCompleted,
+		Engine:               "qbittorrent",
+		EngineID:             "runtimepending11112222",
+		Type:                 TypeTorrent,
+		SeedAfterComplete:    false,
+		DestinationDir:       downloadDir,
+		FinalPath:            downloadDir,
+		EngineCleanupPending: true,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	var removeCalls int
+	var qbHealthy bool
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			removeCalls++
+			if !qbHealthy {
+				return errors.New("qBittorrent offline")
+			}
+			return nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	mon := NewMonitor(mgr, 10*time.Millisecond)
+	mon.SetCleanupSweepInterval(10 * time.Millisecond)
+
+	if len(mgr.GetActiveJobs()) != 0 {
+		t.Fatalf("expected 0 active jobs, got %d", len(mgr.GetActiveJobs()))
+	}
+
+	mon.tick(ctx)
+	if removeCalls != 1 {
+		t.Errorf("expected 1 remove call on tick 1, got %d", removeCalls)
+	}
+
+	inDB, _ := jobRepo.GetByID(ctx, j.ID)
+	if !inDB.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == true after tick 1 failure")
+	}
+
+	time.Sleep(15 * time.Millisecond)
+	qbHealthy = true
+
+	mon.tick(ctx)
+	if removeCalls != 2 {
+		t.Errorf("expected 2 remove calls after tick 2, got %d", removeCalls)
+	}
+
+	after, _ := jobRepo.GetByID(ctx, j.ID)
+	if after.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == false after tick 2 success")
+	}
+	if after.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", after.Status)
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted during runtime cleanup retry!")
+		}
+	}
+}
+
+func TestMonitor_PendingCleanupRetryIsThrottled(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                   "job_throttled_test",
+		Source:               "magnet:?xt=urn:btih:throttled111122223333",
+		Name:                 "Throttled Test",
+		Status:               StatusCompleted,
+		Engine:               "qbittorrent",
+		EngineID:             "throttled111122223333",
+		Type:                 TypeTorrent,
+		SeedAfterComplete:    false,
+		DestinationDir:       downloadDir,
+		FinalPath:            downloadDir,
+		EngineCleanupPending: true,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	var removeCalls int
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			removeCalls++
+			return errors.New("daemon offline")
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	mon := NewMonitor(mgr, 10*time.Millisecond)
+	mon.SetCleanupSweepInterval(1 * time.Hour)
+
+	for i := 0; i < 5; i++ {
+		mon.tick(ctx)
+	}
+
+	if removeCalls != 1 {
+		t.Errorf("expected exactly 1 remove call due to throttling, got %d", removeCalls)
+	}
+}
+
+func TestTorrentCleanupPending_AlreadyRemovedTreatedAsSuccess(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                   "job_already_removed_test",
+		Source:               "magnet:?xt=urn:btih:alreadyremoved11112222",
+		Name:                 "Already Removed Test",
+		Status:               StatusCompleted,
+		Engine:               "qbittorrent",
+		EngineID:             "alreadyremoved11112222",
+		Type:                 TypeTorrent,
+		SeedAfterComplete:    false,
+		DestinationDir:       downloadDir,
+		FinalPath:            downloadDir,
+		EngineCleanupPending: true,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			return errors.New("Torrent not found")
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	err := mgr.retryPendingEngineCleanup(ctx, j)
+	if err != nil {
+		t.Fatalf("expected already-removed torrent error to be treated as success, got %v", err)
+	}
+
+	after, _ := jobRepo.GetByID(ctx, j.ID)
+	if after.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == false after already-removed cleanup")
+	}
+	if after.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", after.Status)
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted during cleanup retry!")
+		}
 	}
 }
