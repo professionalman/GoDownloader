@@ -100,6 +100,12 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 
 	for _, j := range activeJobs {
+		if j.Status == StatusCompleted || j.Status == StatusFailed || j.Status == StatusCancelled {
+			m.manager.removeActive(j.ID)
+			m.CleanupJob(j.ID)
+			continue
+		}
+
 		if j.EngineID == "" {
 			continue
 		}
@@ -135,6 +141,13 @@ func (m *Monitor) recordFailure(ctx context.Context, j *Job, errMsg string) {
 	m.mu.Unlock()
 
 	if count >= maxConsecutiveFailures {
+		if current, err := m.manager.repo.GetByID(ctx, j.ID); err == nil && current != nil && (current.Status == StatusCompleted || current.Status == StatusFailed || current.Status == StatusCancelled) {
+			log.Printf("monitor: job %s is already terminal in DB (status=%s), purging stale active tracking", j.ID, current.Status)
+			m.manager.removeActive(j.ID)
+			m.CleanupJob(j.ID)
+			return
+		}
+
 		log.Printf("monitor: job %s exceeded max status query failures (%d), marking failed", j.ID, count)
 		j.Status = StatusFailed
 		j.Error = "Engine lost connection or task disappeared after repeated status check failures."

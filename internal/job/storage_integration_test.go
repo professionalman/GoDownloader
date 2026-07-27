@@ -2987,7 +2987,7 @@ type toggleMarkerFailJobRepo struct {
 
 func (t *toggleMarkerFailJobRepo) Update(ctx context.Context, j *Job) error {
 	t.updateCount++
-	if t.failSecondUpdate && t.updateCount == 2 {
+	if t.failSecondUpdate && !j.EngineCleanupPending && j.Status == StatusCompleted {
 		return errors.New("simulated DB update failure on clearing EngineCleanupPending")
 	}
 	return t.IJobRepository.Update(ctx, j)
@@ -3296,5 +3296,398 @@ func TestTorrentCleanupPending_AlreadyRemovedTreatedAsSuccess(t *testing.T) {
 		if ev.Type == EventJobCompleted {
 			t.Errorf("EventJobCompleted emitted during cleanup retry!")
 		}
+	}
+}
+
+func TestTorrentCompletion_MarkerClearFailureRemovesActiveTracking(t *testing.T) {
+	mgr, baseJobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	toggleRepo := &toggleMarkerFailJobRepo{IJobRepository: baseJobRepo, failSecondUpdate: true}
+	mgr.repo = toggleRepo
+
+	j := &Job{
+		ID:                "job_marker_clear_active_rem",
+		Source:            "magnet:?xt=urn:btih:markeractive111122223333",
+		Name:              "Marker Active Test",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "markeractive111122223333",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	baseJobRepo.Create(ctx, j)
+	mgr.addActive(j)
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusSeeding, Progress: 100}, true)
+
+	inDB, _ := baseJobRepo.GetByID(ctx, j.ID)
+	if inDB.Status != StatusCompleted || !inDB.EngineCleanupPending {
+		t.Errorf("expected DB status COMPLETED and EngineCleanupPending true, got status=%s pending=%v", inDB.Status, inDB.EngineCleanupPending)
+	}
+
+	if activeJobs := mgr.GetActiveJobs(); len(activeJobs) != 0 {
+		t.Errorf("expected activeJobs to be empty after durable COMPLETED persistence, got %d active jobs", len(activeJobs))
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted {
+			t.Errorf("EventJobCompleted emitted when marker clear persistence failed!")
+		}
+	}
+}
+
+func TestTorrentCompletion_MarkerClearFailureCannotBeOverwrittenByMonitorFailure(t *testing.T) {
+	mgr, baseJobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	toggleRepo := &toggleMarkerFailJobRepo{IJobRepository: baseJobRepo, failSecondUpdate: true}
+	mgr.repo = toggleRepo
+
+	j := &Job{
+		ID:                "job_marker_fail_no_overwrite",
+		Source:            "magnet:?xt=urn:btih:nooverwrite111122223333",
+		Name:              "No Overwrite Test",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "nooverwrite111122223333",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	baseJobRepo.Create(ctx, j)
+	mgr.addActive(j)
+
+	var statusQueries int
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error { return nil },
+		statusFunc: func(ctx context.Context, job *Job) (*EngineStatus, error) {
+			statusQueries++
+			return nil, errors.New("torrent not found in qBittorrent")
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	if activeJobs := mgr.GetActiveJobs(); len(activeJobs) != 0 {
+		t.Fatalf("expected job to be removed from activeJobs")
+	}
+
+	staleCopy := *j
+	staleCopy.Status = StatusDownloading
+	mgr.addActive(&staleCopy)
+
+	mon := NewMonitor(mgr, 10*time.Millisecond)
+	mon.SetCleanupSweepInterval(1 * time.Hour)
+
+	for i := 0; i < maxConsecutiveFailures+1; i++ {
+		mon.tick(ctx)
+	}
+
+	inDB, _ := baseJobRepo.GetByID(ctx, j.ID)
+	if inDB.Status != StatusCompleted {
+		t.Errorf("expected DB status to remain StatusCompleted, got %s", inDB.Status)
+	}
+	if !inDB.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending to remain true")
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobFailed {
+			t.Errorf("EventJobFailed was published over durable COMPLETED job!")
+		}
+	}
+}
+
+func TestTorrentCompletion_CleanupFailureReleasesActiveTracking(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_cleanup_fail_release_active",
+		Source:            "magnet:?xt=urn:btih:cleanupsfailrel11112222",
+		Name:              "Cleanup Fail Release Active",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "cleanupsfailrel11112222",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	mgr.addActive(j)
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			return errors.New("daemon RPC error")
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	inDB, _ := jobRepo.GetByID(ctx, j.ID)
+	if inDB.Status != StatusCompleted || !inDB.EngineCleanupPending {
+		t.Errorf("expected DB status COMPLETED and EngineCleanupPending true, got status=%s pending=%v", inDB.Status, inDB.EngineCleanupPending)
+	}
+
+	if activeJobs := mgr.GetActiveJobs(); len(activeJobs) != 0 {
+		t.Errorf("expected activeJobs to be empty, got %d active jobs", len(activeJobs))
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobCompleted || ev.Type == EventJobFailed {
+			t.Errorf("no terminal events should be emitted, got %s", ev.Type)
+		}
+	}
+}
+
+func TestTorrentCompletion_KicksSchedulerBeforeDaemonCleanupCompletes(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:                "job_kick_before_cleanup",
+		Source:            "magnet:?xt=urn:btih:kickbeforecleanup1111",
+		Name:              "Kick Before Cleanup",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "kickbeforecleanup1111",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+
+	var schedulerKickedBeforeCleanup bool
+
+	limitFn := func(ctx context.Context) int { return 1 }
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	mgr.scheduler = sched
+
+	torrentEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			if len(mgr.GetActiveJobs()) == 0 {
+				schedulerKickedBeforeCleanup = true
+			}
+			return errors.New("daemon error")
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	mgr.addActive(j)
+
+	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	if !schedulerKickedBeforeCleanup {
+		t.Error("expected activeJobs to be cleared and scheduler kicked before daemon cleanup completes")
+	}
+}
+
+func TestTorrentCompletion_NextQueuedJobDispatchesWhileCleanupPending(t *testing.T) {
+	mgr, jobRepo, queueRepo, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	limitFn := func(ctx context.Context) int { return 1 }
+
+	jA := &Job{
+		ID:                "job_a_cleanup_pending",
+		Source:            "magnet:?xt=urn:btih:jobacleanup111122223333",
+		Name:              "Job A",
+		Status:            StatusDownloading,
+		Engine:            "qbittorrent",
+		EngineID:          "jobacleanup111122223333",
+		Type:              TypeTorrent,
+		SeedAfterComplete: false,
+		DestinationDir:    downloadDir,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	jobRepo.Create(ctx, jA)
+	mgr.addActive(jA)
+
+	jB := &Job{
+		ID:             "job_b_queued",
+		Source:         "https://example.com/fileB.zip",
+		Name:           "Job B",
+		Status:         StatusQueued,
+		Engine:         "aria2",
+		Type:           TypeDownload,
+		TotalBytes:     1024,
+		Priority:       JobPriorityNormal,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, jB)
+	queueRepo.Enqueue(ctx, &QueueEntry{JobID: jB.ID, Action: QueueActionStart, Position: 1, EnqueuedAt: time.Now(), UpdatedAt: time.Now()})
+
+	ariaEng := &fakeEngine{
+		startFunc: func(ctx context.Context, j *Job, dir string) (string, error) {
+			return "gid_b", nil
+		},
+	}
+	qbitEng := &fakeTorrentEngine{
+		removeTorrentFunc: func(hash string, deleteFiles bool) error {
+			return errors.New("qBittorrent offline")
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["aria2"] = ariaEng
+	reg.engines["qbittorrent"] = qbitEng
+
+	sched := NewScheduler(jobRepo, queueRepo, limitFn, mgr.dispatchQueuedJob)
+	sched.SetEngineRegistry(reg)
+	sched.SetEventBus(mgr.bus)
+	mgr.scheduler = sched
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	mgr.UpdateJobFromEngine(ctx, jA, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+
+	inDBA, _ := jobRepo.GetByID(ctx, jA.ID)
+	if inDBA.Status != StatusCompleted || !inDBA.EngineCleanupPending {
+		t.Fatalf("expected Job A status COMPLETED and EngineCleanupPending true")
+	}
+	if len(mgr.GetActiveJobs()) != 0 {
+		t.Fatalf("expected activeJobs to be empty after Job A completion")
+	}
+
+	sched.Kick()
+
+	var updatedB *Job
+	for i := 0; i < 40; i++ {
+		time.Sleep(25 * time.Millisecond)
+		updatedB, _ = jobRepo.GetByID(ctx, jB.ID)
+		if updatedB != nil && updatedB.Status == StatusDownloading {
+			break
+		}
+	}
+
+	if updatedB == nil || updatedB.Status != StatusDownloading {
+		t.Errorf("expected Job B to dispatch and reach StatusDownloading while Job A cleanup is pending, got %v", updatedB)
+	}
+}
+
+func TestMonitor_DoesNotPollTerminalActiveJob(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	j := &Job{
+		ID:             "job_mon_terminal_skip",
+		Source:         "magnet:?xt=urn:btih:terminalskip11112222",
+		Name:           "Terminal Skip",
+		Status:         StatusCompleted,
+		Engine:         "qbittorrent",
+		EngineID:       "terminalskip11112222",
+		Type:           TypeTorrent,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	jobRepo.Create(ctx, j)
+	mgr.addActive(j)
+
+	var statusCalled bool
+	torrentEng := &fakeTorrentEngine{
+		statusFunc: func(ctx context.Context, job *Job) (*EngineStatus, error) {
+			statusCalled = true
+			return &EngineStatus{Status: StatusCompleted}, nil
+		},
+	}
+	reg := mgr.engines.(*fakeEngineRegistry)
+	reg.engines["qbittorrent"] = torrentEng
+
+	mon := NewMonitor(mgr, 10*time.Millisecond)
+	mon.SetCleanupSweepInterval(1 * time.Hour)
+
+	mon.tick(ctx)
+
+	if statusCalled {
+		t.Error("Monitor MUST NOT call engine.Status for terminal jobs")
+	}
+
+	if len(mgr.GetActiveJobs()) != 0 {
+		t.Error("Monitor should remove terminal job from activeJobs")
+	}
+}
+
+func TestMonitor_RecordFailureDoesNotOverwriteDurableCompletedJob(t *testing.T) {
+	mgr, jobRepo, _, _, downloadDir, _ := setupStorageTestEnv(t)
+	ctx := context.Background()
+
+	staleCopy := &Job{
+		ID:             "job_record_fail_guard",
+		Source:         "magnet:?xt=urn:btih:recordfailguard11112222",
+		Name:           "Record Fail Guard",
+		Status:         StatusDownloading,
+		Engine:         "qbittorrent",
+		EngineID:       "recordfailguard11112222",
+		Type:           TypeTorrent,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+
+	durableJob := *staleCopy
+	durableJob.Status = StatusCompleted
+	durableJob.EngineCleanupPending = true
+	jobRepo.Create(ctx, &durableJob)
+
+	mgr.addActive(staleCopy)
+
+	mon := NewMonitor(mgr, 10*time.Millisecond)
+	bus := mgr.bus.(*fakeEventBus)
+	ch := bus.Subscribe()
+
+	for i := 0; i < maxConsecutiveFailures; i++ {
+		mon.recordFailure(ctx, staleCopy, "Engine connection reset")
+	}
+
+	inDB, _ := jobRepo.GetByID(ctx, staleCopy.ID)
+	if inDB.Status != StatusCompleted {
+		t.Errorf("expected DB status to remain StatusCompleted, got %s", inDB.Status)
+	}
+
+	for len(ch) > 0 {
+		ev := <-ch
+		if ev.Type == EventJobFailed {
+			t.Errorf("EventJobFailed emitted over durable COMPLETED job!")
+		}
+	}
+
+	if len(mgr.GetActiveJobs()) != 0 {
+		t.Error("expected stale active job to be removed from activeJobs")
 	}
 }

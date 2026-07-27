@@ -2053,6 +2053,18 @@ func (f *fakeQueueRepo) Delete(ctx context.Context, jobID string) error {
 	return nil
 }
 func (f *fakeQueueRepo) NextRunnable(ctx context.Context) (*QueuedJob, error) {
+	if f.entries == nil {
+		return nil, nil
+	}
+	for jobID, entry := range f.entries {
+		return &QueuedJob{
+			JobID:      jobID,
+			Action:     entry.Action,
+			Position:   entry.Position,
+			EnqueuedAt: entry.EnqueuedAt,
+			UpdatedAt:  entry.UpdatedAt,
+		}, nil
+	}
 	return nil, nil
 }
 func (f *fakeQueueRepo) List(ctx context.Context) ([]QueuedJob, error) {

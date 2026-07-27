@@ -1623,24 +1623,8 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				}
 				return
 			}
-			// If seedAfterComplete = false, remove torrent from qBittorrent
-			if eng, ok := m.engines.Get(j.Engine); ok {
-				if te, ok := eng.(ITorrentEngine); ok {
-					if err := te.RemoveTorrent(ctx, j.EngineID, false); err != nil {
-						log.Printf("UpdateJobFromEngine: failed to remove torrent %s from daemon: %v", j.EngineID, err)
-						j.Status = StatusFailed
-						j.Error = fmt.Sprintf("failed to remove completed torrent from daemon: %v", err)
-						j.UpdatedAt = time.Now()
-						m.repo.Update(ctx, j)
-						m.removeActive(j.ID)
-						m.publish(EventJobFailed, j)
-						if m.scheduler != nil {
-							m.scheduler.Kick()
-						}
-						return
-					}
-				}
-			}
+			m.finalizeCompletedTorrent(ctx, j)
+			return
 		}
 		// Handle media finalization before marking StatusCompleted
 		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" && j.FinalPath == "" {
@@ -2371,6 +2355,10 @@ func (m *Manager) finalizeCompletedTorrent(ctx context.Context, j *Job) error {
 	}
 
 	*j = candidate
+	m.removeActive(j.ID)
+	if m.scheduler != nil {
+		m.scheduler.Kick()
+	}
 
 	err := m.removeCompletedTorrent(ctx, j)
 	if err != nil {
@@ -2392,11 +2380,7 @@ func (m *Manager) finalizeCompletedTorrent(ctx context.Context, j *Job) error {
 	}
 
 	*j = candidate
-	m.removeActive(j.ID)
 	m.publish(EventJobCompleted, j)
-	if m.scheduler != nil {
-		m.scheduler.Kick()
-	}
 	return nil
 }
 
