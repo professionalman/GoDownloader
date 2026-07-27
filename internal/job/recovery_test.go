@@ -503,31 +503,18 @@ func TestRecovery_Torrent_Seeding_RemoveTorrentFailure(t *testing.T) {
 	m.recover(ctx)
 
 	got, _ := m.Get(ctx, "torrent-seed-fail")
-	if got.Status == StatusCompleted {
-		t.Error("job MUST NOT be marked StatusCompleted when RemoveTorrent fails during recovery")
+	if got.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted for RemoveTorrent failure during recovery, got %s", got.Status)
 	}
-	if got.Status != StatusFailed {
-		t.Errorf("expected StatusFailed for RemoveTorrent failure during recovery, got %s", got.Status)
-	}
-	if got.Error == "" {
-		t.Error("expected error message for RemoveTorrent failure during recovery")
+	if !got.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == true when RemoveTorrent fails during recovery")
 	}
 
-	var failedEventReceived bool
-selectLoop:
-	for {
-		select {
-		case ev := <-sub:
-			if ev.Type == EventJobFailed && ev.Job.ID == "torrent-seed-fail" {
-				failedEventReceived = true
-				break selectLoop
-			}
-		default:
-			break selectLoop
+	for len(sub) > 0 {
+		ev := <-sub
+		if ev.Type == EventJobCompleted || ev.Type == EventJobFailed {
+			t.Errorf("expected no completion or failure events when RemoveTorrent fails during recovery, got %s", ev.Type)
 		}
-	}
-	if !failedEventReceived {
-		t.Error("expected EventJobFailed to be published when RemoveTorrent fails during recovery")
 	}
 }
 

@@ -267,6 +267,18 @@ func (f *fakeJobRepository) CountDownloading(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+func (f *fakeJobRepository) ListPendingEngineCleanups(ctx context.Context) ([]Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var list []Job
+	for _, j := range f.jobs {
+		if j.Status == StatusCompleted && (j.Type == TypeTorrent || j.Engine == "qbittorrent") && j.EngineCleanupPending {
+			list = append(list, *j)
+		}
+	}
+	return list, nil
+}
+
 type fakeEventBus struct {
 	mu     sync.Mutex
 	events []Event
@@ -1329,11 +1341,11 @@ func TestManager_UpdateJobFromEngine_RemoveTorrentFailure(t *testing.T) {
 	m.UpdateJobFromEngine(ctx, j, statusSeeding, true)
 
 	got, _ := m.Get(ctx, "job-remove-fail")
-	if got.Status != StatusFailed {
-		t.Errorf("expected StatusFailed when RemoveTorrent fails, got %s", got.Status)
+	if got.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted when RemoveTorrent fails, got %s", got.Status)
 	}
-	if got.Error == "" {
-		t.Error("expected error message when RemoveTorrent fails")
+	if !got.EngineCleanupPending {
+		t.Error("expected EngineCleanupPending == true when RemoveTorrent fails")
 	}
 }
 
@@ -2086,4 +2098,7 @@ func (f *failingUpdateJobRepo) ListRecoverable(ctx context.Context) ([]Job, erro
 }
 func (f *failingUpdateJobRepo) CountDownloading(ctx context.Context) (int, error) {
 	return 0, nil
+}
+func (f *failingUpdateJobRepo) ListPendingEngineCleanups(ctx context.Context) ([]Job, error) {
+	return nil, nil
 }

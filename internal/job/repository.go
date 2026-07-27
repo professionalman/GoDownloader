@@ -10,6 +10,7 @@ type IJobRepository interface {
 	GetByID(ctx context.Context, id string) (*Job, error)
 	List(ctx context.Context) ([]Job, error)
 	ListRecoverable(ctx context.Context) ([]Job, error)
+	ListPendingEngineCleanups(ctx context.Context) ([]Job, error)
 	CountDownloading(ctx context.Context) (int, error)
 }
 

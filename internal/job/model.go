@@ -174,6 +174,8 @@ type Job struct {
 	ConflictPolicy FilenameConflictPolicy `json:"conflictPolicy"`
 	FinalPath      string                 `json:"finalPath,omitempty"`
 
+	EngineCleanupPending bool `json:"engineCleanupPending,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

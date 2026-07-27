@@ -27,7 +27,7 @@ func NewSQLiteJobRepository(db *DB) *SQLiteJobRepository {
 
 const jobColumns = `id, source, name, status, total_bytes, completed_bytes, progress,
 	speed_bytes_per_second, eta_seconds, error, engine, engine_id, type, media_info, priority, batch_id,
-	category_id, destination_dir, work_dir, conflict_policy, final_path, created_at, updated_at`
+	category_id, destination_dir, work_dir, conflict_policy, final_path, created_at, updated_at, engine_cleanup_pending`
 
 func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	var j job.Job
@@ -40,7 +40,7 @@ func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 		&j.Type, &mediaInfoJSON,
 		&j.Priority, &j.BatchID,
 		&j.CategoryID, &j.DestinationDir, &j.WorkDir, &j.ConflictPolicy, &j.FinalPath,
-		&j.CreatedAt, &j.UpdatedAt,
+		&j.CreatedAt, &j.UpdatedAt, &j.EngineCleanupPending,
 	)
 	if err != nil {
 		return j, err
@@ -74,7 +74,7 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 	if j.ConflictPolicy == "" {
 		j.ConflictPolicy = job.ConflictPolicyRename
 	}
-	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
+	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.ID, j.Source, j.Name, j.Status,
 		j.TotalBytes, j.CompletedBytes, j.Progress,
@@ -83,7 +83,7 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 		j.Type, mediaInfoJSON,
 		j.Priority, j.BatchID,
 		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
-		j.CreatedAt, j.UpdatedAt,
+		j.CreatedAt, j.UpdatedAt, j.EngineCleanupPending,
 	)
 	if err != nil {
 		return fmt.Errorf("insert job: %w", err)
@@ -110,14 +110,14 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 		speed_bytes_per_second=?, eta_seconds=?, error=?, engine=?, engine_id=?,
 		type=?, media_info=?, priority=?, batch_id=?,
 		category_id=?, destination_dir=?, work_dir=?, conflict_policy=?, final_path=?,
-		updated_at=?
+		updated_at=?, engine_cleanup_pending=?
 		WHERE id=?`
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.Source, j.Name, j.Status, j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds, j.Error, j.Engine, j.EngineID,
 		j.Type, mediaInfoJSON, j.Priority, j.BatchID,
 		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
-		j.UpdatedAt, j.ID,
+		j.UpdatedAt, j.EngineCleanupPending, j.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update job: %w", err)
@@ -220,4 +220,24 @@ func (r *SQLiteJobRepository) CountDownloading(ctx context.Context) (int, error)
 		return 0, fmt.Errorf("count downloading jobs: %w", err)
 	}
 	return count, nil
+}
+
+// ListPendingEngineCleanups returns all completed torrent jobs requiring engine cleanup.
+func (r *SQLiteJobRepository) ListPendingEngineCleanups(ctx context.Context) ([]job.Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = 'completed' AND type = 'torrent' AND engine_cleanup_pending = 1 ORDER BY created_at ASC`, jobColumns)
+	rows, err := r.db.conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list pending engine cleanups: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []job.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
 }

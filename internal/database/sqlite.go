@@ -55,7 +55,8 @@ func (db *DB) migrate() error {
 		type TEXT NOT NULL DEFAULT 'download',
 		media_info TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL
+		updated_at DATETIME NOT NULL,
+		engine_cleanup_pending BOOLEAN NOT NULL DEFAULT 0
 	);`
 	if _, err := db.conn.Exec(createTable); err != nil {
 		return fmt.Errorf("create table jobs: %w", err)
@@ -77,6 +78,9 @@ func (db *DB) migrate() error {
 	}
 	if err := db.migrateToV06(); err != nil {
 		return fmt.Errorf("migrate to V0.6: %w", err)
+	}
+	if err := db.migrateToV07(); err != nil {
+		return fmt.Errorf("migrate to V0.7: %w", err)
 	}
 
 	return nil
@@ -447,6 +451,41 @@ func (db *DB) migrateToV06() error {
 				catID, seed.name, seed.dir, now, now); err != nil {
 				return fmt.Errorf("seed default category %s: %w", seed.name, err)
 			}
+		}
+	}
+
+	return nil
+}
+
+func (db *DB) migrateToV07() error {
+	rows, err := db.conn.Query("PRAGMA table_info(jobs)")
+	if err != nil {
+		return fmt.Errorf("query pragma table_info(jobs): %w", err)
+	}
+	defer rows.Close()
+
+	hasEngineCleanupPending := false
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan pragma table_info(jobs): %w", err)
+		}
+		if name == "engine_cleanup_pending" {
+			hasEngineCleanupPending = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows.Err pragma table_info(jobs): %w", err)
+	}
+
+	if !hasEngineCleanupPending {
+		if _, err := db.conn.Exec("ALTER TABLE jobs ADD COLUMN engine_cleanup_pending BOOLEAN NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("add column engine_cleanup_pending: %w", err)
 		}
 	}
 
