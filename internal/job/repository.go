@@ -1,6 +1,11 @@
 package job
 
-import "context"
+import (
+	"context"
+	"time"
+
+	"downloader/internal/networkpolicy"
+)
 
 // IJobRepository defines the persistence interface for jobs.
 type IJobRepository interface {
@@ -25,15 +30,20 @@ type IEventBus interface {
 type Event struct {
 	Type string
 	Job  Job
+	Data any
 }
 
 // Event types.
 const (
-	EventJobCreated   = "job.created"
-	EventJobUpdated   = "job.updated"
-	EventJobCompleted = "job.completed"
-	EventJobFailed    = "job.failed"
-	EventJobCancelled = "job.cancelled"
+	EventJobCreated              = "job.created"
+	EventJobUpdated              = "job.updated"
+	EventJobCompleted            = "job.completed"
+	EventJobFailed               = "job.failed"
+	EventJobCancelled            = "job.cancelled"
+	EventJobNetworkUpdated       = "job.network.updated"
+	EventJobSeedingPolicyUpdated = "job.seeding_policy.updated"
+	EventTrackerSourceUpdated    = "tracker_source.updated"
+	EventTrackerSourceFailed     = "tracker_source.failed"
 )
 
 // ITorrentRepository defines the persistence interface for torrent-specific data.
@@ -47,16 +57,22 @@ type ITorrentRepository interface {
 	SaveTorrentFiles(ctx context.Context, jobID string, files []TorrentFileRecord) error
 	GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error)
 	UpdateTorrentFileSelections(ctx context.Context, jobID string, selections []TorrentFileRecord) error
+	FinalizeTorrent(ctx context.Context, j *Job, stopReason string) error
 }
 
 // TorrentJobRecord holds torrent-specific persistence data.
 type TorrentJobRecord struct {
-	JobID             string
-	InfoHash          string
-	Name              string
-	TotalSize         int64
-	SeedAfterComplete bool
-	TorrentFilePath   string
+	JobID                   string
+	InfoHash                string
+	Name                    string
+	TotalSize               int64
+	SeedAfterComplete       bool
+	TorrentFilePath         string
+	SeedingPolicy           networkpolicy.SeedingPolicy
+	SeedingStartedAt        *time.Time
+	SeedingStopReason       string
+	SeedingReconcilePending bool
+	CustomTrackers          []string
 }
 
 // TorrentFileRecord holds a single torrent file's persistence data.

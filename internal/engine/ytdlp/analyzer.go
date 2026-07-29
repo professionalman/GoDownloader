@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"downloader/internal/job"
+	"downloader/internal/networkpolicy"
 )
 
 // ytdlpJSON is the raw JSON structure from yt-dlp --dump-json.
@@ -38,6 +39,11 @@ type ytdlpFormat struct {
 
 // Analyze runs yt-dlp --dump-json to extract media metadata.
 func (e *Engine) Analyze(ctx context.Context, url string) (*job.MediaInfo, error) {
+	return e.AnalyzeWithPolicy(ctx, url, nil)
+}
+
+// AnalyzeWithPolicy applies server-resolved network controls without exposing raw flags.
+func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *networkpolicy.RuntimePolicy) (*job.MediaInfo, error) {
 	args := []string{
 		"--dump-json",
 		"--no-download",
@@ -48,6 +54,7 @@ func (e *Engine) Analyze(ctx context.Context, url string) (*job.MediaInfo, error
 	if e.ffmpegPath != "" {
 		args = append(args, "--ffmpeg-location", e.ffmpegPath)
 	}
+	args = appendNetworkArgs(args, policy)
 
 	args = append(args, url)
 

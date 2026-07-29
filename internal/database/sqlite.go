@@ -82,8 +82,136 @@ func (db *DB) migrate() error {
 	if err := db.migrateV06EngineCleanupPending(); err != nil {
 		return fmt.Errorf("migrate V0.6 engine cleanup lifecycle: %w", err)
 	}
+	if err := db.migrateToV07NetworkControls(); err != nil {
+		return fmt.Errorf("migrate to V0.7 network controls: %w", err)
+	}
 
 	return nil
+}
+
+func (db *DB) migrateToV07NetworkControls() error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin V0.7 migration: %w", err)
+	}
+	defer tx.Rollback()
+	var migrationDone int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM app_settings WHERE key = 'v07_network_controls_migrated'`).Scan(&migrationDone); err != nil {
+		return fmt.Errorf("read V0.7 migration marker: %w", err)
+	}
+
+	addColumn := func(table, name, ddl string) error {
+		rows, err := tx.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			return err
+		}
+		found := false
+		for rows.Next() {
+			var cid, notNull, pk int
+			var colName, typ string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &colName, &typ, &notNull, &defaultValue, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			if colName == name {
+				found = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+		_, err = tx.Exec("ALTER TABLE " + table + " ADD COLUMN " + ddl)
+		return err
+	}
+
+	jobColumns := []struct{ name, ddl string }{
+		{"network_policy_json", "network_policy_json TEXT NOT NULL DEFAULT '{}'"},
+		{"effective_download_limit_bps", "effective_download_limit_bps INTEGER NOT NULL DEFAULT 0"},
+		{"effective_upload_limit_bps", "effective_upload_limit_bps INTEGER NOT NULL DEFAULT 0"},
+		{"network_reconcile_pending", "network_reconcile_pending BOOLEAN NOT NULL DEFAULT 0"},
+	}
+	for _, col := range jobColumns {
+		if err := addColumn("jobs", col.name, col.ddl); err != nil {
+			return fmt.Errorf("add jobs.%s: %w", col.name, err)
+		}
+	}
+
+	torrentColumns := []struct{ name, ddl string }{
+		{"seeding_mode", "seeding_mode TEXT NOT NULL DEFAULT 'none'"},
+		{"seed_ratio_limit", "seed_ratio_limit REAL"},
+		{"seed_time_limit_seconds", "seed_time_limit_seconds INTEGER"},
+		{"seeding_started_at", "seeding_started_at DATETIME"},
+		{"seeding_stop_reason", "seeding_stop_reason TEXT NOT NULL DEFAULT ''"},
+		{"seeding_reconcile_pending", "seeding_reconcile_pending BOOLEAN NOT NULL DEFAULT 0"},
+		{"custom_trackers_json", "custom_trackers_json TEXT NOT NULL DEFAULT '[]'"},
+	}
+	for _, col := range torrentColumns {
+		if err := addColumn("torrent_jobs", col.name, col.ddl); err != nil {
+			return fmt.Errorf("add torrent_jobs.%s: %w", col.name, err)
+		}
+	}
+
+	if migrationDone == 0 {
+		if _, err := tx.Exec(`UPDATE torrent_jobs
+			SET seeding_mode = CASE WHEN seed_after_complete = 1 THEN 'unlimited' ELSE 'none' END`); err != nil {
+			return fmt.Errorf("backfill seeding policy: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO app_settings (key, value, updated_at)
+			VALUES ('v07_network_controls_migrated', '1', ?)`, time.Now()); err != nil {
+			return fmt.Errorf("write V0.7 migration marker: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS encrypted_secrets (
+		scope TEXT NOT NULL,
+		owner_id TEXT NOT NULL,
+		field_name TEXT NOT NULL,
+		ciphertext BLOB NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (scope, owner_id, field_name)
+	)`); err != nil {
+		return fmt.Errorf("create encrypted_secrets: %w", err)
+	}
+
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS tracker_sources (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		url TEXT NOT NULL UNIQUE,
+		enabled BOOLEAN NOT NULL DEFAULT 1,
+		refresh_interval_seconds INTEGER NOT NULL,
+		etag TEXT NOT NULL DEFAULT '',
+		last_modified TEXT NOT NULL DEFAULT '',
+		last_checked_at DATETIME,
+		last_success_at DATETIME,
+		last_error TEXT NOT NULL DEFAULT '',
+		tracker_count INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create tracker_sources: %w", err)
+	}
+	if err := addColumn("tracker_sources", "tracker_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("add tracker_sources.tracker_count: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS tracker_source_entries (
+		source_id TEXT NOT NULL,
+		tracker_url TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		PRIMARY KEY (source_id, tracker_url),
+		FOREIGN KEY (source_id) REFERENCES tracker_sources(id) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("create tracker_source_entries: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_tracker_sources_due
+		ON tracker_sources(enabled, last_checked_at)`); err != nil {
+		return fmt.Errorf("create tracker source index: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // migrateFromV01 handles migration from V0.1 schema.

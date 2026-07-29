@@ -118,14 +118,14 @@ func (c *Client) call(method string, params ...interface{}) (json.RawMessage, er
 
 // AddURI sends a download request to aria2 and returns the GID.
 func (c *Client) AddURI(uri string, dir string) (string, error) {
-	return c.AddURIWithOptions(uri, map[string]string{"dir": dir})
+	return c.AddURIWithOptions(uri, map[string]any{"dir": dir})
 }
 
 // AddURIWithOptions sends a download request to aria2 with custom options and returns the GID.
-func (c *Client) AddURIWithOptions(uri string, opts map[string]string) (string, error) {
+func (c *Client) AddURIWithOptions(uri string, opts map[string]any) (string, error) {
 	uris := []string{uri}
 	if opts == nil {
-		opts = make(map[string]string)
+		opts = make(map[string]any)
 	}
 
 	result, err := c.call("aria2.addUri", uris, opts)
@@ -139,6 +139,40 @@ func (c *Client) AddURIWithOptions(uri string, opts map[string]string) (string, 
 	}
 
 	return gid, nil
+}
+
+func (c *Client) ChangeOption(gid string, opts map[string]any) error {
+	_, err := c.call("aria2.changeOption", gid, opts)
+	return err
+}
+
+func (c *Client) GetOption(gid string) (map[string]string, error) {
+	result, err := c.call("aria2.getOption", gid)
+	if err != nil {
+		return nil, err
+	}
+	var options map[string]string
+	if err := json.Unmarshal(result, &options); err != nil {
+		return nil, fmt.Errorf("unmarshal options: %w", err)
+	}
+	return options, nil
+}
+
+func (c *Client) ChangeGlobalOption(opts map[string]any) error {
+	_, err := c.call("aria2.changeGlobalOption", opts)
+	return err
+}
+
+func (c *Client) GetGlobalOption() (map[string]string, error) {
+	result, err := c.call("aria2.getGlobalOption")
+	if err != nil {
+		return nil, err
+	}
+	var options map[string]string
+	if err := json.Unmarshal(result, &options); err != nil {
+		return nil, fmt.Errorf("unmarshal global options: %w", err)
+	}
+	return options, nil
 }
 
 // TellStatus retrieves the status of a download by its GID.

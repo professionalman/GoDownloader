@@ -2,6 +2,8 @@ package job
 
 import "context"
 
+import "downloader/internal/networkpolicy"
+
 // EngineStatus holds the normalized status returned by a download engine.
 type EngineStatus struct {
 	Status JobStatus
@@ -14,18 +16,21 @@ type EngineStatus struct {
 
 	Progress float64
 
-	Error       string
-	FileName    string
-	OutputPath  string
-	UploadSpeed int64
-	Uploaded    int64
-	Ratio       float64
-	Seeders     int
-	Leechers    int
+	Error              string
+	FileName           string
+	OutputPath         string
+	UploadSpeed        int64
+	Uploaded           int64
+	Ratio              float64
+	Seeders            int
+	Leechers           int
+	SeedingTimeSeconds int64
+	TorrentPrivate     *bool
 }
 
 // IEngine defines the interface for a download engine.
 type IEngine interface {
+	Capabilities() networkpolicy.EngineCapabilities
 	// Start begins a new download and returns the engine-specific ID.
 	Start(ctx context.Context, j *Job, downloadDir string) (engineID string, err error)
 
@@ -40,6 +45,46 @@ type IEngine interface {
 
 	// Status retrieves the current status of a download.
 	Status(ctx context.Context, j *Job) (*EngineStatus, error)
+}
+
+type IGlobalDownloadLimitController interface {
+	GetGlobalDownloadLimit(ctx context.Context) (int64, error)
+	SetGlobalDownloadLimit(ctx context.Context, bytesPerSecond int64) error
+}
+
+type IDownloadLimitController interface {
+	GetDownloadLimit(ctx context.Context, j *Job) (int64, error)
+	SetDownloadLimit(ctx context.Context, j *Job, bytesPerSecond int64) error
+}
+
+type IUploadLimitController interface {
+	GetUploadLimit(ctx context.Context, j *Job) (int64, error)
+	SetUploadLimit(ctx context.Context, j *Job, bytesPerSecond int64) error
+}
+
+type ITrackerController interface {
+	GetTrackers(ctx context.Context, j *Job) ([]networkpolicy.Tracker, error)
+	AddTrackers(ctx context.Context, j *Job, trackers []string) error
+	GetTorrentPrivacy(ctx context.Context, j *Job) (bool, error)
+}
+
+type ISeedingPolicyController interface {
+	ApplySeedingPolicy(ctx context.Context, j *Job, policy networkpolicy.SeedingPolicy) error
+}
+
+type TorrentOwnership struct {
+	Hash     string
+	Category string
+	Tags     []string
+}
+
+type IManagedTorrentProxyController interface {
+	ListTorrentOwnership(ctx context.Context) ([]TorrentOwnership, error)
+	ApplyManagedProxy(ctx context.Context, policy *networkpolicy.RuntimePolicy) error
+}
+
+type INetworkMediaAnalyzer interface {
+	AnalyzeWithPolicy(ctx context.Context, url string, policy *networkpolicy.RuntimePolicy) (*MediaInfo, error)
 }
 
 // IMediaAnalyzer is optionally implemented by engines that can extract media metadata.

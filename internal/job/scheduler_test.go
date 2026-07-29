@@ -12,6 +12,7 @@ import (
 
 	"downloader/internal/database"
 	"downloader/internal/job"
+	"downloader/internal/networkpolicy"
 )
 
 func setupSchedulerTestDB(t *testing.T) (*database.DB, *database.SQLiteJobRepository, *database.SQLiteQueueRepository) {
@@ -387,6 +388,10 @@ func (f *fakeBus) UnsubscribeType(eventType string, ch <-chan job.Event) {}
 
 type fakeEngine struct {
 	statusFunc func(ctx context.Context, j *job.Job) (*job.EngineStatus, error)
+}
+
+func (f *fakeEngine) Capabilities() networkpolicy.EngineCapabilities {
+	return networkpolicy.EngineCapabilities{Pause: true, Resume: true, Cancel: true, Retry: true}
 }
 
 func (f *fakeEngine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {

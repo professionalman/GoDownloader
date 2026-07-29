@@ -27,11 +27,13 @@ func NewSQLiteJobRepository(db *DB) *SQLiteJobRepository {
 
 const jobColumns = `id, source, name, status, total_bytes, completed_bytes, progress,
 	speed_bytes_per_second, eta_seconds, error, engine, engine_id, type, media_info, priority, batch_id,
-	category_id, destination_dir, work_dir, conflict_policy, final_path, created_at, updated_at, engine_cleanup_pending`
+	category_id, destination_dir, work_dir, conflict_policy, final_path, created_at, updated_at, engine_cleanup_pending,
+	network_policy_json, effective_download_limit_bps, effective_upload_limit_bps, network_reconcile_pending`
 
 func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	var j job.Job
 	var mediaInfoJSON string
+	var networkPolicyJSON string
 	err := scanner.Scan(
 		&j.ID, &j.Source, &j.Name, &j.Status,
 		&j.TotalBytes, &j.CompletedBytes, &j.Progress,
@@ -41,6 +43,8 @@ func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 		&j.Priority, &j.BatchID,
 		&j.CategoryID, &j.DestinationDir, &j.WorkDir, &j.ConflictPolicy, &j.FinalPath,
 		&j.CreatedAt, &j.UpdatedAt, &j.EngineCleanupPending,
+		&networkPolicyJSON, &j.EffectiveDownloadLimitBytesPerSecond,
+		&j.EffectiveUploadLimitBytesPerSecond, &j.NetworkReconcilePending,
 	)
 	if err != nil {
 		return j, err
@@ -56,6 +60,9 @@ func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	}
 	if j.ConflictPolicy == "" {
 		j.ConflictPolicy = job.ConflictPolicyRename
+	}
+	if networkPolicyJSON != "" && networkPolicyJSON != "{}" {
+		_ = json.Unmarshal([]byte(networkPolicyJSON), &j.NetworkPolicy)
 	}
 	return j, nil
 }
@@ -74,8 +81,12 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 	if j.ConflictPolicy == "" {
 		j.ConflictPolicy = job.ConflictPolicyRename
 	}
-	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
-	_, err := r.db.conn.ExecContext(ctx, query,
+	networkPolicyJSON, err := json.Marshal(j.NetworkPolicy)
+	if err != nil {
+		return fmt.Errorf("marshal network policy: %w", err)
+	}
+	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
+	_, err = r.db.conn.ExecContext(ctx, query,
 		j.ID, j.Source, j.Name, j.Status,
 		j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds,
@@ -84,6 +95,8 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 		j.Priority, j.BatchID,
 		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
 		j.CreatedAt, j.UpdatedAt, j.EngineCleanupPending,
+		string(networkPolicyJSON), j.EffectiveDownloadLimitBytesPerSecond,
+		j.EffectiveUploadLimitBytesPerSecond, j.NetworkReconcilePending,
 	)
 	if err != nil {
 		return fmt.Errorf("insert job: %w", err)
@@ -105,19 +118,26 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 	if j.ConflictPolicy == "" {
 		j.ConflictPolicy = job.ConflictPolicyRename
 	}
+	networkPolicyJSON, marshalErr := json.Marshal(j.NetworkPolicy)
+	if marshalErr != nil {
+		return fmt.Errorf("marshal network policy: %w", marshalErr)
+	}
 	query := `UPDATE jobs SET
 		source=?, name=?, status=?, total_bytes=?, completed_bytes=?, progress=?,
 		speed_bytes_per_second=?, eta_seconds=?, error=?, engine=?, engine_id=?,
 		type=?, media_info=?, priority=?, batch_id=?,
 		category_id=?, destination_dir=?, work_dir=?, conflict_policy=?, final_path=?,
-		updated_at=?, engine_cleanup_pending=?
+		updated_at=?, engine_cleanup_pending=?, network_policy_json=?,
+		effective_download_limit_bps=?, effective_upload_limit_bps=?, network_reconcile_pending=?
 		WHERE id=?`
 	_, err := r.db.conn.ExecContext(ctx, query,
 		j.Source, j.Name, j.Status, j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds, j.Error, j.Engine, j.EngineID,
 		j.Type, mediaInfoJSON, j.Priority, j.BatchID,
 		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
-		j.UpdatedAt, j.EngineCleanupPending, j.ID,
+		j.UpdatedAt, j.EngineCleanupPending, string(networkPolicyJSON),
+		j.EffectiveDownloadLimitBytesPerSecond, j.EffectiveUploadLimitBytesPerSecond,
+		j.NetworkReconcilePending, j.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update job: %w", err)

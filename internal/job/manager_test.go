@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"downloader/internal/networkpolicy"
 )
 
 // fakeEngine is a test double for Engine.
@@ -19,6 +21,10 @@ type fakeEngine struct {
 	resumeFunc func(ctx context.Context, j *Job) error
 	cancelFunc func(ctx context.Context, j *Job) error
 	statusFunc func(ctx context.Context, j *Job) (*EngineStatus, error)
+}
+
+func (f *fakeEngine) Capabilities() networkpolicy.EngineCapabilities {
+	return networkpolicy.EngineCapabilities{Pause: true, Resume: true, Cancel: true, Retry: true}
 }
 
 func (f *fakeEngine) Start(ctx context.Context, j *Job, dir string) (string, error) {
@@ -392,6 +398,19 @@ func (f *fakeTorrentRepository) GetActiveTorrentJobByInfoHash(ctx context.Contex
 		}
 	}
 	return nil, nil
+}
+
+func (f *fakeTorrentRepository) FinalizeTorrent(ctx context.Context, j *Job, stopReason string) error {
+	if err := f.jobRepo.Update(ctx, j); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rec := f.torrentJobs[j.ID]; rec != nil {
+		rec.SeedingStopReason = stopReason
+		rec.SeedingReconcilePending = false
+	}
+	return nil
 }
 
 func (f *fakeTorrentRepository) SaveTorrentFiles(ctx context.Context, jobID string, files []TorrentFileRecord) error {

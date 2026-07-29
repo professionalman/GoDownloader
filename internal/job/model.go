@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"downloader/internal/networkpolicy"
 )
 
 // JobStatus represents the state of a download job.
@@ -176,8 +178,27 @@ type Job struct {
 
 	EngineCleanupPending bool `json:"engineCleanupPending,omitempty"`
 
+	NetworkPolicy                        networkpolicy.JobNetworkPolicy `json:"networkPolicy"`
+	EffectiveDownloadLimitBytesPerSecond int64                          `json:"effectiveDownloadLimitBytesPerSecond"`
+	EffectiveUploadLimitBytesPerSecond   int64                          `json:"effectiveUploadLimitBytesPerSecond,omitempty"`
+	NetworkReconcilePending              bool                           `json:"networkReconcilePending,omitempty"`
+	SeedingPolicy                        networkpolicy.SeedingPolicy    `json:"seedingPolicy"`
+	SeedingStartedAt                     *time.Time                     `json:"seedingStartedAt,omitempty"`
+	SeedingStopReason                    string                         `json:"seedingStopReason,omitempty"`
+	CustomTrackers                       []string                       `json:"customTrackers,omitempty"`
+
+	runtimeNetworkPolicy *networkpolicy.RuntimePolicy
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func (j *Job) SetRuntimeNetworkPolicy(p *networkpolicy.RuntimePolicy) {
+	j.runtimeNetworkPolicy = p
+}
+
+func (j *Job) RuntimeNetworkPolicy() *networkpolicy.RuntimePolicy {
+	return j.runtimeNetworkPolicy
 }
 
 // FilenameConflictPolicy defines the strategy when a destination file already exists.
@@ -238,21 +259,27 @@ type QueuedJob struct {
 
 // BatchInput defines a single job input inside a batch submission.
 type BatchInput struct {
-	Source         string                 `json:"source"`
-	Priority       JobPriority            `json:"priority,omitempty"`
-	CategoryID     string                 `json:"categoryId,omitempty"`
-	DestinationDir string                 `json:"destinationDir,omitempty"`
-	ConflictPolicy FilenameConflictPolicy `json:"conflictPolicy,omitempty"`
+	Source         string                                  `json:"source"`
+	Priority       JobPriority                             `json:"priority,omitempty"`
+	CategoryID     string                                  `json:"categoryId,omitempty"`
+	DestinationDir string                                  `json:"destinationDir,omitempty"`
+	ConflictPolicy FilenameConflictPolicy                  `json:"conflictPolicy,omitempty"`
+	NetworkPolicy  *networkpolicy.JobNetworkPolicyOverride `json:"networkPolicy,omitempty"`
+	SeedingPolicy  *networkpolicy.SeedingPolicy            `json:"seedingPolicy,omitempty"`
+	Trackers       []string                                `json:"trackers,omitempty"`
 }
 
 // CreateBatchRequest represents the POST /jobs/batch body.
 type CreateBatchRequest struct {
-	Inputs         []BatchInput           `json:"inputs,omitempty"`
-	Sources        []string               `json:"sources,omitempty"`
-	Priority       JobPriority            `json:"priority,omitempty"`
-	CategoryID     string                 `json:"categoryId,omitempty"`
-	DestinationDir string                 `json:"destinationDir,omitempty"`
-	ConflictPolicy FilenameConflictPolicy `json:"conflictPolicy,omitempty"`
+	Inputs         []BatchInput                            `json:"inputs,omitempty"`
+	Sources        []string                                `json:"sources,omitempty"`
+	Priority       JobPriority                             `json:"priority,omitempty"`
+	CategoryID     string                                  `json:"categoryId,omitempty"`
+	DestinationDir string                                  `json:"destinationDir,omitempty"`
+	ConflictPolicy FilenameConflictPolicy                  `json:"conflictPolicy,omitempty"`
+	NetworkPolicy  *networkpolicy.JobNetworkPolicyOverride `json:"networkPolicy,omitempty"`
+	SeedingPolicy  *networkpolicy.SeedingPolicy            `json:"seedingPolicy,omitempty"`
+	Trackers       []string                                `json:"trackers,omitempty"`
 }
 
 // BatchItemResult represents the outcome for one item in a batch request.

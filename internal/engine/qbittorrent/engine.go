@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"downloader/internal/job"
+	"downloader/internal/networkpolicy"
 )
 
 const (
@@ -47,6 +49,14 @@ type Engine struct {
 func NewEngine(baseURL, username, password string, timeoutSecs int) *Engine {
 	return &Engine{
 		client: NewClient(baseURL, username, password, time.Duration(timeoutSecs)*time.Second),
+	}
+}
+
+func (e *Engine) Capabilities() networkpolicy.EngineCapabilities {
+	return networkpolicy.EngineCapabilities{
+		Pause: true, Resume: true, Cancel: true, Retry: true,
+		GlobalDownloadLimit: true, PerJobDownloadLimit: true, PerJobUploadLimit: true,
+		FileSelection: true, Trackers: true, SeedingPolicy: true,
 	}
 }
 
@@ -91,7 +101,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 		return nil, err
 	}
 
-	return &job.EngineStatus{
+	status := &job.EngineStatus{
 		Status:              mapQBState(info.State),
 		Progress:            normalizeProgress(info.Progress),
 		SpeedBytesPerSecond: info.DLSpeed,
@@ -104,7 +114,163 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 		Seeders:             info.NumSeeds,
 		Leechers:            info.NumLeechs,
 		FileName:            info.Name,
-	}, nil
+	}
+	if properties, propErr := e.client.GetTorrentProperties(ctx, j.EngineID); propErr == nil {
+		status.SeedingTimeSeconds = properties.SeedingTime
+		status.TorrentPrivate = &properties.IsPrivate
+	}
+	return status, nil
+}
+
+func (e *Engine) SetDownloadLimit(ctx context.Context, j *job.Job, bytesPerSecond int64) error {
+	if j.EngineID == "" {
+		return errors.New("missing persisted torrent hash")
+	}
+	return e.client.SetDownloadLimit(ctx, j.EngineID, bytesPerSecond)
+}
+
+func (e *Engine) GetDownloadLimit(ctx context.Context, j *job.Job) (int64, error) {
+	info, err := e.client.GetTorrentInfo(ctx, j.EngineID)
+	if err != nil {
+		return 0, err
+	}
+	return info.DLLimit, nil
+}
+
+func (e *Engine) SetUploadLimit(ctx context.Context, j *job.Job, bytesPerSecond int64) error {
+	if j.EngineID == "" {
+		return errors.New("missing persisted torrent hash")
+	}
+	return e.client.SetUploadLimit(ctx, j.EngineID, bytesPerSecond)
+}
+
+func (e *Engine) GetUploadLimit(ctx context.Context, j *job.Job) (int64, error) {
+	info, err := e.client.GetTorrentInfo(ctx, j.EngineID)
+	if err != nil {
+		return 0, err
+	}
+	return info.UPLimit, nil
+}
+
+func (e *Engine) GetTrackers(ctx context.Context, j *job.Job) ([]networkpolicy.Tracker, error) {
+	if j.EngineID == "" {
+		return nil, errors.New("missing persisted torrent hash")
+	}
+	raw, err := e.client.GetTrackers(ctx, j.EngineID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]networkpolicy.Tracker, 0, len(raw))
+	for _, tracker := range raw {
+		if strings.Contains(tracker.URL, "://") {
+			result = append(result, networkpolicy.Tracker{URL: tracker.URL})
+		}
+	}
+	return result, nil
+}
+
+func (e *Engine) AddTrackers(ctx context.Context, j *job.Job, trackers []string) error {
+	if j.EngineID == "" {
+		return errors.New("missing persisted torrent hash")
+	}
+	return e.client.AddTrackers(ctx, j.EngineID, trackers)
+}
+
+func (e *Engine) GetTorrentPrivacy(ctx context.Context, j *job.Job) (bool, error) {
+	if j.EngineID == "" {
+		return false, errors.New("missing persisted torrent hash")
+	}
+	properties, err := e.client.GetTorrentProperties(ctx, j.EngineID)
+	if err != nil {
+		return false, err
+	}
+	return properties.IsPrivate, nil
+}
+
+func (e *Engine) ApplySeedingPolicy(ctx context.Context, j *job.Job, policy networkpolicy.SeedingPolicy) error {
+	if j.EngineID == "" {
+		return errors.New("missing persisted torrent hash")
+	}
+	ratio := float64(-1)
+	minutes := int64(-1)
+	switch policy.Mode {
+	case networkpolicy.SeedingModeRatio:
+		ratio = *policy.RatioLimit
+	case networkpolicy.SeedingModeDuration:
+		minutes = int64(math.Ceil(float64(*policy.TimeLimitSeconds) / 60))
+	case networkpolicy.SeedingModeRatioOrDuration:
+		ratio = *policy.RatioLimit
+		minutes = int64(math.Ceil(float64(*policy.TimeLimitSeconds) / 60))
+	}
+	return e.client.SetShareLimits(ctx, j.EngineID, ratio, minutes)
+}
+
+func (e *Engine) ListTorrentOwnership(ctx context.Context) ([]job.TorrentOwnership, error) {
+	torrents, err := e.client.GetTorrents(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	result := make([]job.TorrentOwnership, 0, len(torrents))
+	for _, torrent := range torrents {
+		tags := strings.Split(torrent.Tags, ",")
+		for i := range tags {
+			tags[i] = strings.TrimSpace(tags[i])
+		}
+		result = append(result, job.TorrentOwnership{Hash: strings.ToLower(torrent.Hash), Category: torrent.Category, Tags: tags})
+	}
+	return result, nil
+}
+
+func (e *Engine) ApplyManagedProxy(ctx context.Context, runtime *networkpolicy.RuntimePolicy) error {
+	if runtime == nil {
+		return errors.New("managed proxy policy is required")
+	}
+	policy := runtime.Policy.Proxy
+	preferences := qbPreferences{}
+	switch policy.Mode {
+	case networkpolicy.ProxyModeDisabled:
+		preferences.ProxyType = 0
+	case networkpolicy.ProxyModeCustom:
+		switch policy.Protocol {
+		case networkpolicy.ProxyProtocolHTTP:
+			if runtime.ProxyPassword != "" {
+				preferences.ProxyType = 3
+			} else {
+				preferences.ProxyType = 1
+			}
+		case networkpolicy.ProxyProtocolSOCKS5:
+			if runtime.ProxyPassword != "" {
+				preferences.ProxyType = 4
+			} else {
+				preferences.ProxyType = 2
+			}
+		default:
+			return errors.New("qBittorrent managed proxy supports only HTTP and SOCKS5")
+		}
+		preferences.ProxyIP = policy.Host
+		preferences.ProxyPort = policy.Port
+		preferences.ProxyAuthEnabled = policy.Username != "" || runtime.ProxyPassword != ""
+		preferences.ProxyUsername = policy.Username
+		preferences.ProxyPassword = runtime.ProxyPassword
+		preferences.ProxyHostnameLookup = true
+		preferences.ProxyBittorrent = true
+		preferences.ProxyPeerConnections = true
+	default:
+		return errors.New("qBittorrent system proxy mode is unsupported")
+	}
+	if err := e.client.SetPreferences(ctx, preferences); err != nil {
+		return err
+	}
+	applied, err := e.client.GetPreferences(ctx)
+	if err != nil {
+		return err
+	}
+	if applied.ProxyType != preferences.ProxyType || applied.ProxyIP != preferences.ProxyIP ||
+		applied.ProxyPort != preferences.ProxyPort || applied.ProxyUsername != preferences.ProxyUsername ||
+		applied.ProxyBittorrent != preferences.ProxyBittorrent {
+		return errors.New("qBittorrent proxy verification failed")
+	}
+	return nil
 }
 
 func (e *Engine) ensureCategory(ctx context.Context) error {

@@ -22,6 +22,31 @@ type qbTorrentInfo struct {
 	ContentPath   string  `json:"content_path"`
 	AddedOn       int64   `json:"added_on"`
 	CompletionOn  int64   `json:"completion_on"`
+	DLLimit       int64   `json:"dl_limit"`
+	UPLimit       int64   `json:"up_limit"`
+}
+
+type qbTorrentProperties struct {
+	IsPrivate   bool  `json:"is_private"`
+	SeedingTime int64 `json:"seeding_time"`
+}
+
+type qbTracker struct {
+	URL    string `json:"url"`
+	Status int    `json:"status"`
+	Tier   int    `json:"tier"`
+}
+
+type qbPreferences struct {
+	ProxyType            int    `json:"proxy_type"`
+	ProxyIP              string `json:"proxy_ip"`
+	ProxyPort            int    `json:"proxy_port"`
+	ProxyAuthEnabled     bool   `json:"proxy_auth_enabled"`
+	ProxyUsername        string `json:"proxy_username"`
+	ProxyPassword        string `json:"proxy_password"`
+	ProxyHostnameLookup  bool   `json:"proxy_hostname_lookup"`
+	ProxyBittorrent      bool   `json:"proxy_bittorrent"`
+	ProxyPeerConnections bool   `json:"proxy_peer_connections"`
 }
 
 // qbTorrentFile maps to /api/v2/torrents/files response.

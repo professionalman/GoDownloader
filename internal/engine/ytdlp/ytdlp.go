@@ -7,9 +7,12 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"downloader/internal/job"
+	"downloader/internal/networkpolicy"
 )
 
 // downloadState tracks an active yt-dlp download process.
@@ -51,6 +54,23 @@ func NewEngine(ytdlpPath, ffmpegPath string) *Engine {
 	}
 }
 
+func (e *Engine) Capabilities() networkpolicy.EngineCapabilities {
+	return networkpolicy.EngineCapabilities{
+		Cancel: true, Retry: true, GlobalDownloadLimit: true,
+		PerJobDownloadLimit: true, Proxy: true, UserAgent: true,
+		CustomHeaders: true, RetryPolicy: true, TimeoutPolicy: true,
+		ProxyProtocols: []networkpolicy.ProxyProtocol{
+			networkpolicy.ProxyProtocolHTTP,
+			networkpolicy.ProxyProtocolHTTPS,
+			networkpolicy.ProxyProtocolSOCKS5,
+		},
+		StartupOnly: map[string]bool{
+			"globalDownloadLimit": true, "downloadLimit": true, "proxy": true,
+			"userAgent": true, "customHeaders": true, "retryPolicy": true, "timeoutPolicy": true,
+		},
+	}
+}
+
 // Available checks if yt-dlp is installed and accessible.
 func (e *Engine) Available() bool {
 	cmd := exec.Command(e.ytdlpPath, "--version")
@@ -72,6 +92,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	if e.ffmpegPath != "" {
 		args = append(args, "--ffmpeg-location", e.ffmpegPath)
 	}
+	args = appendNetworkArgs(args, j.RuntimeNetworkPolicy())
 
 	// Apply format selection if specified
 	if j.MediaInfo != nil && j.MediaInfo.SelectedFmt != "" {
@@ -98,6 +119,53 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	go e.runDownload(dlCtx, j.ID, state, args)
 
 	return j.ID, nil
+}
+
+func appendNetworkArgs(args []string, runtime *networkpolicy.RuntimePolicy) []string {
+	if runtime == nil {
+		return args
+	}
+	p := runtime.Policy
+	switch p.Proxy.Mode {
+	case networkpolicy.ProxyModeDisabled:
+		args = append(args, "--proxy", "")
+	case networkpolicy.ProxyModeCustom:
+		auth := ""
+		if p.Proxy.Username != "" {
+			auth = p.Proxy.Username
+			if runtime.ProxyPassword != "" {
+				auth += ":" + runtime.ProxyPassword
+			}
+			auth += "@"
+		}
+		args = append(args, "--proxy", fmt.Sprintf("%s://%s%s:%d", p.Proxy.Protocol, auth, p.Proxy.Host, p.Proxy.Port))
+	}
+	if p.DownloadLimitBytesPerSecond > 0 {
+		args = append(args, "--limit-rate", strconv.FormatInt(p.DownloadLimitBytesPerSecond, 10))
+	}
+	if p.TimeoutPolicy.RequestTimeoutSeconds > 0 {
+		args = append(args, "--socket-timeout", strconv.Itoa(p.TimeoutPolicy.RequestTimeoutSeconds))
+	}
+	if p.RetryPolicy.MaxAttempts > 0 {
+		retries := strconv.Itoa(p.RetryPolicy.MaxAttempts - 1)
+		args = append(args, "--retries", retries, "--fragment-retries", retries)
+	}
+	if p.RetryPolicy.RetryWaitSeconds > 0 {
+		args = append(args, "--retry-sleep", strconv.Itoa(p.RetryPolicy.RetryWaitSeconds))
+	}
+	if p.UserAgent != "" {
+		args = append(args, "--user-agent", p.UserAgent)
+	}
+	for _, h := range p.HTTPHeaders {
+		value := h.Value
+		if h.Sensitive {
+			value = runtime.HeaderValues[strings.ToLower(h.Name)]
+		}
+		if value != "" {
+			args = append(args, "--add-header", h.Name+":"+value)
+		}
+	}
+	return args
 }
 
 // Pause is not supported for yt-dlp downloads.

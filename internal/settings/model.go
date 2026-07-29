@@ -2,6 +2,8 @@ package settings
 
 import "context"
 
+import "downloader/internal/networkpolicy"
+
 // ISettingsRepository defines the persistence interface for application settings.
 type ISettingsRepository interface {
 	Get(ctx context.Context, key string) (string, error)
@@ -38,8 +40,19 @@ type StorageSettings struct {
 
 // AppSettings represents user-configurable application settings.
 type AppSettings struct {
-	Queue   QueueSettings   `json:"queue"`
-	Storage StorageSettings `json:"storage"`
+	Queue              QueueSettings                 `json:"queue"`
+	Storage            StorageSettings               `json:"storage"`
+	Network            networkpolicy.NetworkSettings `json:"network"`
+	Torrent            networkpolicy.TorrentSettings `json:"torrent"`
+	Overrides          map[string]bool               `json:"overrides,omitempty"`
+	ApplicationResults []ApplicationResult           `json:"applicationResults,omitempty"`
+}
+
+type ApplicationResult struct {
+	Target  string `json:"target"`
+	Status  string `json:"status"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // UpdateQueueSettingsRequest represents the request body for updating queue settings.
@@ -60,4 +73,22 @@ type UpdateSettingsRequest struct {
 		MinimumFreeSpaceBytes    *int64  `json:"minimumFreeSpaceBytes,omitempty"`
 		DefaultConflictPolicy    *string `json:"defaultConflictPolicy,omitempty"`
 	} `json:"storage,omitempty"`
+	Network *struct {
+		GlobalDownloadLimitBytesPerSecond *int64                                `json:"globalDownloadLimitBytesPerSecond,omitempty"`
+		Proxy                             *networkpolicy.ProxyPolicy            `json:"proxy,omitempty"`
+		ProxyPassword                     *string                               `json:"proxyPassword,omitempty"`
+		ClearProxyPassword                bool                                  `json:"clearProxyPassword,omitempty"`
+		UserAgent                         *string                               `json:"userAgent,omitempty"`
+		HTTPHeaders                       *[]networkpolicy.HTTPHeader           `json:"httpHeaders,omitempty"`
+		RetryPolicy                       *networkpolicy.RetryPolicy            `json:"retryPolicy,omitempty"`
+		TimeoutPolicy                     *networkpolicy.TimeoutPolicy          `json:"timeoutPolicy,omitempty"`
+		DirectConnections                 *networkpolicy.DirectConnectionPolicy `json:"directConnections,omitempty"`
+	} `json:"network,omitempty"`
+	Torrent *struct {
+		DownloadLimitBytesPerSecond            *int64                       `json:"downloadLimitBytesPerSecond,omitempty"`
+		UploadLimitBytesPerSecond              *int64                       `json:"uploadLimitBytesPerSecond,omitempty"`
+		SeedingPolicy                          *networkpolicy.SeedingPolicy `json:"seedingPolicy,omitempty"`
+		ApplyTrackerSubscriptionsToNewTorrents *bool                        `json:"applyTrackerSubscriptionsToNewTorrents,omitempty"`
+		ManageQBitGlobalNetworkSettings        *bool                        `json:"manageQBitGlobalNetworkSettings,omitempty"`
+	} `json:"torrent,omitempty"`
 }

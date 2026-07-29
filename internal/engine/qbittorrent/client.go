@@ -167,6 +167,31 @@ func (c *Client) GetAPIVersion(ctx context.Context) (string, error) {
 	return string(body), nil
 }
 
+func (c *Client) GetPreferences(ctx context.Context) (*qbPreferences, error) {
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", "/api/v2/app/preferences", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get preferences, status: %d", resp.StatusCode)
+	}
+	var preferences qbPreferences
+	if err := json.NewDecoder(resp.Body).Decode(&preferences); err != nil {
+		return nil, err
+	}
+	return &preferences, nil
+}
+
+func (c *Client) SetPreferences(ctx context.Context, preferences qbPreferences) error {
+	payload, err := json.Marshal(preferences)
+	if err != nil {
+		return err
+	}
+	data := url.Values{"json": {string(payload)}}
+	return c.postForm(ctx, "/api/v2/app/setPreferences", data)
+}
+
 // ValidateCompatibility checks if qBittorrent version is >= 5.0 and Web API version is >= 2.0.
 func (c *Client) ValidateCompatibility(ctx context.Context) error {
 	vStr, err := c.GetVersion(ctx)
@@ -367,6 +392,77 @@ func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIDs []int
 		return fmt.Errorf("failed to set file priority, status: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *Client) postForm(ctx context.Context, path string, data url.Values) error {
+	resp, err := c.doAuthenticatedRequest(ctx, "POST", path, []byte(data.Encode()), "application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s failed with status: %d", path, resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) SetDownloadLimit(ctx context.Context, hash string, limit int64) error {
+	data := url.Values{"hashes": {hash}, "limit": {strconv.FormatInt(limit, 10)}}
+	return c.postForm(ctx, "/api/v2/torrents/setDownloadLimit", data)
+}
+
+func (c *Client) SetUploadLimit(ctx context.Context, hash string, limit int64) error {
+	data := url.Values{"hashes": {hash}, "limit": {strconv.FormatInt(limit, 10)}}
+	return c.postForm(ctx, "/api/v2/torrents/setUploadLimit", data)
+}
+
+func (c *Client) GetTorrentProperties(ctx context.Context, hash string) (*qbTorrentProperties, error) {
+	path := "/api/v2/torrents/properties?hash=" + url.QueryEscape(hash)
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get torrent properties, status: %d", resp.StatusCode)
+	}
+	var properties qbTorrentProperties
+	if err := json.NewDecoder(resp.Body).Decode(&properties); err != nil {
+		return nil, err
+	}
+	return &properties, nil
+}
+
+func (c *Client) GetTrackers(ctx context.Context, hash string) ([]qbTracker, error) {
+	path := "/api/v2/torrents/trackers?hash=" + url.QueryEscape(hash)
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get torrent trackers, status: %d", resp.StatusCode)
+	}
+	var trackers []qbTracker
+	if err := json.NewDecoder(resp.Body).Decode(&trackers); err != nil {
+		return nil, err
+	}
+	return trackers, nil
+}
+
+func (c *Client) AddTrackers(ctx context.Context, hash string, trackers []string) error {
+	data := url.Values{"hash": {hash}, "urls": {strings.Join(trackers, "\n")}}
+	return c.postForm(ctx, "/api/v2/torrents/addTrackers", data)
+}
+
+func (c *Client) SetShareLimits(ctx context.Context, hash string, ratio float64, seedingMinutes int64) error {
+	data := url.Values{
+		"hashes":                   {hash},
+		"ratioLimit":               {strconv.FormatFloat(ratio, 'f', -1, 64)},
+		"seedingTimeLimit":         {strconv.FormatInt(seedingMinutes, 10)},
+		"inactiveSeedingTimeLimit": {"-1"},
+	}
+	return c.postForm(ctx, "/api/v2/torrents/setShareLimits", data)
 }
 
 func (c *Client) StartTorrents(ctx context.Context, hashes []string) error {
