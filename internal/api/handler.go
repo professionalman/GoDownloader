@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,17 +13,23 @@ import (
 	"github.com/gorilla/mux"
 
 	"downloader/internal/job"
+	"downloader/internal/networkpolicy"
+	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
+	"downloader/internal/tracker"
 )
 
 // createJobRequest is the request body for POST /api/v1/jobs.
 type createJobRequest struct {
-	Source         string                     `json:"source"`
-	Priority       job.JobPriority            `json:"priority,omitempty"`
-	CategoryID     string                     `json:"categoryId,omitempty"`
-	DestinationDir string                     `json:"destinationDir,omitempty"`
-	ConflictPolicy job.FilenameConflictPolicy `json:"conflictPolicy,omitempty"`
+	Source         string                                  `json:"source"`
+	Priority       job.JobPriority                         `json:"priority,omitempty"`
+	CategoryID     string                                  `json:"categoryId,omitempty"`
+	DestinationDir string                                  `json:"destinationDir,omitempty"`
+	ConflictPolicy job.FilenameConflictPolicy              `json:"conflictPolicy,omitempty"`
+	NetworkPolicy  *networkpolicy.JobNetworkPolicyOverride `json:"networkPolicy,omitempty"`
+	SeedingPolicy  *networkpolicy.SeedingPolicy            `json:"seedingPolicy,omitempty"`
+	Trackers       []string                                `json:"trackers,omitempty"`
 }
 
 type selectFormatRequest struct {
@@ -44,6 +51,7 @@ type Handler struct {
 	manager      *job.Manager
 	settings     *settings.SettingsService
 	categoryRepo storage.ICategoryRepository
+	trackers     *tracker.Service
 }
 
 // NewHandler creates a new API handler.
@@ -60,10 +68,14 @@ func (h *Handler) SetSettingsService(s *settings.SettingsService) {
 	h.settings = s
 }
 
+func (h *Handler) SetTrackerService(service *tracker.Service) {
+	h.trackers = service
+}
+
 // CreateJob handles POST /api/v1/jobs
 func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	var req createJobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
 		return
 	}
@@ -78,6 +90,9 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		CategoryID:     req.CategoryID,
 		DestinationDir: req.DestinationDir,
 		ConflictPolicy: req.ConflictPolicy,
+		NetworkPolicy:  req.NetworkPolicy,
+		SeedingPolicy:  req.SeedingPolicy,
+		Trackers:       req.Trackers,
 	})
 	if err != nil {
 		writeAppError(w, err)
@@ -197,8 +212,9 @@ func (h *Handler) SelectFormat(w http.ResponseWriter, r *http.Request) {
 
 // startTorrentRequest is the request body for POST /api/v1/jobs/{id}/torrent/start.
 type startTorrentRequest struct {
-	Files             []job.TorrentFileSelection `json:"files"`
-	SeedAfterComplete bool                       `json:"seedAfterComplete"`
+	Files             []job.TorrentFileSelection   `json:"files"`
+	SeedAfterComplete *bool                        `json:"seedAfterComplete,omitempty"`
+	SeedingPolicy     *networkpolicy.SeedingPolicy `json:"seedingPolicy,omitempty"`
 }
 
 // GetTorrentFiles handles GET /api/v1/jobs/{id}/torrent/files
@@ -219,7 +235,7 @@ func (h *Handler) StartTorrent(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 
 	var req startTorrentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
 		return
 	}
@@ -229,7 +245,17 @@ func (h *Handler) StartTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := h.manager.StartTorrent(r.Context(), id, req.Files, req.SeedAfterComplete)
+	if req.SeedingPolicy != nil && req.SeedAfterComplete != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "seedingPolicy and seedAfterComplete cannot both be supplied")
+		return
+	}
+	policy := networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
+	if req.SeedingPolicy != nil {
+		policy = *req.SeedingPolicy
+	} else if req.SeedAfterComplete != nil && *req.SeedAfterComplete {
+		policy.Mode = networkpolicy.SeedingModeUnlimited
+	}
+	j, err := h.manager.StartTorrentWithPolicy(r.Context(), id, req.Files, policy)
 	if err != nil {
 		writeAppError(w, err)
 		return
@@ -320,6 +346,32 @@ func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
 	priorityStr := r.FormValue("priority")
 	categoryID := r.FormValue("categoryId")
 	destinationDir := r.FormValue("destinationDir")
+	var networkOverride *networkpolicy.JobNetworkPolicyOverride
+	var seedingPolicy *networkpolicy.SeedingPolicy
+	var customTrackers []string
+	if raw := r.FormValue("networkPolicy"); raw != "" {
+		networkOverride = &networkpolicy.JobNetworkPolicyOverride{}
+		if err := decodeStrictBytes([]byte(raw), networkOverride); err != nil {
+			os.Remove(tmpPath)
+			writeError(w, http.StatusBadRequest, job.ErrInvalidNetworkPolicy, "invalid networkPolicy")
+			return
+		}
+	}
+	if raw := r.FormValue("seedingPolicy"); raw != "" {
+		seedingPolicy = &networkpolicy.SeedingPolicy{}
+		if err := decodeStrictBytes([]byte(raw), seedingPolicy); err != nil {
+			os.Remove(tmpPath)
+			writeError(w, http.StatusBadRequest, job.ErrInvalidSeedingPolicy, "invalid seedingPolicy")
+			return
+		}
+	}
+	if raw := r.FormValue("trackers"); raw != "" {
+		if err := decodeStrictBytes([]byte(raw), &customTrackers); err != nil {
+			os.Remove(tmpPath)
+			writeError(w, http.StatusBadRequest, job.ErrInvalidTrackerURL, "invalid trackers")
+			return
+		}
+	}
 
 	p := job.JobPriorityNormal
 	if priorityStr != "" {
@@ -336,6 +388,9 @@ func (h *Handler) CreateTorrentJob(w http.ResponseWriter, r *http.Request) {
 		CategoryID:     categoryID,
 		DestinationDir: destinationDir,
 		ConflictPolicy: job.ConflictPolicyEngineManaged,
+		NetworkPolicy:  networkOverride,
+		SeedingPolicy:  seedingPolicy,
+		Trackers:       customTrackers,
 	})
 	if err != nil {
 		os.Remove(tmpPath)
@@ -370,6 +425,12 @@ func writeAppError(w http.ResponseWriter, err error) {
 			httpStatus = http.StatusInternalServerError
 		case job.ErrEngineError:
 			httpStatus = http.StatusServiceUnavailable
+		case job.ErrCapabilityNotSupported, job.ErrPrivateTorrentTrackerRejected:
+			httpStatus = http.StatusUnprocessableEntity
+		case job.ErrInvalidJobState, job.ErrNetworkSettingStateAmbiguous, job.ErrSeedingPolicyStateAmbiguous:
+			httpStatus = http.StatusConflict
+		case job.ErrNetworkSettingApplicationFailed, job.ErrSeedingPolicyApplicationFailed:
+			httpStatus = http.StatusServiceUnavailable
 		}
 		writeError(w, httpStatus, appErr.Code, appErr.Message)
 		return
@@ -380,7 +441,7 @@ func writeAppError(w http.ResponseWriter, err error) {
 // CreateBatchJobs handles POST /api/v1/jobs/batch
 func (h *Handler) CreateBatchJobs(w http.ResponseWriter, r *http.Request) {
 	var req job.CreateBatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
 		return
 	}
@@ -481,7 +542,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req settings.UpdateSettingsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
 		return
 	}
@@ -503,6 +564,21 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
 			return
 		}
+	}
+
+	if req.Network != nil || req.Torrent != nil {
+		st, err = h.settings.UpdatePowerSettings(r.Context(), &req)
+		if err != nil {
+			code := job.ErrInvalidNetworkPolicy
+			status := http.StatusBadRequest
+			if errors.Is(err, securestore.ErrUnavailable) {
+				code = job.ErrSecretStorageUnavailable
+				status = http.StatusServiceUnavailable
+			}
+			writeError(w, status, code, err.Error())
+			return
+		}
+		h.manager.ReconcileNetworkPolicies(r.Context())
 	}
 
 	if st == nil {

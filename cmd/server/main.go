@@ -19,14 +19,16 @@ import (
 	"downloader/internal/engine/ytdlp"
 	"downloader/internal/events"
 	"downloader/internal/job"
+	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
+	"downloader/internal/tracker"
 )
 
 func main() {
 	cfg := config.New()
 
-	log.Printf("Download Manager V0.6")
+	log.Printf("Download Manager V0.7")
 	log.Printf("Listen: %s", cfg.ListenAddr)
 	log.Printf("Download dir: %s", cfg.DownloadDir)
 	log.Printf("Aria2 RPC: %s", cfg.Aria2RPCURL)
@@ -47,10 +49,17 @@ func main() {
 	repo := database.NewSQLiteJobRepository(db)
 	queueRepo := database.NewSQLiteQueueRepository(db)
 	settingsRepo := database.NewSQLiteSettingsRepository(db)
+	secretRepo := database.NewSQLiteSecretRepository(db)
+	trackerRepo := database.NewSQLiteTrackerRepository(db)
 	catRepo := storage.NewSQLiteCategoryRepository(db.Conn())
 
 	// Initialize settings service
-	settingsService := settings.NewSettingsService(settingsRepo, cfg.DownloadDir, cfg.DataDir)
+	cipher, keyErr := securestore.NewFromEnvironment()
+	if keyErr != nil {
+		log.Printf("settings encryption unavailable: %v", keyErr)
+	}
+	secretStore := securestore.NewStore(secretRepo, cipher)
+	settingsService := settings.NewSettingsService(settingsRepo, cfg.DownloadDir, cfg.DataDir, secretStore)
 
 	// Initialize storage service
 	storageService := storage.NewStorageService(catRepo, settingsService, storage.NewOSFreeSpaceProvider(), cfg.DownloadDir, cfg.DataDir)
@@ -85,6 +94,8 @@ func main() {
 
 	// Initialize event bus
 	bus := events.NewInMemoryBus()
+	trackerService := tracker.NewService(trackerRepo, bus)
+	go trackerService.Run(ctx)
 
 	// Initialize SSE handler
 	sseHandler := events.NewSSEHandler(bus)
@@ -95,6 +106,7 @@ func main() {
 	manager.SetSettingsService(settingsService)
 	manager.SetStorageService(storageService)
 	manager.SetCategoryRepository(catRepo)
+	manager.SetTrackerEntryProvider(trackerService)
 
 	scheduler := job.NewScheduler(repo, queueRepo, settingsService.EffectiveMaxConcurrentDownloads, manager.DispatchQueuedJob)
 	manager.SetScheduler(scheduler)
@@ -103,7 +115,7 @@ func main() {
 	defer manager.Stop()
 
 	// Setup router
-	router := api.NewRouter(cfg, manager, sseHandler, settingsService, catRepo)
+	router := api.NewRouter(cfg, manager, sseHandler, settingsService, catRepo, trackerService)
 
 	// Start server
 	server := &http.Server{

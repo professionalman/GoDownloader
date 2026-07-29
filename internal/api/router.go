@@ -13,14 +13,20 @@ import (
 	"downloader/internal/job"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
+	"downloader/internal/tracker"
 )
 
 // NewRouter sets up the HTTP router with API routes, SSE, and static file serving.
-func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler, settingsService *settings.SettingsService, catRepo ...storage.ICategoryRepository) http.Handler {
+func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler, settingsService *settings.SettingsService, dependencies ...any) http.Handler {
 	r := mux.NewRouter()
 	h := NewHandler(manager, settingsService)
-	if len(catRepo) > 0 {
-		h.SetCategoryRepository(catRepo[0])
+	for _, dependency := range dependencies {
+		switch value := dependency.(type) {
+		case storage.ICategoryRepository:
+			h.SetCategoryRepository(value)
+		case *tracker.Service:
+			h.SetTrackerService(value)
+		}
 	}
 
 	// API routes
@@ -32,7 +38,11 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/jobs/torrent", h.CreateTorrentJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}/torrent/files", h.GetTorrentFiles).Methods("GET")
 	api.HandleFunc("/jobs/{id}/torrent/start", h.StartTorrent).Methods("POST")
+	api.HandleFunc("/jobs/{id}/torrent/trackers", h.AddTorrentTrackers).Methods("POST")
+	api.HandleFunc("/jobs/{id}/torrent/seeding-policy", h.UpdateSeedingPolicy).Methods("PUT")
 	api.HandleFunc("/jobs/{id}/stop-seeding", h.StopSeeding).Methods("POST")
+	api.HandleFunc("/jobs/{id}/network", h.UpdateJobNetwork).Methods("PUT")
+	api.HandleFunc("/jobs/{id}/capabilities", h.GetJobCapabilities).Methods("GET")
 	api.HandleFunc("/jobs/{id}/priority", h.SetJobPriority).Methods("PUT")
 	api.HandleFunc("/jobs/{id}", h.GetJob).Methods("GET")
 	api.HandleFunc("/jobs/{id}/pause", h.PauseJob).Methods("POST")
@@ -50,6 +60,14 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/queue/reorder", h.ReorderQueue).Methods("PUT")
 	api.HandleFunc("/settings", h.GetSettings).Methods("GET")
 	api.HandleFunc("/settings", h.UpdateSettings).Methods("PUT")
+	api.HandleFunc("/capabilities", h.GetCapabilities).Methods("GET")
+	api.HandleFunc("/capabilities/resolve", h.ResolveCapabilities).Methods("POST")
+	api.HandleFunc("/tracker-sources", h.GetTrackerSources).Methods("GET")
+	api.HandleFunc("/tracker-sources", h.CreateTrackerSource).Methods("POST")
+	api.HandleFunc("/tracker-sources/refresh", h.RefreshAllTrackerSources).Methods("POST")
+	api.HandleFunc("/tracker-sources/{id}", h.UpdateTrackerSource).Methods("PUT")
+	api.HandleFunc("/tracker-sources/{id}", h.DeleteTrackerSource).Methods("DELETE")
+	api.HandleFunc("/tracker-sources/{id}/refresh", h.RefreshTrackerSource).Methods("POST")
 
 	api.Handle("/events", sseHandler).Methods("GET")
 
