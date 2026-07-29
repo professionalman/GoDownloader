@@ -3,6 +3,7 @@ package tracker
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,8 @@ const (
 	maxResponseBytes = 2 << 20
 	maxTrackerLines  = 10000
 )
+
+var ErrNotFound = errors.New("tracker source not found")
 
 type Service struct {
 	repo   Repository
@@ -85,8 +88,11 @@ func (s *Service) Update(ctx context.Context, id string, input networkpolicy.Tra
 		return nil, err
 	}
 	source, err := s.repo.Get(ctx, id)
-	if err != nil || source == nil {
+	if err != nil {
 		return nil, err
+	}
+	if source == nil {
+		return nil, ErrNotFound
 	}
 	source.Name = strings.TrimSpace(input.Name)
 	source.URL = strings.TrimSpace(input.URL)
@@ -101,6 +107,13 @@ func (s *Service) Update(ctx context.Context, id string, input networkpolicy.Tra
 }
 
 func (s *Service) Delete(ctx context.Context, id string) error {
+	source, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if source == nil {
+		return ErrNotFound
+	}
 	return s.repo.Delete(ctx, id)
 }
 
@@ -126,8 +139,11 @@ func (s *Service) Refresh(ctx context.Context, id string) (*networkpolicy.Tracke
 		return nil, ctx.Err()
 	}
 	source, err := s.repo.Get(ctx, id)
-	if err != nil || source == nil {
+	if err != nil {
 		return nil, err
+	}
+	if source == nil {
+		return nil, ErrNotFound
 	}
 	checkedAt := time.Now().UTC()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)

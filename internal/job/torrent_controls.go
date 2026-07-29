@@ -21,6 +21,18 @@ func (m *Manager) AddTorrentTrackers(ctx context.Context, id string, values []st
 	if err != nil {
 		return nil, &AppError{Code: ErrInvalidTrackerURL, Message: err.Error()}
 	}
+	return m.addValidatedTorrentTrackers(ctx, j, trackers)
+}
+
+func (m *Manager) applyTorrentTrackerSnapshot(ctx context.Context, j *Job) ([]networkpolicy.Tracker, error) {
+	trackers, err := networkpolicy.ValidateTrackerURLs(j.CustomTrackers, 10000)
+	if err != nil {
+		return nil, &AppError{Code: ErrInvalidTrackerURL, Message: err.Error()}
+	}
+	return m.addValidatedTorrentTrackers(ctx, j, trackers)
+}
+
+func (m *Manager) addValidatedTorrentTrackers(ctx context.Context, j *Job, trackers []string) ([]networkpolicy.Tracker, error) {
 	engine, ok := m.engines.Get(j.Engine)
 	if !ok {
 		return nil, &AppError{Code: ErrEngineError, Message: "torrent engine not available"}

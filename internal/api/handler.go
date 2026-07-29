@@ -431,6 +431,8 @@ func writeAppError(w http.ResponseWriter, err error) {
 			httpStatus = http.StatusConflict
 		case job.ErrNetworkSettingApplicationFailed, job.ErrSeedingPolicyApplicationFailed:
 			httpStatus = http.StatusServiceUnavailable
+		case job.ErrSecretStorageUnavailable:
+			httpStatus = http.StatusServiceUnavailable
 		}
 		writeError(w, httpStatus, appErr.Code, appErr.Message)
 		return
@@ -549,8 +551,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	var st *settings.AppSettings
 	var err error
+	if err := h.settings.ValidateUpdate(r.Context(), &req); err != nil {
+		status := http.StatusBadRequest
+		code := job.ErrInvalidRequest
+		if errors.Is(err, securestore.ErrUnavailable) {
+			status = http.StatusServiceUnavailable
+			code = job.ErrSecretStorageUnavailable
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
 
-	if req.Queue != nil && req.Queue.MaxConcurrentDownloads > 0 {
+	if req.Queue != nil {
 		st, err = h.settings.UpdateQueueSettings(r.Context(), req.Queue.MaxConcurrentDownloads)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())

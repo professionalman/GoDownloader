@@ -19,6 +19,9 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
   const [proxyPassword, setProxyPassword] = useState('');
   const [clearPassword, setClearPassword] = useState(false);
   const [userAgent, setUserAgent] = useState(network?.userAgent ?? '');
+  const [headerLines, setHeaderLines] = useState((network?.httpHeaders ?? []).map((header) =>
+    `${header.name}: ${header.sensitive && header.hasValue ? '<configured>' : (header.value ?? '')}`
+  ).join('\n'));
   const [maxAttempts, setMaxAttempts] = useState(network?.retryPolicy.maxAttempts ?? 0);
   const [retryWait, setRetryWait] = useState(network?.retryPolicy.retryWaitSeconds ?? 0);
   const [connectTimeout, setConnectTimeout] = useState(network?.timeoutPolicy.connectTimeoutSeconds ?? 0);
@@ -55,6 +58,14 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
         proxyPassword: proxyPassword || undefined,
         clearProxyPassword: clearPassword,
         userAgent,
+        httpHeaders: headerLines.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+          const separator = line.indexOf(':');
+          const name = line.slice(0, separator).trim();
+          const value = line.slice(separator + 1).trim();
+          if (value === '<configured>') return { name, hasValue: true, sensitive: true };
+          if (value === '<clear>') return { name, clearValue: true };
+          return { name, value };
+        }),
         retryPolicy: { maxAttempts, retryWaitSeconds: retryWait },
         timeoutPolicy: { connectTimeoutSeconds: connectTimeout, requestTimeoutSeconds: requestTimeout },
         directConnections: { split, maxConnectionsPerServer: connections, minSplitSizeBytes: Math.round(minSplitMiB * (1 << 20)) },
@@ -95,6 +106,7 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
           <label>Proxy password <span className="secret-state">{network?.proxy.hasPassword ? 'Configured' : 'Not configured'}</span><input type="password" value={proxyPassword} onChange={(e) => { setProxyPassword(e.target.value); setClearPassword(false); }} placeholder={network?.proxy.hasPassword ? 'Replace' : 'Set password'} /></label>
           {network?.proxy.hasPassword && <label><input type="checkbox" checked={clearPassword} onChange={(e) => { setClearPassword(e.target.checked); if (e.target.checked) setProxyPassword(''); }} /> Clear configured password</label>}
           <label>User-Agent<input value={userAgent} onChange={(e) => setUserAgent(e.target.value)} disabled={settings?.overrides?.['network.userAgent']} /></label>
+          <label style={{ gridColumn: '1 / -1' }}>HTTP headers<textarea value={headerLines} onChange={(e) => setHeaderLines(e.target.value)} placeholder="Name: value" /><span className="setting-hint">Sensitive values show as &lt;configured&gt;. Replace that marker with a new value, or use &lt;clear&gt;.</span></label>
           <label>Retry attempts<input type="number" min="0" max="100" value={maxAttempts} onChange={(e) => setMaxAttempts(Number(e.target.value))} /></label>
           <label>Retry wait (seconds)<input type="number" min="0" max="3600" value={retryWait} onChange={(e) => setRetryWait(Number(e.target.value))} /></label>
           <label>Connect timeout (seconds)<input type="number" min="0" max="86400" value={connectTimeout} onChange={(e) => setConnectTimeout(Number(e.target.value))} /></label>

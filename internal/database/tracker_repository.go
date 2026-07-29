@@ -103,8 +103,13 @@ func (r *SQLiteTrackerRepository) Delete(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tracker_source_entries WHERE source_id=?`, id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tracker_sources WHERE id=?`, id); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM tracker_sources WHERE id=?`, id)
+	if err != nil {
 		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return fmt.Errorf("tracker source not found")
 	}
 	return tx.Commit()
 }

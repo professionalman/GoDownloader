@@ -269,6 +269,9 @@ All settings are optional. Defaults work out of the box for a typical local setu
 | `DEFAULT_ARIA2_SPLIT` | `5` | aria2 split count, 1–16 |
 | `DEFAULT_ARIA2_MAX_CONNECTIONS_PER_SERVER` | `1` | aria2 connections/server, 1–16 |
 | `DEFAULT_ARIA2_MIN_SPLIT_SIZE_BYTES` | `20971520` | aria2 minimum split, 1 MiB–1 GiB |
+| `DEFAULT_SEEDING_MODE` | `none` | `none`, `unlimited`, `ratio`, `duration`, or `ratio_or_duration` |
+| `DEFAULT_SEED_RATIO` | — | Ratio threshold required by ratio modes |
+| `DEFAULT_SEED_TIME_SECONDS` | — | Active seeding-time threshold required by duration modes |
 | `TRACKER_AUTO_APPLY` | `false` | Snapshot enabled tracker entries into new public torrents |
 | `MANAGE_QBIT_GLOBAL_NETWORK_SETTINGS` | `false` | Dedicated-daemon opt-in for verified qB proxy management |
 

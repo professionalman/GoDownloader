@@ -86,7 +86,7 @@ type persistedPowerSettings struct {
 	Torrent networkpolicy.TorrentSettings `json:"torrent"`
 }
 
-func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.NetworkSettings, networkpolicy.TorrentSettings, map[string]bool, error) {
+func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.NetworkSettings, networkpolicy.TorrentSettings, map[string]bool, []ApplicationResult, error) {
 	nw, torrent := defaultPowerSettings()
 	if raw, err := s.repo.Get(ctx, KeyV07PowerSettings); err == nil && raw != "" {
 		var persisted persistedPowerSettings
@@ -106,11 +106,20 @@ func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.N
 	}
 
 	overrides := map[string]bool{}
+	var warnings []ApplicationResult
+	warn := func(name, path string) {
+		warnings = append(warnings, ApplicationResult{
+			Target: path, Status: "ignored", Code: "INVALID_ENVIRONMENT_OVERRIDE",
+			Message: name + " was ignored because it is invalid",
+		})
+	}
 	applyInt64Env := func(name, path string, target *int64) {
 		if raw := os.Getenv(name); raw != "" {
 			if v, err := strconv.ParseInt(raw, 10, 64); err == nil && networkpolicy.ValidateBandwidth(v) == nil {
 				*target = v
 				overrides[path] = true
+			} else {
+				warn(name, path)
 			}
 		}
 	}
@@ -138,6 +147,8 @@ func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.N
 		if networkpolicy.ValidateProxy(&candidate) == nil {
 			nw.Proxy = candidate
 			overrides["network.proxy"] = true
+		} else {
+			warn("DEFAULT_PROXY_*", "network.proxy")
 		}
 	}
 	if os.Getenv("DEFAULT_PROXY_PASSWORD") != "" {
@@ -156,6 +167,8 @@ func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.N
 			if v, err := strconv.Atoi(raw); err == nil && v >= min && v <= max {
 				*target = v
 				overrides[path] = true
+			} else {
+				warn(name, path)
 			}
 		}
 	}
@@ -169,21 +182,47 @@ func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.N
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v >= 1<<20 && v <= 1<<30 {
 			nw.DirectConnections.MinSplitSizeBytes = v
 			overrides["network.directConnections.minSplitSizeBytes"] = true
+		} else {
+			warn("DEFAULT_ARIA2_MIN_SPLIT_SIZE_BYTES", "network.directConnections.minSplitSizeBytes")
 		}
 	}
 	if raw := os.Getenv("TRACKER_AUTO_APPLY"); raw != "" {
 		if v, err := strconv.ParseBool(raw); err == nil {
 			torrent.ApplyTrackerSubscriptionsToNewTorrents = v
 			overrides["torrent.applyTrackerSubscriptionsToNewTorrents"] = true
+		} else {
+			warn("TRACKER_AUTO_APPLY", "torrent.applyTrackerSubscriptionsToNewTorrents")
 		}
 	}
 	if raw := os.Getenv("MANAGE_QBIT_GLOBAL_NETWORK_SETTINGS"); raw != "" {
 		if v, err := strconv.ParseBool(raw); err == nil {
 			torrent.ManageQBitGlobalNetworkSettings = v
 			overrides["torrent.manageQBitGlobalNetworkSettings"] = true
+		} else {
+			warn("MANAGE_QBIT_GLOBAL_NETWORK_SETTINGS", "torrent.manageQBitGlobalNetworkSettings")
 		}
 	}
-	return nw, torrent, overrides, nil
+	if raw := os.Getenv("DEFAULT_SEEDING_MODE"); raw != "" {
+		candidate := torrent.SeedingPolicy
+		candidate.Mode = networkpolicy.SeedingMode(strings.ToLower(raw))
+		if ratioRaw := os.Getenv("DEFAULT_SEED_RATIO"); ratioRaw != "" {
+			if value, parseErr := strconv.ParseFloat(ratioRaw, 64); parseErr == nil {
+				candidate.RatioLimit = &value
+			}
+		}
+		if timeRaw := os.Getenv("DEFAULT_SEED_TIME_SECONDS"); timeRaw != "" {
+			if value, parseErr := strconv.ParseInt(timeRaw, 10, 64); parseErr == nil {
+				candidate.TimeLimitSeconds = &value
+			}
+		}
+		if networkpolicy.ValidateSeeding(candidate) == nil {
+			torrent.SeedingPolicy = candidate
+			overrides["torrent.seedingPolicy"] = true
+		} else {
+			warn("DEFAULT_SEEDING_MODE/DEFAULT_SEED_*", "torrent.seedingPolicy")
+		}
+	}
+	return nw, torrent, overrides, warnings, nil
 }
 
 // GetSettings retrieves the current AppSettings, considering persisted values and environment overrides.
@@ -267,7 +306,7 @@ func (s *SettingsService) GetSettings(ctx context.Context) (*AppSettings, error)
 		}
 	}
 
-	nw, torrent, overrides, err := s.getPowerSettings(ctx)
+	nw, torrent, overrides, applicationResults, err := s.getPowerSettings(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -293,9 +332,10 @@ func (s *SettingsService) GetSettings(ctx context.Context) (*AppSettings, error)
 				DefaultConflictPolicy:    overrideConflictPolicy,
 			},
 		},
-		Network:   nw,
-		Torrent:   torrent,
-		Overrides: overrides,
+		Network:            nw,
+		Torrent:            torrent,
+		Overrides:          overrides,
+		ApplicationResults: applicationResults,
 	}, nil
 }
 
@@ -436,6 +476,120 @@ func (s *SettingsService) UpdatePowerSettings(ctx context.Context, req *UpdateSe
 	return s.GetSettings(ctx)
 }
 
+// ValidateUpdate checks the complete settings request before any scope is persisted.
+func (s *SettingsService) ValidateUpdate(ctx context.Context, req *UpdateSettingsRequest) error {
+	if req == nil {
+		return nil
+	}
+	if req.Queue != nil && (req.Queue.MaxConcurrentDownloads < MinMaxConcurrent || req.Queue.MaxConcurrentDownloads > MaxMaxConcurrent) {
+		return fmt.Errorf("maxConcurrentDownloads must be between %d and %d", MinMaxConcurrent, MaxMaxConcurrent)
+	}
+	if req.Storage != nil {
+		storage := req.Storage
+		for name, value := range map[string]*string{
+			"defaultDownloadDirectory": storage.DefaultDownloadDirectory,
+			"temporaryDirectory":       storage.TemporaryDirectory,
+		} {
+			if value != nil {
+				if strings.TrimSpace(*value) == "" {
+					return fmt.Errorf("%s cannot be empty", name)
+				}
+				if _, err := filepath.Abs(filepath.Clean(*value)); err != nil {
+					return fmt.Errorf("invalid %s path", name)
+				}
+			}
+		}
+		if storage.MinimumFreeSpaceBytes != nil && *storage.MinimumFreeSpaceBytes < 0 {
+			return fmt.Errorf("minimumFreeSpaceBytes cannot be negative")
+		}
+		if storage.DefaultConflictPolicy != nil {
+			policy := strings.ToLower(strings.TrimSpace(*storage.DefaultConflictPolicy))
+			if policy != "rename" && policy != "overwrite" && policy != "fail" {
+				return fmt.Errorf("defaultConflictPolicy must be rename, overwrite, or fail")
+			}
+		}
+	}
+	if req.Network == nil && req.Torrent == nil {
+		return nil
+	}
+	current, err := s.GetSettings(ctx)
+	if err != nil {
+		return err
+	}
+	nw, torrent := current.Network, current.Torrent
+	if req.Network != nil {
+		value := req.Network
+		if value.GlobalDownloadLimitBytesPerSecond != nil {
+			nw.GlobalDownloadLimitBytesPerSecond = *value.GlobalDownloadLimitBytesPerSecond
+		}
+		if value.Proxy != nil {
+			nw.Proxy = *value.Proxy
+		}
+		if value.UserAgent != nil {
+			nw.UserAgent = strings.TrimSpace(*value.UserAgent)
+		}
+		if value.HTTPHeaders != nil {
+			nw.HTTPHeaders = append([]networkpolicy.HTTPHeader(nil), (*value.HTTPHeaders)...)
+		}
+		if value.RetryPolicy != nil {
+			nw.RetryPolicy = *value.RetryPolicy
+		}
+		if value.TimeoutPolicy != nil {
+			nw.TimeoutPolicy = *value.TimeoutPolicy
+		}
+		if value.DirectConnections != nil {
+			nw.DirectConnections = *value.DirectConnections
+		}
+		if value.ProxyPassword != nil && *value.ProxyPassword != "" && (s.secrets == nil || !s.secrets.Available()) {
+			return securestore.ErrUnavailable
+		}
+		for _, header := range nw.HTTPHeaders {
+			if networkpolicy.IsSensitiveHeader(header.Name) && header.Value != "" && (s.secrets == nil || !s.secrets.Available()) {
+				return securestore.ErrUnavailable
+			}
+		}
+	}
+	if req.Torrent != nil {
+		value := req.Torrent
+		if value.DownloadLimitBytesPerSecond != nil {
+			torrent.DownloadLimitBytesPerSecond = *value.DownloadLimitBytesPerSecond
+		}
+		if value.UploadLimitBytesPerSecond != nil {
+			torrent.UploadLimitBytesPerSecond = *value.UploadLimitBytesPerSecond
+		}
+		if value.SeedingPolicy != nil {
+			torrent.SeedingPolicy = *value.SeedingPolicy
+		}
+		if value.ManageQBitGlobalNetworkSettings != nil {
+			torrent.ManageQBitGlobalNetworkSettings = *value.ManageQBitGlobalNetworkSettings
+		}
+	}
+	policy := networkpolicy.JobNetworkPolicy{
+		DownloadLimitBytesPerSecond: nw.GlobalDownloadLimitBytesPerSecond,
+		Proxy:                       nw.Proxy, UserAgent: nw.UserAgent, HTTPHeaders: nw.HTTPHeaders,
+		RetryPolicy: nw.RetryPolicy, TimeoutPolicy: nw.TimeoutPolicy,
+		DirectConnections: &nw.DirectConnections,
+	}
+	if err := networkpolicy.ValidateNetworkPolicy(&policy); err != nil {
+		return err
+	}
+	if err := networkpolicy.ValidateBandwidth(torrent.DownloadLimitBytesPerSecond); err != nil {
+		return err
+	}
+	if err := networkpolicy.ValidateBandwidth(torrent.UploadLimitBytesPerSecond); err != nil {
+		return err
+	}
+	if err := networkpolicy.ValidateSeeding(torrent.SeedingPolicy); err != nil {
+		return err
+	}
+	if torrent.ManageQBitGlobalNetworkSettings &&
+		(nw.Proxy.Mode == networkpolicy.ProxyModeSystem ||
+			(nw.Proxy.Mode == networkpolicy.ProxyModeCustom && nw.Proxy.Protocol == networkpolicy.ProxyProtocolHTTPS)) {
+		return fmt.Errorf("managed qBittorrent proxy supports only disabled, HTTP, or SOCKS5")
+	}
+	return nil
+}
+
 func (s *SettingsService) ResolveJobPolicy(ctx context.Context, jobID, jobType string, override *networkpolicy.JobNetworkPolicyOverride) (networkpolicy.JobNetworkPolicy, *networkpolicy.RuntimePolicy, error) {
 	st, err := s.GetSettings(ctx)
 	if err != nil {
@@ -518,11 +672,31 @@ func (s *SettingsService) ResolveJobPolicy(ctx context.Context, jobID, jobType s
 		if err := s.secrets.Put(ctx, "job", jobID, "proxy_password", runtime.ProxyPassword); err != nil {
 			return p, nil, err
 		}
+	} else if override != nil && override.ClearProxyPassword {
+		runtime.ProxyPassword = ""
+		p.Proxy.HasPassword = false
+		p.Proxy.SecretSource = ""
+		if s.secrets != nil {
+			if err := s.secrets.Delete(ctx, "job", jobID, "proxy_password"); err != nil {
+				return p, nil, err
+			}
+		}
 	}
 	for i := range p.HTTPHeaders {
 		h := &p.HTTPHeaders[i]
 		if !h.Sensitive {
 			runtime.HeaderValues[strings.ToLower(h.Name)] = h.Value
+			continue
+		}
+		if h.ClearValue {
+			h.Value = ""
+			h.HasValue = false
+			h.ClearValue = false
+			if s.secrets != nil {
+				if err := s.secrets.Delete(ctx, "job", jobID, "header:"+strings.ToLower(h.Name)); err != nil {
+					return p, nil, err
+				}
+			}
 			continue
 		}
 		value := h.Value

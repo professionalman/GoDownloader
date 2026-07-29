@@ -1091,7 +1091,7 @@ loop:
 		}
 	}
 	if len(j.CustomTrackers) > 0 {
-		if _, trackerErr := m.AddTorrentTrackers(ctx, jobID, j.CustomTrackers); trackerErr != nil {
+		if _, trackerErr := m.applyTorrentTrackerSnapshot(ctx, j); trackerErr != nil {
 			log.Printf("acquireTorrentMetadata: custom trackers not applied for job %s: %v", jobID, trackerErr)
 		}
 	}

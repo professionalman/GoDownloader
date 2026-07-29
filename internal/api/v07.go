@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"downloader/internal/job"
 	"downloader/internal/networkpolicy"
+	"downloader/internal/tracker"
 
 	"github.com/gorilla/mux"
 )
@@ -146,6 +148,10 @@ func (h *Handler) DeleteTrackerSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.trackers.Delete(r.Context(), mux.Vars(r)["id"]); err != nil {
+		if errors.Is(err, tracker.ErrNotFound) {
+			writeError(w, http.StatusNotFound, job.ErrTrackerSourceNotFound, "tracker source not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to delete tracker source")
 		return
 	}
@@ -159,6 +165,10 @@ func (h *Handler) RefreshTrackerSource(w http.ResponseWriter, r *http.Request) {
 	}
 	source, err := h.trackers.Refresh(r.Context(), mux.Vars(r)["id"])
 	if err != nil {
+		if errors.Is(err, tracker.ErrNotFound) {
+			writeError(w, http.StatusNotFound, job.ErrTrackerSourceNotFound, "tracker source not found")
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, job.ErrTrackerSourceFetchFailed, err.Error())
 		return
 	}

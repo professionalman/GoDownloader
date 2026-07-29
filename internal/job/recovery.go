@@ -118,6 +118,17 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		m.publish(EventJobFailed, j)
 		return
 	}
+	if j.Type == TypeTorrent && j.EngineID != "" {
+		if controller, supported := eng.(ISeedingPolicyController); supported {
+			if applyErr := controller.ApplySeedingPolicy(ctx, j, j.SeedingPolicy); applyErr != nil && m.torrentRepo != nil {
+				if rec, recErr := m.torrentRepo.GetTorrentJob(ctx, j.ID); recErr == nil && rec != nil {
+					rec = cloneTorrentRecord(rec)
+					rec.SeedingReconcilePending = true
+					_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
+				}
+			}
+		}
+	}
 
 	status, err := eng.Status(ctx, j)
 	if err != nil {

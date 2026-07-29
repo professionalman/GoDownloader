@@ -46,6 +46,13 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
   const [proxyUsername, setProxyUsername] = useState('');
   const [proxyPassword, setProxyPassword] = useState('');
   const [trackers, setTrackers] = useState('');
+  const [maxAttempts, setMaxAttempts] = useState('');
+  const [retryWait, setRetryWait] = useState('');
+  const [connectTimeout, setConnectTimeout] = useState('');
+  const [requestTimeout, setRequestTimeout] = useState('');
+  const [split, setSplit] = useState('');
+  const [connections, setConnections] = useState('');
+  const [minSplitMiB, setMinSplitMiB] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -81,6 +88,15 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
         const separator = line.indexOf(':');
         return { name: line.slice(0, separator).trim(), value: line.slice(separator + 1).trim() };
       });
+    }
+    if (maxAttempts !== '' || retryWait !== '') policy.retryPolicy = { maxAttempts: Number(maxAttempts || 0), retryWaitSeconds: Number(retryWait || 0) };
+    if (connectTimeout !== '' || requestTimeout !== '') policy.timeoutPolicy = { connectTimeoutSeconds: Number(connectTimeout || 0), requestTimeoutSeconds: Number(requestTimeout || 0) };
+    if (split !== '' || connections !== '' || minSplitMiB !== '') {
+      policy.directConnections = {
+        split: Number(split || 5),
+        maxConnectionsPerServer: Number(connections || 1),
+        minSplitSizeBytes: Number(minSplitMiB || 20) * (1 << 20),
+      };
     }
     return Object.keys(policy).length ? policy : undefined;
   };
@@ -235,6 +251,9 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
             </>}
             {capabilities?.userAgent.supported && <label>User-Agent<input value={userAgent} onChange={(e) => setUserAgent(e.target.value)} /></label>}
             {capabilities?.customHeaders.supported && <label style={{ gridColumn: '1 / -1' }}>Headers (one Name: value per line)<textarea value={headers} onChange={(e) => setHeaders(e.target.value)} /></label>}
+            {capabilities?.retryPolicy.supported && <><label>Maximum attempts<input type="number" min="0" max="100" value={maxAttempts} onChange={(e) => setMaxAttempts(e.target.value)} placeholder="Inherit" /></label><label>Retry wait (seconds)<input type="number" min="0" max="3600" value={retryWait} onChange={(e) => setRetryWait(e.target.value)} placeholder="Inherit" /></label></>}
+            {capabilities?.timeoutPolicy.supported && <><label>Connect timeout (seconds)<input type="number" min="0" max="86400" value={connectTimeout} onChange={(e) => setConnectTimeout(e.target.value)} placeholder="Inherit" /></label><label>Request timeout (seconds)<input type="number" min="0" max="86400" value={requestTimeout} onChange={(e) => setRequestTimeout(e.target.value)} placeholder="Inherit" /></label></>}
+            {capabilities?.connections.supported && <><label>Splits<input type="number" min="1" max="16" value={split} onChange={(e) => setSplit(e.target.value)} placeholder="Inherit" /></label><label>Connections/server<input type="number" min="1" max="16" value={connections} onChange={(e) => setConnections(e.target.value)} placeholder="Inherit" /></label><label>Minimum split (MiB)<input type="number" min="1" max="1024" value={minSplitMiB} onChange={(e) => setMinSplitMiB(e.target.value)} placeholder="Inherit" /></label></>}
             {capabilities?.trackers.supported && <label style={{ gridColumn: '1 / -1' }}>Custom trackers (one URL per line)<textarea value={trackers} onChange={(e) => setTrackers(e.target.value)} /></label>}
             {!capabilities && <span>Enter a source to see supported controls.</span>}
           </div>

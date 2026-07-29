@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"downloader/internal/settings"
 )
 
 func TestV07StrictDTOsRejectUnknownEnginePassthroughs(t *testing.T) {
@@ -27,6 +29,26 @@ func TestV07StrictDTOsRejectUnknownEnginePassthroughs(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s status=%d body=%s", test.path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestSettingsValidateCompleteRequestBeforePersistence(t *testing.T) {
+	router, _, service := setupAPITestRouter(t)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewBufferString(
+		`{"queue":{"maxConcurrentDownloads":5},"network":{"globalDownloadLimitBytesPerSecond":-1}}`,
+	))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := service.GetSettings(req.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Queue.MaxConcurrentDownloads != settings.DefaultMaxConcurrent {
+		t.Fatalf("queue was partially persisted: %d", got.Queue.MaxConcurrentDownloads)
 	}
 }
 
