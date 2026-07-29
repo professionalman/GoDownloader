@@ -49,7 +49,11 @@ func (h *SSEHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			data, err := json.Marshal(event.Job)
+			payload := any(event.Job)
+			if event.Data != nil {
+				payload = event.Data
+			}
+			data, err := json.Marshal(payload)
 			if err != nil {
 				log.Printf("SSE: failed to marshal event: %v", err)
 				continue

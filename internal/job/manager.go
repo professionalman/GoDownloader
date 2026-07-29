@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"downloader/internal/networkpolicy"
+	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
 
@@ -32,11 +34,15 @@ type Manager struct {
 	settings       *settings.SettingsService
 	storageService storage.IStorageService
 	categoryRepo   storage.ICategoryRepository
+	trackerEntries ITrackerEntryProvider
 	scheduler      *Scheduler
 
-	mu            sync.RWMutex
-	activeJobs    map[string]*Job // id -> job (in-memory cache for active jobs)
-	activeCancels map[string]context.CancelFunc
+	mu              sync.RWMutex
+	activeJobs      map[string]*Job // id -> job (in-memory cache for active jobs)
+	activeCancels   map[string]context.CancelFunc
+	appliedLimits   map[string]int64
+	terminalLocks   map[string]*sync.Mutex
+	reconcileCancel context.CancelFunc
 
 	monitor *Monitor
 }
@@ -56,6 +62,8 @@ func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, dow
 		torrentRepo:   torrentRepo,
 		activeJobs:    make(map[string]*Job),
 		activeCancels: make(map[string]context.CancelFunc),
+		appliedLimits: make(map[string]int64),
+		terminalLocks: make(map[string]*sync.Mutex),
 	}
 	return m
 }
@@ -101,6 +109,14 @@ func (m *Manager) SetCategoryRepository(catRepo storage.ICategoryRepository) {
 	m.categoryRepo = catRepo
 }
 
+type ITrackerEntryProvider interface {
+	EnabledEntries(ctx context.Context) ([]string, error)
+}
+
+func (m *Manager) SetTrackerEntryProvider(provider ITrackerEntryProvider) {
+	m.trackerEntries = provider
+}
+
 // SetScheduler wires the scheduler instance.
 func (m *Manager) SetScheduler(s *Scheduler) {
 	m.scheduler = s
@@ -116,7 +132,11 @@ func (m *Manager) SetScheduler(s *Scheduler) {
 func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 	// 1. Run recovery first
 	m.recover(ctx)
+	m.ReconcileNetworkPolicies(ctx)
 	m.processPendingEngineCleanups(ctx)
+	reconcileCtx, cancel := context.WithCancel(ctx)
+	m.reconcileCancel = cancel
+	go m.runNetworkReconciler(reconcileCtx)
 
 	// 2. Clean up stale GoDownloader-owned workdirs on startup
 	if m.storageService != nil {
@@ -156,6 +176,9 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 
 // Stop stops background tasks, cancels active background analysis/metadata tasks, and shuts down subprocess engines.
 func (m *Manager) Stop() {
+	if m.reconcileCancel != nil {
+		m.reconcileCancel()
+	}
 	if m.scheduler != nil {
 		m.scheduler.Stop()
 	}
@@ -215,6 +238,9 @@ type CreateOptions struct {
 	CategoryID     string
 	DestinationDir string
 	ConflictPolicy FilenameConflictPolicy
+	NetworkPolicy  *networkpolicy.JobNetworkPolicyOverride
+	SeedingPolicy  *networkpolicy.SeedingPolicy
+	Trackers       []string
 }
 
 func (m *Manager) resolveJobStorage(ctx context.Context, categoryID, customDest string, policy FilenameConflictPolicy, jobID string, isMedia bool) (*storage.StorageResolution, error) {
@@ -319,6 +345,9 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 		j.Status = StatusAnalyzing
 		j.Name = "Analyzing..."
 
+		if err := m.attachCreationPolicy(ctx, j, opts); err != nil {
+			return nil, err
+		}
 		if err := m.repo.Create(ctx, j); err != nil {
 			return nil, fmt.Errorf("persist job: %w", err)
 		}
@@ -330,6 +359,9 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 
 	// Standard download flow (aria2)
 	j.Type = TypeDownload
+	if err := m.attachCreationPolicy(ctx, j, opts); err != nil {
+		return nil, err
+	}
 
 	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
 		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue job: %v", err)}
@@ -354,6 +386,9 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 			return j, nil
 		}
 
+		if prepErr := m.prepareNetworkDispatch(ctx, j, eng); prepErr != nil {
+			return nil, prepErr
+		}
 		engineID, err := eng.Start(ctx, j, m.downloadDir)
 		if err != nil {
 			j.Status = StatusFailed
@@ -365,6 +400,9 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 		}
 
 		j.EngineID = engineID
+		if limitErr := m.applyJobLimits(ctx, j, eng, false); limitErr != nil {
+			j.NetworkReconcilePending = true
+		}
 		j.Status = StatusDownloading
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
@@ -451,6 +489,9 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*Cre
 			CategoryID:     catID,
 			DestinationDir: destDir,
 			ConflictPolicy: conflictPol,
+			NetworkPolicy:  firstNonNilNetwork(input.NetworkPolicy, req.NetworkPolicy),
+			SeedingPolicy:  firstNonNilSeeding(input.SeedingPolicy, req.SeedingPolicy),
+			Trackers:       firstNonEmptyTrackers(input.Trackers, req.Trackers),
 		})
 
 		if err != nil {
@@ -477,6 +518,84 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*Cre
 	}
 
 	return resp, nil
+}
+
+func firstNonNilNetwork(a, b *networkpolicy.JobNetworkPolicyOverride) *networkpolicy.JobNetworkPolicyOverride {
+	if a != nil {
+		return a
+	}
+	return b
+}
+
+func firstNonNilSeeding(a, b *networkpolicy.SeedingPolicy) *networkpolicy.SeedingPolicy {
+	if a != nil {
+		return a
+	}
+	return b
+}
+
+func firstNonEmptyTrackers(a, b []string) []string {
+	if a != nil {
+		return a
+	}
+	return b
+}
+
+func (m *Manager) attachCreationPolicy(ctx context.Context, j *Job, opts CreateOptions) error {
+	if m.settings == nil {
+		j.NetworkPolicy = networkpolicy.JobNetworkPolicy{
+			Proxy:       networkpolicy.ProxyPolicy{Mode: networkpolicy.ProxyModeDisabled},
+			RetryPolicy: networkpolicy.RetryPolicy{}, TimeoutPolicy: networkpolicy.TimeoutPolicy{},
+		}
+		if j.Type == TypeDownload {
+			j.NetworkPolicy.DirectConnections = &networkpolicy.DirectConnectionPolicy{
+				Split: 5, MaxConnectionsPerServer: 1, MinSplitSizeBytes: 20 << 20,
+			}
+		}
+	} else {
+		policy, runtime, err := m.settings.ResolveJobPolicy(ctx, j.ID, j.Type, opts.NetworkPolicy)
+		if err != nil {
+			code := ErrInvalidNetworkPolicy
+			if errors.Is(err, securestore.ErrUnavailable) {
+				code = ErrSecretStorageUnavailable
+			}
+			return &AppError{Code: code, Message: err.Error()}
+		}
+		j.NetworkPolicy = policy
+		j.SetRuntimeNetworkPolicy(runtime)
+	}
+	if j.Type == TypeTorrent {
+		seeding := networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
+		if m.settings != nil {
+			if st, err := m.settings.GetSettings(ctx); err == nil {
+				seeding = st.Torrent.SeedingPolicy
+			}
+		}
+		if opts.SeedingPolicy != nil {
+			seeding = *opts.SeedingPolicy
+		}
+		if err := networkpolicy.ValidateSeeding(seeding); err != nil {
+			return &AppError{Code: ErrInvalidSeedingPolicy, Message: err.Error()}
+		}
+		trackers, err := networkpolicy.ValidateTrackerURLs(opts.Trackers, 256)
+		if err != nil {
+			return &AppError{Code: ErrInvalidTrackerURL, Message: err.Error()}
+		}
+		if m.trackerEntries != nil && m.settings != nil {
+			if st, settingsErr := m.settings.GetSettings(ctx); settingsErr == nil && st.Torrent.ApplyTrackerSubscriptionsToNewTorrents {
+				if subscribed, entryErr := m.trackerEntries.EnabledEntries(ctx); entryErr == nil {
+					trackers, err = networkpolicy.ValidateTrackerURLs(append(trackers, subscribed...), 10000)
+					if err != nil {
+						return &AppError{Code: ErrInvalidTrackerURL, Message: err.Error()}
+					}
+				}
+			}
+		}
+		j.SeedingPolicy = seeding
+		j.SeedAfterComplete = seeding.Mode != networkpolicy.SeedingModeNone
+		j.CustomTrackers = trackers
+	}
+	return nil
 }
 
 // analyzeMedia runs yt-dlp analysis in the background and updates the job.
@@ -511,7 +630,17 @@ func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) 
 		return
 	}
 
-	info, err := analyzer.Analyze(ctx, source)
+	var info *MediaInfo
+	if policyAnalyzer, policyOK := eng.(INetworkMediaAnalyzer); policyOK {
+		runtime, policyErr := m.runtimePolicyForJob(ctx, j)
+		if policyErr != nil {
+			err = policyErr
+		} else {
+			info, err = policyAnalyzer.AnalyzeWithPolicy(ctx, source, runtime)
+		}
+	} else {
+		info, err = analyzer.Analyze(ctx, source)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Printf("analyzeMedia: job %s analysis was cancelled", jobID)
@@ -605,6 +734,9 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, 
 			return j, nil
 		}
 
+		if prepErr := m.prepareNetworkDispatch(ctx, j, eng); prepErr != nil {
+			return nil, prepErr
+		}
 		engineID, err := eng.Start(ctx, j, m.downloadDir)
 		if err != nil {
 			j.Status = StatusFailed
@@ -616,6 +748,9 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, 
 		}
 
 		j.EngineID = engineID
+		if limitErr := m.applyJobLimits(ctx, j, eng, false); limitErr != nil {
+			j.NetworkReconcilePending = true
+		}
 		j.Status = StatusDownloading
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
@@ -694,9 +829,21 @@ func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, s
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
+	if err := m.attachCreationPolicy(ctx, j, opts); err != nil {
+		return nil, err
+	}
 
 	if err := m.repo.Create(ctx, j); err != nil {
 		return nil, fmt.Errorf("persist job: %w", err)
+	}
+	if m.torrentRepo != nil {
+		if err := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+			JobID: jobID, TorrentFilePath: torrentFilePath,
+			SeedAfterComplete: j.SeedAfterComplete, SeedingPolicy: j.SeedingPolicy,
+			CustomTrackers: j.CustomTrackers,
+		}); err != nil {
+			return nil, fmt.Errorf("persist torrent policy: %w", err)
+		}
 	}
 
 	m.publish(EventJobCreated, j)
@@ -812,11 +959,13 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			log.Printf("acquireTorrentMetadata: active job lookup failed for job %s (infoHash=%s): %v", jobID, infoHash, err)
 			// Ownership lookup failed due to DB error. Fail closed without calling RemoveTorrent to prevent deleting an existing active torrent.
 			errText := fmt.Sprintf("failed to verify torrent ownership: %v", err)
-			if createErr := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
-				JobID:           jobID,
-				InfoHash:        infoHash,
-				TorrentFilePath: torrentFilePath,
-			}); createErr != nil {
+			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+			if rec == nil {
+				rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}}
+			}
+			rec.InfoHash = infoHash
+			rec.TorrentFilePath = torrentFilePath
+			if createErr := m.torrentRepo.UpdateTorrentJob(ctx, rec); createErr != nil {
 				log.Printf("acquireTorrentMetadata: failed to save torrent record for job %s: %v", jobID, createErr)
 				errText = fmt.Sprintf("%s; failed to preserve torrent retry metadata: %v", errText, createErr)
 			}
@@ -832,11 +981,13 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			// DO NOT call RemoveTorrent(infoHash) because qBittorrent deduplicates by infoHash!
 			// DO NOT delete torrentFilePath! Preserve new job's .torrent file and TorrentJobRecord so Retry() remains possible after original job completes.
 			errTxt := fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
-			if createErr := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
-				JobID:           jobID,
-				InfoHash:        infoHash,
-				TorrentFilePath: torrentFilePath,
-			}); createErr != nil {
+			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+			if rec == nil {
+				rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}}
+			}
+			rec.InfoHash = infoHash
+			rec.TorrentFilePath = torrentFilePath
+			if createErr := m.torrentRepo.UpdateTorrentJob(ctx, rec); createErr != nil {
 				log.Printf("acquireTorrentMetadata: failed to preserve torrent retry metadata for job %s: %v", jobID, createErr)
 				errTxt = fmt.Sprintf("%s (failed to preserve retry metadata: %v)", errTxt, createErr)
 			}
@@ -909,13 +1060,15 @@ loop:
 
 	// Save torrent job record
 	if m.torrentRepo != nil {
-		m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
-			JobID:           jobID,
-			InfoHash:        infoHash,
-			Name:            metadata.Name,
-			TotalSize:       metadata.TotalSize,
-			TorrentFilePath: torrentFilePath,
-		})
+		rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+		if rec == nil {
+			rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: j.SeedingPolicy, CustomTrackers: j.CustomTrackers}
+		}
+		rec.InfoHash = infoHash
+		rec.Name = metadata.Name
+		rec.TotalSize = metadata.TotalSize
+		rec.TorrentFilePath = torrentFilePath
+		_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
 
 		// Fetch and save file list
 		files, err := torrentEng.GetFiles(ctx, infoHash)
@@ -934,6 +1087,11 @@ loop:
 			m.torrentRepo.SaveTorrentFiles(ctx, jobID, records)
 		}
 	}
+	if len(j.CustomTrackers) > 0 {
+		if _, trackerErr := m.AddTorrentTrackers(ctx, jobID, j.CustomTrackers); trackerErr != nil {
+			log.Printf("acquireTorrentMetadata: custom trackers not applied for job %s: %v", jobID, trackerErr)
+		}
+	}
 
 	m.publish(EventJobUpdated, j)
 	log.Printf("acquireTorrentMetadata: job %s metadata acquired: %s (%d files)", jobID, metadata.Name, 0)
@@ -941,6 +1099,19 @@ loop:
 
 // StartTorrent starts a torrent download after file selection.
 func (m *Manager) StartTorrent(ctx context.Context, id string, selections []TorrentFileSelection, seedAfterComplete bool) (*Job, error) {
+	mode := networkpolicy.SeedingModeNone
+	if seedAfterComplete {
+		mode = networkpolicy.SeedingModeUnlimited
+	}
+	policy := networkpolicy.SeedingPolicy{Mode: mode}
+	return m.StartTorrentWithPolicy(ctx, id, selections, policy)
+}
+
+// StartTorrentWithPolicy starts a selected torrent using a normalized seeding policy.
+func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selections []TorrentFileSelection, policy networkpolicy.SeedingPolicy) (*Job, error) {
+	if err := networkpolicy.ValidateSeeding(policy); err != nil {
+		return nil, &AppError{Code: ErrInvalidSeedingPolicy, Message: err.Error()}
+	}
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1027,7 +1198,14 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 	}
 
 	j.TotalBytes = selectedBytes
-	j.SeedAfterComplete = seedAfterComplete
+	j.SeedingPolicy = policy
+	j.SeedAfterComplete = policy.Mode != networkpolicy.SeedingModeNone
+
+	if controller, ok := eng.(ISeedingPolicyController); ok {
+		if err := controller.ApplySeedingPolicy(ctx, j, policy); err != nil {
+			return nil, &AppError{Code: ErrNetworkSettingApplicationFailed, Message: fmt.Sprintf("failed to apply seeding policy: %v", err)}
+		}
+	}
 
 	if m.torrentRepo != nil {
 		var records []TorrentFileRecord
@@ -1048,7 +1226,8 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to get torrent job record: %v", err)}
 		}
 		if rec != nil {
-			rec.SeedAfterComplete = seedAfterComplete
+			rec.SeedAfterComplete = j.SeedAfterComplete
+			rec.SeedingPolicy = policy
 			if err := m.torrentRepo.UpdateTorrentJob(ctx, rec); err != nil {
 				return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to update torrent job record: %v", err)}
 			}
@@ -1071,6 +1250,9 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 
 	// Fallback for test doubles created without scheduler
 	if m.scheduler == nil {
+		if prepErr := m.prepareNetworkDispatch(ctx, j, eng); prepErr != nil {
+			return nil, prepErr
+		}
 		if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
 			j.Status = StatusFailed
 			j.Error = fmt.Sprintf("failed to start torrent: %v", err)
@@ -1081,6 +1263,9 @@ func (m *Manager) StartTorrent(ctx context.Context, id string, selections []Torr
 			}
 			m.publish(EventJobFailed, j)
 			return j, nil
+		}
+		if limitErr := m.applyJobLimits(ctx, j, eng, false); limitErr != nil {
+			j.NetworkReconcilePending = true
 		}
 		j.Status = StatusDownloading
 		j.UpdatedAt = time.Now()
@@ -1127,7 +1312,8 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to stop torrent seeding: %v", err)}
 	}
 	j.SeedAfterComplete = false
-	if err := m.finalizeCompletedTorrent(ctx, j); err != nil {
+	j.SeedingPolicy = networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
+	if err := m.finalizeCompletedTorrentWithReason(ctx, j, "manual"); err != nil {
 		var finErr *TorrentFinalizeError
 		if errors.As(err, &finErr) && finErr.Kind == TorrentFinalizeCleanupFailure {
 			return j, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("torrent completed but qBittorrent cleanup is pending: %v", err)}
@@ -1278,6 +1464,9 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 			return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine %q not available for resume", j.Engine)}
 		}
 		if action == QueueActionStart {
+			if prepErr := m.prepareNetworkDispatch(ctx, j, eng); prepErr != nil {
+				return nil, prepErr
+			}
 			engineID, err := eng.Start(ctx, j, m.downloadDir)
 			if err != nil {
 				return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine start failed: %v", err)}
@@ -1287,6 +1476,9 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 			if err := eng.Resume(ctx, j); err != nil {
 				return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine resume failed: %v", err)}
 			}
+		}
+		if limitErr := m.applyJobLimits(ctx, j, eng, false); limitErr != nil {
+			j.NetworkReconcilePending = true
 		}
 		j.Status = StatusDownloading
 		j.UpdatedAt = time.Now()
@@ -1496,6 +1688,9 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 			return j, nil
 		}
 
+		if prepErr := m.prepareNetworkDispatch(ctx, j, eng); prepErr != nil {
+			return nil, prepErr
+		}
 		engineID, err := eng.Start(ctx, j, m.downloadDir)
 		if err != nil {
 			j.Status = StatusFailed
@@ -1507,6 +1702,9 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		}
 
 		j.EngineID = engineID
+		if limitErr := m.applyJobLimits(ctx, j, eng, false); limitErr != nil {
+			j.NetworkReconcilePending = true
+		}
 		j.Status = StatusDownloading
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
@@ -1562,6 +1760,10 @@ func (m *Manager) hydrateJob(ctx context.Context, j *Job) {
 		rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
 		if err == nil && rec != nil {
 			j.SeedAfterComplete = rec.SeedAfterComplete
+			j.SeedingPolicy = rec.SeedingPolicy
+			j.SeedingStartedAt = rec.SeedingStartedAt
+			j.SeedingStopReason = rec.SeedingStopReason
+			j.CustomTrackers = append([]string(nil), rec.CustomTrackers...)
 			if j.TorrentInfo == nil && (rec.Name != "" || rec.TotalSize > 0) {
 				j.TorrentInfo = &TorrentInfo{
 					Name:      rec.Name,
@@ -1608,22 +1810,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 	case StatusCompleted:
 		// For torrent jobs, handle seeding or removal
 		if j.Type == TypeTorrent {
-			if j.SeedAfterComplete {
-				if prevStatus != StatusSeeding {
-					j.Status = StatusSeeding
-					j.Progress = 100
-					j.SpeedBytesPerSecond = status.UploadSpeed
-					j.ETASeconds = 0
-					j.UpdatedAt = time.Now()
-					m.repo.Update(ctx, j)
-					m.publish(EventJobUpdated, j)
-					if m.scheduler != nil {
-						m.scheduler.Kick()
-					}
-				}
+			if m.enterSeeding(ctx, j, status) {
 				return
 			}
-			m.finalizeCompletedTorrent(ctx, j)
+			if prevStatus != StatusSeeding {
+				_ = m.repo.Update(ctx, j)
+				m.publish(EventJobUpdated, j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
+				}
+			}
 			return
 		}
 		// Handle media finalization before marking StatusCompleted
@@ -1836,33 +2032,17 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		return
 
 	case StatusSeeding:
-		if !j.SeedAfterComplete {
-			_ = m.finalizeCompletedTorrent(ctx, j)
+		if m.enterSeeding(ctx, j, status) {
 			return
 		}
 
 		if prevStatus != StatusSeeding {
-			j.Status = StatusSeeding
-			j.Progress = 100
-			j.SpeedBytesPerSecond = status.UploadSpeed
-			j.ETASeconds = 0
-			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
 			m.publish(EventJobUpdated, j)
 			if m.scheduler != nil {
 				m.scheduler.Kick()
 			}
 		} else {
-			// Update upload stats while seeding
-			if j.TorrentInfo != nil {
-				j.TorrentInfo.UploadSpeed = status.UploadSpeed
-				j.TorrentInfo.Uploaded = status.Uploaded
-				j.TorrentInfo.Ratio = status.Ratio
-				j.TorrentInfo.Seeders = status.Seeders
-				j.TorrentInfo.Leechers = status.Leechers
-			}
-			j.SpeedBytesPerSecond = status.UploadSpeed
-			j.UpdatedAt = time.Now()
 			if persistNow {
 				m.repo.Update(ctx, j)
 			}
@@ -2211,6 +2391,9 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	}
 
 	if qj.Action == QueueActionStart {
+		if err := m.prepareNetworkDispatch(ctx, j, eng); err != nil {
+			return err
+		}
 		if j.Type == TypeTorrent {
 			torrentEng, ok := eng.(ITorrentEngine)
 			if !ok {
@@ -2225,6 +2408,10 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 				return err
 			}
 			j.EngineID = engineID
+		}
+		if err := m.applyJobLimits(ctx, j, eng, false); err != nil {
+			j.NetworkReconcilePending = true
+			return err
 		}
 	} else {
 		// QueueActionResume
@@ -2337,6 +2524,18 @@ func (m *Manager) removeCompletedTorrent(ctx context.Context, j *Job) error {
 }
 
 func (m *Manager) finalizeCompletedTorrent(ctx context.Context, j *Job) error {
+	return m.finalizeCompletedTorrentWithReason(ctx, j, "policy_none")
+}
+
+func (m *Manager) finalizeCompletedTorrentWithReason(ctx context.Context, j *Job, stopReason string) error {
+	lock := m.terminalLock(j.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if current, err := m.repo.GetByID(ctx, j.ID); err == nil && current != nil && current.Status == StatusCompleted && !current.EngineCleanupPending {
+		*j = *current
+		return nil
+	}
 	candidate := *j
 	candidate.FinalPath = candidate.DestinationDir
 	candidate.Status = StatusCompleted
@@ -2346,15 +2545,22 @@ func (m *Manager) finalizeCompletedTorrent(ctx context.Context, j *Job) error {
 	candidate.EngineCleanupPending = true
 	candidate.UpdatedAt = time.Now()
 
-	if err := m.repo.Update(ctx, &candidate); err != nil {
-		log.Printf("finalizeCompletedTorrent: failed to update job %s to COMPLETED: %v", j.ID, err)
+	var persistErr error
+	if m.torrentRepo != nil {
+		persistErr = m.torrentRepo.FinalizeTorrent(ctx, &candidate, stopReason)
+	} else {
+		persistErr = m.repo.Update(ctx, &candidate)
+	}
+	if persistErr != nil {
+		log.Printf("finalizeCompletedTorrent: failed to update job %s to COMPLETED: %v", j.ID, persistErr)
 		return &TorrentFinalizeError{
 			Kind: TorrentFinalizePersistenceFailure,
-			Err:  fmt.Errorf("persist completed status: %w", err),
+			Err:  fmt.Errorf("persist completed status: %w", persistErr),
 		}
 	}
 
 	*j = candidate
+	j.SeedingStopReason = stopReason
 	m.removeActive(j.ID)
 	if m.scheduler != nil {
 		m.scheduler.Kick()
@@ -2382,6 +2588,17 @@ func (m *Manager) finalizeCompletedTorrent(ctx context.Context, j *Job) error {
 	*j = candidate
 	m.publish(EventJobCompleted, j)
 	return nil
+}
+
+func (m *Manager) terminalLock(jobID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lock := m.terminalLocks[jobID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.terminalLocks[jobID] = lock
+	}
+	return lock
 }
 
 func (m *Manager) retryPendingEngineCleanup(ctx context.Context, j *Job) error {
