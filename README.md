@@ -2,6 +2,8 @@
 
 A self-hosted download manager that handles direct files, media streams, and torrents — all from one clean interface.
 
+Current release: **V0.7 — Network & Protocol Power Controls**
+
 Built with **Go**, **React**, **SQLite**, and powered by **aria2**, **yt-dlp**, and **qBittorrent** under the hood.
 
 ---
@@ -51,6 +53,28 @@ Active downloads are reattached after a restart. Queued jobs are preserved. Torr
 
 ### Settings
 Configure max concurrent downloads from the UI or via environment variable. The setting is persisted in the database and takes effect immediately.
+
+### V0.7 Network and Protocol Controls
+
+- Normalized global and per-job bandwidth limits. `0` means unlimited; positive values are bytes per second.
+- Capability-driven proxy, User-Agent, HTTP header, retry, timeout, aria2 connection, torrent tracker, and seeding controls.
+- Five torrent seeding modes: `none`, `unlimited`, `ratio`, `duration`, and `ratio_or_duration`.
+- HTTP(S) tracker subscriptions with conditional refresh, 2 MiB/10,000-line bounds, four-worker concurrency, and transactional last-good entries.
+- AES-256-GCM encryption for proxy passwords and sensitive headers. APIs, SSE, logs, and UI responses expose only configured markers.
+- qBittorrent changes are restricted to hashes persisted for GoDownloader jobs. Managed daemon-global proxy settings are off by default and fail closed when the daemon contains unowned torrents.
+
+The global bandwidth setting follows truthful engine scope: aria2 applies an aggregate daemon limit, yt-dlp applies the effective limit to future processes, and qBittorrent projects it only to GoDownloader-owned torrents. It is not a strict cross-engine aggregate.
+
+| Control | Direct (aria2) | Media (yt-dlp) | Torrent (qBittorrent) |
+|---|---|---|---|
+| Pause/resume | Live | Unsupported | Live |
+| Download limit | Live | Startup-only | Live |
+| Upload limit | Unsupported | Unsupported | Live |
+| Proxy | Snapshot HTTP/system/disabled | Snapshot HTTP/HTTPS/SOCKS5 | Managed global HTTP/SOCKS5 opt-in |
+| Headers/retry/timeouts | Snapshot | Snapshot | Unsupported |
+| Trackers/seeding | Unsupported | Unsupported | Owned public torrents only |
+
+Tracker source URLs may intentionally target HTTP(S) loopback or private-network services. Userinfo, unsafe schemes, scheme-changing redirects, and more than five redirects are rejected.
 
 ---
 
@@ -152,8 +176,8 @@ go test ./...
 # With race condition detection
 go test -race ./...
 
-# Frontend lint
-cd web && npm run lint
+# Frontend verification
+cd web && npm run typecheck && npm test && npm run build && npm run lint
 ```
 
 ---
@@ -178,6 +202,17 @@ cd web && npm run lint
 | `GET` | `/api/v1/jobs/{id}/torrent/files` | Get torrent file list |
 | `POST` | `/api/v1/jobs/{id}/torrent/start` | Set file priorities and start |
 | `POST` | `/api/v1/jobs/{id}/stop-seeding` | Stop seeding |
+| `PUT` | `/api/v1/jobs/{id}/network` | Update supported live bandwidth limits |
+| `GET` | `/api/v1/jobs/{id}/capabilities` | Get normalized controls for a job |
+| `POST` | `/api/v1/jobs/{id}/torrent/trackers` | Add trackers to an owned public torrent |
+| `PUT` | `/api/v1/jobs/{id}/torrent/seeding-policy` | Update normalized seeding policy |
+| **Capabilities & Trackers** | | |
+| `GET` | `/api/v1/capabilities` | Get capability profiles |
+| `POST` | `/api/v1/capabilities/resolve` | Resolve a source or batch intersection |
+| `GET/POST` | `/api/v1/tracker-sources` | List or create tracker subscriptions |
+| `PUT/DELETE` | `/api/v1/tracker-sources/{id}` | Update or delete a subscription |
+| `POST` | `/api/v1/tracker-sources/{id}/refresh` | Refresh one subscription |
+| `POST` | `/api/v1/tracker-sources/refresh` | Refresh all enabled subscriptions |
 | **Categories** | | |
 | `GET` | `/api/v1/categories` | List all download categories |
 | `POST` | `/api/v1/categories` | Create a new download category |
@@ -217,6 +252,25 @@ All settings are optional. Defaults work out of the box for a typical local setu
 | `YTDLP_PATH` | `yt-dlp` | Path to yt-dlp binary |
 | `FFMPEG_PATH` | `ffmpeg` | Path to FFmpeg binary |
 | `WEB_DIR` | `./web/dist` | Directory serving the built frontend |
+| `V0.7_SETTINGS_ENCRYPTION_KEY` | — | Base64 32-byte or 64-character hex AES key for persisted secrets |
+| `GLOBAL_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Engine-scoped global download limit |
+| `DEFAULT_TORRENT_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Default owned-torrent download limit |
+| `DEFAULT_TORRENT_UPLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Default owned-torrent upload limit |
+| `DEFAULT_PROXY_MODE` | `disabled` | `disabled`, `system`, or `custom` |
+| `DEFAULT_PROXY_PROTOCOL` | — | `http`, `https`, or `socks5` where supported |
+| `DEFAULT_PROXY_HOST` / `DEFAULT_PROXY_PORT` | — | Custom proxy endpoint |
+| `DEFAULT_PROXY_USERNAME` / `DEFAULT_PROXY_PASSWORD` | — | Proxy credentials; environment passwords are not copied to SQLite |
+| `DEFAULT_NO_PROXY` | — | Comma-separated proxy bypass list |
+| `DEFAULT_USER_AGENT` | — | Default normalized User-Agent |
+| `DEFAULT_MAX_ATTEMPTS` | `0` | Engine default at `0`; otherwise 1–100 attempts |
+| `DEFAULT_RETRY_WAIT_SECONDS` | `0` | Retry wait, 0–3600 seconds |
+| `DEFAULT_CONNECT_TIMEOUT_SECONDS` | `0` | Connect timeout, `0` or 1–86400 seconds |
+| `DEFAULT_REQUEST_TIMEOUT_SECONDS` | `0` | Request timeout, `0` or 1–86400 seconds |
+| `DEFAULT_ARIA2_SPLIT` | `5` | aria2 split count, 1–16 |
+| `DEFAULT_ARIA2_MAX_CONNECTIONS_PER_SERVER` | `1` | aria2 connections/server, 1–16 |
+| `DEFAULT_ARIA2_MIN_SPLIT_SIZE_BYTES` | `20971520` | aria2 minimum split, 1 MiB–1 GiB |
+| `TRACKER_AUTO_APPLY` | `false` | Snapshot enabled tracker entries into new public torrents |
+| `MANAGE_QBIT_GLOBAL_NETWORK_SETTINGS` | `false` | Dedicated-daemon opt-in for verified qB proxy management |
 
 ---
 
@@ -236,6 +290,9 @@ GoDownloader/
 │   ├── events/           Event bus and SSE handler
 │   ├── job/              Job state machine, scheduler, and recovery
 │   ├── settings/         App settings persistence
+│   ├── networkpolicy/    Normalized capability and policy validation
+│   ├── securestore/      Field-bound AES-256-GCM secret storage
+│   ├── tracker/          Bounded tracker subscription refresh
 │   └── storage/          Storage resolution, disk preflight, and file lifecycle
 ├── web/src/              React frontend
 │   ├── components/         UI components
