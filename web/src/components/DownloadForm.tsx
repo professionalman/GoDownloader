@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { JobPriority, Category, FilenameConflictPolicy } from '../types';
-import { getCategories } from '../api';
+import type { JobPriority, Category, FilenameConflictPolicy, JobNetworkPolicyOverride, SeedingPolicy, JobCapabilities } from '../types';
+import { getCategories, resolveCapabilities } from '../api';
 
 interface DownloadFormProps {
   onSubmit: (
@@ -8,13 +8,19 @@ interface DownloadFormProps {
     priority: JobPriority,
     categoryId?: string,
     destinationDir?: string,
-    conflictPolicy?: FilenameConflictPolicy
+    conflictPolicy?: FilenameConflictPolicy,
+    networkPolicy?: JobNetworkPolicyOverride,
+    seedingPolicy?: SeedingPolicy,
+    trackers?: string[]
   ) => void;
   onUploadTorrent?: (
     file: File,
     priority: JobPriority,
     categoryId?: string,
-    destinationDir?: string
+    destinationDir?: string,
+    networkPolicy?: JobNetworkPolicyOverride,
+    seedingPolicy?: SeedingPolicy,
+    trackers?: string[]
   ) => void;
   disabled?: boolean;
 }
@@ -27,6 +33,19 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
   const [customDestDir, setCustomDestDir] = useState<string>('');
   const [conflictPolicy, setConflictPolicy] = useState<FilenameConflictPolicy>('rename');
   const [error, setError] = useState('');
+  const [advanced, setAdvanced] = useState(false);
+  const [capabilities, setCapabilities] = useState<JobCapabilities | null>(null);
+  const [downloadLimit, setDownloadLimit] = useState('');
+  const [uploadLimit, setUploadLimit] = useState('');
+  const [userAgent, setUserAgent] = useState('');
+  const [headers, setHeaders] = useState('');
+  const [proxyMode, setProxyMode] = useState<'disabled' | 'system' | 'custom'>('disabled');
+  const [proxyProtocol, setProxyProtocol] = useState<'http' | 'https' | 'socks5'>('http');
+  const [proxyHost, setProxyHost] = useState('');
+  const [proxyPort, setProxyPort] = useState('');
+  const [proxyUsername, setProxyUsername] = useState('');
+  const [proxyPassword, setProxyPassword] = useState('');
+  const [trackers, setTrackers] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -34,6 +53,37 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
       .then(setCategories)
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const sources = inputText.split('\n').map((value) => value.trim()).filter(Boolean);
+    if (!sources.length) {
+      setCapabilities(null);
+      return;
+    }
+    const timer = window.setTimeout(() => resolveCapabilities(sources.length === 1 ? sources[0] : sources).then(setCapabilities).catch(() => setCapabilities(null)), 250);
+    return () => window.clearTimeout(timer);
+  }, [inputText]);
+
+  const buildPolicy = (): JobNetworkPolicyOverride | undefined => {
+    const policy: JobNetworkPolicyOverride = {};
+    if (downloadLimit !== '') policy.downloadLimitBytesPerSecond = Number(downloadLimit);
+    if (uploadLimit !== '') policy.uploadLimitBytesPerSecond = Number(uploadLimit);
+    if (capabilities?.proxy.supported) {
+      policy.proxy = { mode: proxyMode };
+      if (proxyMode === 'custom') {
+        policy.proxy = { mode: proxyMode, protocol: proxyProtocol, host: proxyHost, port: Number(proxyPort), username: proxyUsername };
+        if (proxyPassword) policy.proxyPassword = proxyPassword;
+      }
+    }
+    if (userAgent) policy.userAgent = userAgent;
+    if (headers.trim()) {
+      policy.httpHeaders = headers.split('\n').filter(Boolean).map((line) => {
+        const separator = line.indexOf(':');
+        return { name: line.slice(0, separator).trim(), value: line.slice(separator + 1).trim() };
+      });
+    }
+    return Object.keys(policy).length ? policy : undefined;
+  };
 
   const handleCategoryChange = (catId: string) => {
     setSelectedCategoryId(catId);
@@ -78,6 +128,10 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
       selectedCategoryId || undefined,
       customDestDir.trim() || undefined,
       conflictPolicy
+      ,
+      buildPolicy(),
+      undefined,
+      trackers.split('\n').map((value) => value.trim()).filter(Boolean)
     );
     setInputText('');
   };
@@ -89,7 +143,10 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
         file,
         priority,
         selectedCategoryId || undefined,
-        customDestDir.trim() || undefined
+        customDestDir.trim() || undefined,
+        buildPolicy(),
+        undefined,
+        trackers.split('\n').map((value) => value.trim()).filter(Boolean)
       );
     }
     if (fileInputRef.current) {
@@ -162,6 +219,26 @@ export const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, onUploadTo
             </select>
           </div>
         </div>
+
+        <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="advanced-network-controls">
+          <summary>Advanced Network Controls</summary>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '0.7rem', padding: '0.8rem 0' }}>
+            {capabilities?.downloadLimit.supported && <label>Download limit (bytes/s)<input type="number" min="0" value={downloadLimit} onChange={(e) => setDownloadLimit(e.target.value)} placeholder="Inherit" /></label>}
+            {capabilities?.uploadLimit.supported && <label>Upload limit (bytes/s)<input type="number" min="0" value={uploadLimit} onChange={(e) => setUploadLimit(e.target.value)} placeholder="Inherit" /></label>}
+            {capabilities?.proxy.supported && <label>Proxy<select value={proxyMode} onChange={(e) => setProxyMode(e.target.value as typeof proxyMode)}><option value="disabled">Disabled</option><option value="system">System</option><option value="custom">Custom</option></select></label>}
+            {capabilities?.proxy.supported && proxyMode === 'custom' && <>
+              <label>Protocol<select value={proxyProtocol} onChange={(e) => setProxyProtocol(e.target.value as typeof proxyProtocol)}>{capabilities.proxy.supportedProtocols?.map((protocol) => <option key={protocol}>{protocol}</option>)}</select></label>
+              <label>Proxy host<input value={proxyHost} onChange={(e) => setProxyHost(e.target.value)} /></label>
+              <label>Proxy port<input type="number" min="1" max="65535" value={proxyPort} onChange={(e) => setProxyPort(e.target.value)} /></label>
+              <label>Proxy username<input value={proxyUsername} onChange={(e) => setProxyUsername(e.target.value)} /></label>
+              <label>Proxy password<input type="password" value={proxyPassword} onChange={(e) => setProxyPassword(e.target.value)} placeholder="Leave empty to preserve" /></label>
+            </>}
+            {capabilities?.userAgent.supported && <label>User-Agent<input value={userAgent} onChange={(e) => setUserAgent(e.target.value)} /></label>}
+            {capabilities?.customHeaders.supported && <label style={{ gridColumn: '1 / -1' }}>Headers (one Name: value per line)<textarea value={headers} onChange={(e) => setHeaders(e.target.value)} /></label>}
+            {capabilities?.trackers.supported && <label style={{ gridColumn: '1 / -1' }}>Custom trackers (one URL per line)<textarea value={trackers} onChange={(e) => setTrackers(e.target.value)} /></label>}
+            {!capabilities && <span>Enter a source to see supported controls.</span>}
+          </div>
+        </details>
 
         <div className="form-action-bar">
           <div className="priority-selector">

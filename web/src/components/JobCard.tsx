@@ -1,5 +1,6 @@
 import React from 'react';
 import type { Job } from '../types';
+import { JobPowerControls } from './JobPowerControls';
 
 interface JobCardProps {
   job: Job;
@@ -236,6 +237,8 @@ export const JobCard: React.FC<JobCardProps> = ({
         <div className="job-error">{job.error}</div>
       )}
 
+      <JobPowerControls job={job} />
+
       {/* Actions */}
       <div className="job-actions">
         {isSeeding && onStopSeeding && (
@@ -277,4 +280,3 @@ export const JobCard: React.FC<JobCardProps> = ({
     </div>
   );
 };
-

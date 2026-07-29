@@ -16,6 +16,10 @@ import type {
   CreateCategoryPayload,
   UpdateCategoryPayload,
   FilenameConflictPolicy,
+  JobNetworkPolicyOverride,
+  SeedingPolicy,
+  JobCapabilities,
+  TrackerSource,
 } from './types';
 
 const API_BASE = '/api/v1';
@@ -34,8 +38,12 @@ export async function createJob(
   categoryId?: string,
   destinationDir?: string,
   conflictPolicy?: FilenameConflictPolicy
+  ,
+  networkPolicy?: JobNetworkPolicyOverride,
+  seedingPolicy?: SeedingPolicy,
+  trackers?: string[]
 ): Promise<Job> {
-  const body: CreateJobRequest = { source, priority, categoryId, destinationDir, conflictPolicy };
+  const body: CreateJobRequest = { source, priority, categoryId, destinationDir, conflictPolicy, networkPolicy, seedingPolicy, trackers };
   const res = await fetch(`${API_BASE}/jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -45,7 +53,7 @@ export async function createJob(
 }
 
 export async function createBatchJobs(
-  inputs: { source: string; priority?: JobPriority; categoryId?: string; destinationDir?: string; conflictPolicy?: FilenameConflictPolicy }[]
+  inputs: { source: string; priority?: JobPriority; categoryId?: string; destinationDir?: string; conflictPolicy?: FilenameConflictPolicy; networkPolicy?: JobNetworkPolicyOverride; seedingPolicy?: SeedingPolicy; trackers?: string[] }[]
 ): Promise<CreateBatchResponse> {
   const body: CreateBatchRequest = { inputs };
   const res = await fetch(`${API_BASE}/jobs/batch`, {
@@ -205,7 +213,10 @@ export async function uploadTorrent(
   file: File,
   priority?: JobPriority,
   categoryId?: string,
-  destinationDir?: string
+  destinationDir?: string,
+  networkPolicy?: JobNetworkPolicyOverride,
+  seedingPolicy?: SeedingPolicy,
+  trackers?: string[]
 ): Promise<Job> {
   const formData = new FormData();
   formData.append('torrent', file);
@@ -218,6 +229,9 @@ export async function uploadTorrent(
   if (destinationDir) {
     formData.append('destinationDir', destinationDir);
   }
+  if (networkPolicy) formData.append('networkPolicy', JSON.stringify(networkPolicy));
+  if (seedingPolicy) formData.append('seedingPolicy', JSON.stringify(seedingPolicy));
+  if (trackers?.length) formData.append('trackers', JSON.stringify(trackers));
   const res = await fetch(`${API_BASE}/jobs/torrent`, {
     method: 'POST',
     body: formData,
@@ -230,13 +244,74 @@ export async function getTorrentFiles(jobId: string): Promise<TorrentFile[]> {
   return handleResponse<TorrentFile[]>(res);
 }
 
-export async function startTorrent(jobId: string, files: TorrentFileSelection[], seedAfterComplete: boolean): Promise<Job> {
+export async function startTorrent(jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy): Promise<Job> {
   const res = await fetch(`${API_BASE}/jobs/${jobId}/torrent/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files, seedAfterComplete }),
+    body: JSON.stringify({ files, seedingPolicy }),
   });
   return handleResponse<Job>(res);
+}
+
+export async function getCapabilities(): Promise<{ profiles: Record<string, JobCapabilities> }> {
+  return handleResponse(await fetch(`${API_BASE}/capabilities`));
+}
+
+export async function resolveCapabilities(source: string | string[]): Promise<JobCapabilities> {
+  return handleResponse(await fetch(`${API_BASE}/capabilities/resolve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }),
+  }));
+}
+
+export async function getJobCapabilities(jobId: string): Promise<JobCapabilities> {
+  return handleResponse(await fetch(`${API_BASE}/jobs/${jobId}/capabilities`));
+}
+
+export async function updateJobNetwork(jobId: string, limits: { downloadLimitBytesPerSecond?: number; uploadLimitBytesPerSecond?: number }): Promise<Job> {
+  return handleResponse(await fetch(`${API_BASE}/jobs/${jobId}/network`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(limits),
+  }));
+}
+
+export async function addTorrentTrackers(jobId: string, trackers: string[]): Promise<{ trackers: { url: string }[] }> {
+  return handleResponse(await fetch(`${API_BASE}/jobs/${jobId}/torrent/trackers`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trackers }),
+  }));
+}
+
+export async function updateSeedingPolicy(jobId: string, policy: SeedingPolicy): Promise<Job> {
+  return handleResponse(await fetch(`${API_BASE}/jobs/${jobId}/torrent/seeding-policy`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(policy),
+  }));
+}
+
+export async function getTrackerSources(): Promise<TrackerSource[]> {
+  return handleResponse(await fetch(`${API_BASE}/tracker-sources`));
+}
+
+export async function createTrackerSource(input: Omit<TrackerSource, 'id' | 'trackerCount' | 'lastCheckedAt' | 'lastSuccessAt' | 'lastError'>): Promise<TrackerSource> {
+  return handleResponse(await fetch(`${API_BASE}/tracker-sources`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  }));
+}
+
+export async function updateTrackerSource(id: string, input: { name: string; url: string; enabled: boolean; refreshIntervalSeconds: number }): Promise<TrackerSource> {
+  return handleResponse(await fetch(`${API_BASE}/tracker-sources/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  }));
+}
+
+export async function deleteTrackerSource(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/tracker-sources/${id}`, { method: 'DELETE' });
+  if (!response.ok) await handleResponse(response);
+}
+
+export async function refreshTrackerSource(id: string): Promise<TrackerSource> {
+  return handleResponse(await fetch(`${API_BASE}/tracker-sources/${id}/refresh`, { method: 'POST' }));
+}
+
+export async function refreshAllTrackerSources(): Promise<{ failureCount: number }> {
+  return handleResponse(await fetch(`${API_BASE}/tracker-sources/refresh`, { method: 'POST' }));
 }
 
 export async function stopSeeding(jobId: string): Promise<Job> {

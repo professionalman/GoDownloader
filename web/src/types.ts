@@ -3,6 +3,113 @@ export type JobStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'fai
 export type JobPriority = 'low' | 'normal' | 'high';
 
 export type FilenameConflictPolicy = 'rename' | 'overwrite' | 'fail' | 'engine_managed';
+export type ProxyMode = 'disabled' | 'system' | 'custom';
+export type ProxyProtocol = 'http' | 'https' | 'socks5';
+export type SeedingMode = 'none' | 'unlimited' | 'ratio' | 'duration' | 'ratio_or_duration';
+
+export interface ProxyPolicy {
+  mode: ProxyMode;
+  protocol?: ProxyProtocol;
+  host?: string;
+  port?: number;
+  username?: string;
+  hasPassword?: boolean;
+  secretSource?: string;
+  noProxy?: string[];
+}
+
+export interface HTTPHeaderPolicy {
+  name: string;
+  value?: string;
+  hasValue?: boolean;
+  sensitive?: boolean;
+  clearValue?: boolean;
+}
+
+export interface RetryPolicy {
+  maxAttempts: number;
+  retryWaitSeconds: number;
+}
+
+export interface TimeoutPolicy {
+  connectTimeoutSeconds: number;
+  requestTimeoutSeconds: number;
+}
+
+export interface DirectConnectionPolicy {
+  split: number;
+  maxConnectionsPerServer: number;
+  minSplitSizeBytes: number;
+}
+
+export interface JobNetworkPolicy {
+  downloadLimitBytesPerSecond: number;
+  uploadLimitBytesPerSecond?: number;
+  proxy: ProxyPolicy;
+  userAgent?: string;
+  httpHeaders?: HTTPHeaderPolicy[];
+  retryPolicy: RetryPolicy;
+  timeoutPolicy: TimeoutPolicy;
+  directConnections?: DirectConnectionPolicy;
+}
+
+export interface JobNetworkPolicyOverride {
+  downloadLimitBytesPerSecond?: number;
+  uploadLimitBytesPerSecond?: number;
+  proxy?: ProxyPolicy;
+  proxyPassword?: string;
+  clearProxyPassword?: boolean;
+  userAgent?: string;
+  httpHeaders?: HTTPHeaderPolicy[];
+  retryPolicy?: RetryPolicy;
+  timeoutPolicy?: TimeoutPolicy;
+  directConnections?: DirectConnectionPolicy;
+}
+
+export interface SeedingPolicy {
+  mode: SeedingMode;
+  ratioLimit?: number;
+  timeLimitSeconds?: number;
+}
+
+export interface CapabilityState {
+  supported: boolean;
+  mutableNow: boolean;
+  startupOnly?: boolean;
+  reason?: string;
+  supportedProtocols?: string[];
+  supportedFields?: string[];
+}
+
+export interface JobCapabilities {
+  pause: CapabilityState;
+  resume: CapabilityState;
+  cancel: CapabilityState;
+  retry: CapabilityState;
+  downloadLimit: CapabilityState;
+  uploadLimit: CapabilityState;
+  proxy: CapabilityState;
+  userAgent: CapabilityState;
+  customHeaders: CapabilityState;
+  retryPolicy: CapabilityState;
+  timeoutPolicy: CapabilityState;
+  connections: CapabilityState;
+  fileSelection: CapabilityState;
+  trackers: CapabilityState;
+  seedingPolicy: CapabilityState;
+}
+
+export interface TrackerSource {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  refreshIntervalSeconds: number;
+  lastCheckedAt?: string;
+  lastSuccessAt?: string;
+  lastError?: string;
+  trackerCount: number;
+}
 
 export interface Category {
   id: string;
@@ -94,6 +201,14 @@ export interface Job {
   mediaInfo?: MediaInfo;
   torrentInfo?: TorrentInfo;
   seedAfterComplete?: boolean;
+  networkPolicy: JobNetworkPolicy;
+  effectiveDownloadLimitBytesPerSecond: number;
+  effectiveUploadLimitBytesPerSecond?: number;
+  networkReconcilePending?: boolean;
+  seedingPolicy?: SeedingPolicy;
+  seedingStartedAt?: string;
+  seedingStopReason?: string;
+  customTrackers?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -104,6 +219,9 @@ export interface CreateJobRequest {
   categoryId?: string;
   destinationDir?: string;
   conflictPolicy?: FilenameConflictPolicy;
+  networkPolicy?: JobNetworkPolicyOverride;
+  seedingPolicy?: SeedingPolicy;
+  trackers?: string[];
 }
 
 export interface BatchInput {
@@ -112,6 +230,9 @@ export interface BatchInput {
   categoryId?: string;
   destinationDir?: string;
   conflictPolicy?: FilenameConflictPolicy;
+  networkPolicy?: JobNetworkPolicyOverride;
+  seedingPolicy?: SeedingPolicy;
+  trackers?: string[];
 }
 
 export interface CreateBatchRequest {
@@ -119,6 +240,9 @@ export interface CreateBatchRequest {
   categoryId?: string;
   destinationDir?: string;
   conflictPolicy?: FilenameConflictPolicy;
+  networkPolicy?: JobNetworkPolicyOverride;
+  seedingPolicy?: SeedingPolicy;
+  trackers?: string[];
 }
 
 export interface BatchItemResult {
@@ -200,6 +324,24 @@ export interface AppSettings {
   storage?: StorageSettings;
   maxConcurrentDownloads?: number;
   maxConcurrentSource?: string;
+  network?: {
+    globalDownloadLimitBytesPerSecond: number;
+    proxy: ProxyPolicy;
+    userAgent: string;
+    httpHeaders: HTTPHeaderPolicy[];
+    retryPolicy: RetryPolicy;
+    timeoutPolicy: TimeoutPolicy;
+    directConnections: DirectConnectionPolicy;
+  };
+  torrent?: {
+    downloadLimitBytesPerSecond: number;
+    uploadLimitBytesPerSecond: number;
+    seedingPolicy: SeedingPolicy;
+    applyTrackerSubscriptionsToNewTorrents: boolean;
+    manageQBitGlobalNetworkSettings: boolean;
+  };
+  overrides?: Record<string, boolean>;
+  applicationResults?: { target: string; status: string; code?: string; message?: string }[];
 }
 
 export interface UpdateSettingsPayload {
@@ -211,6 +353,24 @@ export interface UpdateSettingsPayload {
     temporaryDirectory?: string;
     minimumFreeSpaceBytes?: number;
     defaultConflictPolicy?: FilenameConflictPolicy;
+  };
+  network?: {
+    globalDownloadLimitBytesPerSecond?: number;
+    proxy?: ProxyPolicy;
+    proxyPassword?: string;
+    clearProxyPassword?: boolean;
+    userAgent?: string;
+    httpHeaders?: HTTPHeaderPolicy[];
+    retryPolicy?: RetryPolicy;
+    timeoutPolicy?: TimeoutPolicy;
+    directConnections?: DirectConnectionPolicy;
+  };
+  torrent?: {
+    downloadLimitBytesPerSecond?: number;
+    uploadLimitBytesPerSecond?: number;
+    seedingPolicy?: SeedingPolicy;
+    applyTrackerSubscriptionsToNewTorrents?: boolean;
+    manageQBitGlobalNetworkSettings?: boolean;
   };
 }
 

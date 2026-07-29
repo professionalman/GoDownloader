@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { AppSettings, Category, FilenameConflictPolicy, UpdateSettingsPayload } from '../types';
 import { getCategories, createCategory, updateCategory, deleteCategory } from '../api';
+import { PowerSettingsPanel } from './PowerSettingsPanel';
 
 interface SettingsPanelProps {
   settings: AppSettings | null;
@@ -290,6 +291,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ settings, onSave, 
               )}
             </div>
           </div>
+
+          <PowerSettingsPanel settings={settings} onSave={onSave} />
 
           {error && <div className="form-error" style={{ marginTop: '1rem' }}>{error}</div>}
           {success && <div className="form-success" style={{ marginTop: '1rem' }}>{success}</div>}

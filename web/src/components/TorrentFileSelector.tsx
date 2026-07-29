@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import type { Job, TorrentFile, TorrentFileSelection, TorrentFilePriority } from '../types';
+import type { Job, TorrentFile, TorrentFileSelection, TorrentFilePriority, SeedingMode, SeedingPolicy } from '../types';
 import { getTorrentFiles } from '../api';
 
 interface TorrentFileSelectorProps {
   job: Job;
-  onStart: (jobId: string, files: TorrentFileSelection[], seedAfterComplete: boolean) => void;
+  onStart: (jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy) => void;
   onClose: () => void;
 }
 
@@ -19,7 +19,9 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
   const [files, setFiles] = useState<TorrentFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [seedAfterComplete, setSeedAfterComplete] = useState(false);
+  const [seedingMode, setSeedingMode] = useState<SeedingMode>('none');
+  const [ratioLimit, setRatioLimit] = useState(1);
+  const [durationHours, setDurationHours] = useState(24);
 
   useEffect(() => {
     getTorrentFiles(job.id)
@@ -50,7 +52,10 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
       index: f.index,
       priority: f.selected ? f.priority : ('skip' as TorrentFilePriority)
     }));
-    onStart(job.id, selection, seedAfterComplete);
+    const policy: SeedingPolicy = { mode: seedingMode };
+    if (seedingMode === 'ratio' || seedingMode === 'ratio_or_duration') policy.ratioLimit = ratioLimit;
+    if (seedingMode === 'duration' || seedingMode === 'ratio_or_duration') policy.timeLimitSeconds = Math.round(durationHours * 3600);
+    onStart(job.id, selection, policy);
   };
 
   const selectedCount = files.filter(f => f.selected).length;
@@ -113,14 +118,21 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
               </table>
             </div>
             
-            <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <input 
-                type="checkbox" 
-                id="seedAfterComplete" 
-                checked={seedAfterComplete} 
-                onChange={(e) => setSeedAfterComplete(e.target.checked)} 
-              />
-              <label htmlFor="seedAfterComplete">Keep seeding after download completes</label>
+            <div style={{ marginTop: '16px', display: 'grid', gap: '8px' }}>
+              <label htmlFor="seeding-mode">Seeding policy</label>
+              <select id="seeding-mode" value={seedingMode} onChange={(e) => setSeedingMode(e.target.value as SeedingMode)}>
+                <option value="none">Do not seed</option>
+                <option value="unlimited">Seed without a limit</option>
+                <option value="ratio">Stop at ratio</option>
+                <option value="duration">Stop after active seeding time</option>
+                <option value="ratio_or_duration">Stop at ratio or duration</option>
+              </select>
+              {(seedingMode === 'ratio' || seedingMode === 'ratio_or_duration') && (
+                <label>Ratio target <input aria-label="Ratio target" type="number" min="0.01" max="1000" step="0.1" value={ratioLimit} onChange={(e) => setRatioLimit(Number(e.target.value))} /></label>
+              )}
+              {(seedingMode === 'duration' || seedingMode === 'ratio_or_duration') && (
+                <label>Active seeding hours <input aria-label="Active seeding hours" type="number" min="0.01" max="87600" step="0.5" value={durationHours} onChange={(e) => setDurationHours(Number(e.target.value))} /></label>
+              )}
             </div>
             <div style={{ fontSize: '0.78rem', opacity: 0.6, marginTop: '4px' }}>
               ℹ️ Torrent conflict policy is engine-managed by qBittorrent.

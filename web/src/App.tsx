@@ -5,7 +5,7 @@ import { QueueSection } from './components/QueueSection';
 import { SettingsPanel } from './components/SettingsPanel';
 import { FormatSelector } from './components/FormatSelector';
 import { TorrentFileSelector } from './components/TorrentFileSelector';
-import type { Job, JobPriority, QueueSnapshot, AppSettings, TorrentFileSelection } from './types';
+import type { Job, JobPriority, QueueSnapshot, AppSettings, TorrentFileSelection, JobNetworkPolicyOverride, SeedingPolicy } from './types';
 import {
   getJobs,
   createJob,
@@ -91,17 +91,20 @@ function App() {
     priority: JobPriority,
     categoryId?: string,
     destinationDir?: string,
-    conflictPolicy?: import('./types').FilenameConflictPolicy
+    conflictPolicy?: import('./types').FilenameConflictPolicy,
+    networkPolicy?: JobNetworkPolicyOverride,
+    seedingPolicy?: SeedingPolicy,
+    trackers?: string[]
   ) => {
     setLoading(true);
     setError('');
     try {
       if (sources.length === 1) {
-        const job = await createJob(sources[0], priority, categoryId, destinationDir, conflictPolicy);
+        const job = await createJob(sources[0], priority, categoryId, destinationDir, conflictPolicy, networkPolicy, seedingPolicy, trackers);
         setJobs((prev) => [job, ...prev]);
       } else {
         const resp = await createBatchJobs(
-          sources.map((s) => ({ source: s, priority, categoryId, destinationDir, conflictPolicy }))
+          sources.map((s) => ({ source: s, priority, categoryId, destinationDir, conflictPolicy, networkPolicy, seedingPolicy, trackers }))
         );
         const newJobs = resp.items.map((it) => it.job).filter((j): j is Job => !!j);
         setJobs((prev) => [...newJobs, ...prev]);
@@ -118,12 +121,15 @@ function App() {
     file: File,
     priority: JobPriority,
     categoryId?: string,
-    destinationDir?: string
+    destinationDir?: string,
+    networkPolicy?: JobNetworkPolicyOverride,
+    seedingPolicy?: SeedingPolicy,
+    trackers?: string[]
   ) => {
     setLoading(true);
     setError('');
     try {
-      const job = await uploadTorrent(file, priority, categoryId, destinationDir);
+      const job = await uploadTorrent(file, priority, categoryId, destinationDir, networkPolicy, seedingPolicy, trackers);
       setJobs((prev) => [job, ...prev]);
       fetchQueue();
     } catch (err: unknown) {
@@ -248,9 +254,9 @@ function App() {
     setTorrentJobId(id);
   }, []);
 
-  const handleStartTorrent = useCallback(async (jobId: string, files: TorrentFileSelection[], seedAfterComplete: boolean) => {
+  const handleStartTorrent = useCallback(async (jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy) => {
     try {
-      const updated = await startTorrent(jobId, files, seedAfterComplete);
+      const updated = await startTorrent(jobId, files, seedingPolicy);
       setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
       setTorrentJobId(null);
       fetchQueue();
@@ -401,4 +407,3 @@ function App() {
 }
 
 export default App;
-
