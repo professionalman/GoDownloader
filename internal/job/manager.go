@@ -960,6 +960,7 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			// Ownership lookup failed due to DB error. Fail closed without calling RemoveTorrent to prevent deleting an existing active torrent.
 			errText := fmt.Sprintf("failed to verify torrent ownership: %v", err)
 			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+			rec = cloneTorrentRecord(rec)
 			if rec == nil {
 				rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}}
 			}
@@ -982,6 +983,7 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			// DO NOT delete torrentFilePath! Preserve new job's .torrent file and TorrentJobRecord so Retry() remains possible after original job completes.
 			errTxt := fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
 			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+			rec = cloneTorrentRecord(rec)
 			if rec == nil {
 				rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}}
 			}
@@ -1061,6 +1063,7 @@ loop:
 	// Save torrent job record
 	if m.torrentRepo != nil {
 		rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+		rec = cloneTorrentRecord(rec)
 		if rec == nil {
 			rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: j.SeedingPolicy, CustomTrackers: j.CustomTrackers}
 		}
@@ -1226,6 +1229,7 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to get torrent job record: %v", err)}
 		}
 		if rec != nil {
+			rec = cloneTorrentRecord(rec)
 			rec.SeedAfterComplete = j.SeedAfterComplete
 			rec.SeedingPolicy = policy
 			if err := m.torrentRepo.UpdateTorrentJob(ctx, rec); err != nil {

@@ -91,6 +91,7 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: "torrent policy record is unavailable"}
 	}
+	rec = cloneTorrentRecord(rec)
 	rec.SeedingPolicy = policy
 	rec.SeedAfterComplete = policy.Mode != networkpolicy.SeedingModeNone
 	if err := m.torrentRepo.UpdateTorrentJob(ctx, rec); err != nil {
@@ -179,6 +180,7 @@ func (m *Manager) enterSeeding(ctx context.Context, j *Job, status *EngineStatus
 		j.SeedingStartedAt = &now
 		if m.torrentRepo != nil {
 			if rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID); err == nil && rec != nil {
+				rec = cloneTorrentRecord(rec)
 				rec.SeedingStartedAt = &now
 				_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
 			}
@@ -197,6 +199,15 @@ func (m *Manager) enterSeeding(ctx context.Context, j *Job, status *EngineStatus
 		j.TorrentInfo.Leechers = status.Leechers
 	}
 	return false
+}
+
+func cloneTorrentRecord(record *TorrentJobRecord) *TorrentJobRecord {
+	if record == nil {
+		return nil
+	}
+	copyRecord := *record
+	copyRecord.CustomTrackers = append([]string(nil), record.CustomTrackers...)
+	return &copyRecord
 }
 
 func unsupportedTorrentControl(name string) error {
