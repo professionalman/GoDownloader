@@ -66,6 +66,18 @@ func completedEventCount(bus *fakeEventBus) int {
 	return count
 }
 
+func seedingPolicyUpdateEventCount(bus *fakeEventBus) int {
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	count := 0
+	for _, event := range bus.events {
+		if event.Type == EventJobSeedingPolicyUpdated {
+			count++
+		}
+	}
+	return count
+}
+
 func TestUpdateSeedingPolicy_NoneDuringSeeding_StopFailurePreservesOldPolicy(t *testing.T) {
 	manager, repo, torrentRepo, bus, engine, j := setupSeedingPolicyJob(t, StatusSeeding)
 	removeCalls := 0
@@ -198,6 +210,239 @@ func TestUpdateSeedingPolicy_LiveRollbackFailureIsAmbiguous(t *testing.T) {
 	appErr, ok := err.(*AppError)
 	if !ok || appErr.Code != ErrSeedingPolicyStateAmbiguous {
 		t.Fatalf("expected dedicated ambiguous-state error, got %#v", err)
+	}
+}
+
+func TestUpdateSeedingPolicy_UsesDurableOldPolicyForRollback(t *testing.T) {
+	manager, repo, torrentRepo, bus, engine, j := setupSeedingPolicyJob(t, StatusSeeding)
+	ratio := 1.5
+	record, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	record = cloneTorrentRecord(record)
+	record.SeedingPolicy = networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratio}
+	record.SeedAfterComplete = true
+	if err := torrentRepo.UpdateTorrentJob(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := repo.GetByID(context.Background(), j.ID)
+	stale.SeedingPolicy = networkpolicy.SeedingPolicy{}
+	stale.SeedAfterComplete = false
+	if err := repo.Update(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	active := *j
+	active.SeedingPolicy = cloneSeedingPolicy(record.SeedingPolicy)
+	manager.addActive(&active)
+
+	torrentRepo.updateErr = errors.New("database unavailable")
+	duration := int64(7200)
+	_, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{
+		Mode: networkpolicy.SeedingModeDuration, TimeLimitSeconds: &duration,
+	})
+	if appErr, ok := err.(*AppError); !ok || appErr.Code != ErrInternalError {
+		t.Fatalf("expected persistence error, got %#v", err)
+	}
+	if len(engine.applied) != 2 ||
+		engine.applied[0].Mode != networkpolicy.SeedingModeDuration ||
+		engine.applied[0].TimeLimitSeconds == nil || *engine.applied[0].TimeLimitSeconds != 7200 ||
+		engine.applied[1].Mode != networkpolicy.SeedingModeRatio ||
+		engine.applied[1].RatioLimit == nil || *engine.applied[1].RatioLimit != 1.5 {
+		t.Fatalf("rollback did not use authoritative policy: %+v", engine.applied)
+	}
+	durable, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	activeAfter := manager.GetActiveJobs()[j.ID]
+	if durable.SeedingPolicy.Mode != networkpolicy.SeedingModeRatio || *durable.SeedingPolicy.RatioLimit != 1.5 {
+		t.Fatalf("durable policy changed: %+v", durable.SeedingPolicy)
+	}
+	if activeAfter.SeedingPolicy.Mode != networkpolicy.SeedingModeRatio || *activeAfter.SeedingPolicy.RatioLimit != 1.5 {
+		t.Fatalf("active policy changed: %+v", activeAfter.SeedingPolicy)
+	}
+	if seedingPolicyUpdateEventCount(bus) != 0 {
+		t.Fatal("failed persistence published a successful policy event")
+	}
+}
+
+func TestUpdateSeedingPolicy_SynchronizesActiveJob(t *testing.T) {
+	manager, _, torrentRepo, _, _, j := setupSeedingPolicyJob(t, StatusDownloading)
+	startedAt := time.Now().Add(-time.Hour)
+	record, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	record = cloneTorrentRecord(record)
+	record.SeedingStartedAt = &startedAt
+	record.SeedingStopReason = "previous"
+	if err := torrentRepo.UpdateTorrentJob(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	manager.addActive(j)
+
+	updated, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	active := manager.GetActiveJobs()[j.ID]
+	if durable.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || durable.SeedAfterComplete {
+		t.Fatalf("durable policy was not updated: %+v", durable)
+	}
+	if active.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || active.SeedAfterComplete {
+		t.Fatalf("active policy was not synchronized: %+v", active)
+	}
+	if updated.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || updated.SeedAfterComplete {
+		t.Fatalf("returned policy was not synchronized: %+v", updated)
+	}
+	if active.SeedingStartedAt == nil || updated.SeedingStartedAt == nil ||
+		!active.SeedingStartedAt.Equal(startedAt) || !updated.SeedingStartedAt.Equal(startedAt) ||
+		active.SeedingStopReason != "previous" || updated.SeedingStopReason != "previous" {
+		t.Fatalf("authoritative lifecycle fields were not preserved: active=%+v returned=%+v", active, updated)
+	}
+}
+
+func TestUpdatedPolicyControlsCompletionLifecycle(t *testing.T) {
+	manager, repo, torrentRepo, bus, engine, j := setupSeedingPolicyJob(t, StatusDownloading)
+	manager.addActive(j)
+	removeCalls := 0
+	engine.removeTorrentFunc = func(string, bool) error {
+		removeCalls++
+		return nil
+	}
+	if _, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}); err != nil {
+		t.Fatal(err)
+	}
+
+	active := manager.GetActiveJobs()[j.ID]
+	manager.UpdateJobFromEngine(context.Background(), active, &EngineStatus{
+		Status: StatusSeeding, Progress: 100,
+	}, true)
+
+	durableJob, _ := repo.GetByID(context.Background(), j.ID)
+	durableTorrent, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	if durableJob.Status != StatusCompleted || durableJob.EngineCleanupPending {
+		t.Fatalf("updated none policy entered seeding instead of durable completion: %+v", durableJob)
+	}
+	if durableTorrent.SeedingPolicy.Mode != networkpolicy.SeedingModeNone ||
+		durableTorrent.SeedingStopReason != "policy_none" || removeCalls != 1 {
+		t.Fatalf("unexpected torrent completion state: record=%+v removes=%d", durableTorrent, removeCalls)
+	}
+	if _, exists := manager.GetActiveJobs()[j.ID]; exists {
+		t.Fatal("completed torrent remained active")
+	}
+	if completedEventCount(bus) != 1 {
+		t.Fatalf("completed events=%d", completedEventCount(bus))
+	}
+}
+
+func TestUpdatedRatioPolicyUsedWhenDownloadCompletes(t *testing.T) {
+	manager, repo, torrentRepo, bus, engine, j := setupSeedingPolicyJob(t, StatusDownloading)
+	manager.addActive(j)
+	stopCalls := 0
+	removeCalls := 0
+	engine.stopDownloadFunc = func(string) error {
+		stopCalls++
+		return nil
+	}
+	engine.removeTorrentFunc = func(string, bool) error {
+		removeCalls++
+		return nil
+	}
+	ratio := 1.5
+	if _, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{
+		Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratio,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	active := manager.GetActiveJobs()[j.ID]
+	manager.UpdateJobFromEngine(context.Background(), active, &EngineStatus{
+		Status: StatusSeeding, Progress: 100, Ratio: 1.0, SeedingTimeSeconds: 60,
+	}, true)
+	seedingJob, _ := repo.GetByID(context.Background(), j.ID)
+	active = manager.GetActiveJobs()[j.ID]
+	if seedingJob.Status != StatusSeeding || active.Status != StatusSeeding ||
+		active.SeedingPolicy.Mode != networkpolicy.SeedingModeRatio ||
+		active.SeedingPolicy.RatioLimit == nil || *active.SeedingPolicy.RatioLimit != 1.5 {
+		t.Fatalf("updated ratio policy did not control seeding entry: durable=%+v active=%+v", seedingJob, active)
+	}
+
+	manager.UpdateJobFromEngine(context.Background(), active, &EngineStatus{
+		Status: StatusSeeding, Progress: 100, Ratio: 1.5, SeedingTimeSeconds: 120,
+	}, true)
+	completedJob, _ := repo.GetByID(context.Background(), j.ID)
+	completedTorrent, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	if completedJob.Status != StatusCompleted || completedJob.EngineCleanupPending ||
+		completedTorrent.SeedingStopReason != "ratio" || stopCalls != 1 || removeCalls != 1 {
+		t.Fatalf("ratio threshold did not use hardened completion: job=%+v torrent=%+v stop=%d remove=%d",
+			completedJob, completedTorrent, stopCalls, removeCalls)
+	}
+	if completedEventCount(bus) != 1 {
+		t.Fatalf("completed events=%d", completedEventCount(bus))
+	}
+}
+
+func TestFailedPolicyPersistenceDoesNotMutateActiveJob(t *testing.T) {
+	manager, _, torrentRepo, bus, engine, j := setupSeedingPolicyJob(t, StatusDownloading)
+	manager.addActive(j)
+	torrentRepo.updateErr = errors.New("database unavailable")
+	ratio := 2.0
+	_, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{
+		Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratio,
+	})
+	if appErr, ok := err.(*AppError); !ok || appErr.Code != ErrInternalError {
+		t.Fatalf("expected persistence error, got %#v", err)
+	}
+	active := manager.GetActiveJobs()[j.ID]
+	durable, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	if active.SeedingPolicy.Mode != networkpolicy.SeedingModeUnlimited || !active.SeedAfterComplete {
+		t.Fatalf("active policy changed before durable persistence: %+v", active)
+	}
+	if durable.SeedingPolicy.Mode != networkpolicy.SeedingModeUnlimited || !durable.SeedAfterComplete {
+		t.Fatalf("durable policy changed on failure: %+v", durable)
+	}
+	if len(engine.applied) != 2 || engine.applied[1].Mode != networkpolicy.SeedingModeUnlimited {
+		t.Fatalf("external policy was not rolled back: %+v", engine.applied)
+	}
+	if seedingPolicyUpdateEventCount(bus) != 0 {
+		t.Fatal("failed persistence published a successful policy event")
+	}
+}
+
+func TestPolicyPointerFieldsAreCopied(t *testing.T) {
+	manager, _, torrentRepo, bus, _, j := setupSeedingPolicyJob(t, StatusDownloading)
+	manager.addActive(j)
+	ratio := 1.5
+	source := networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratio}
+	updated, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := manager.GetActiveJobs()[j.ID]
+	durable, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	bus.mu.Lock()
+	event := bus.events[len(bus.events)-1]
+	bus.mu.Unlock()
+	eventData, ok := event.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event data has unexpected type: %T", event.Data)
+	}
+	eventPolicy, ok := eventData["seedingPolicy"].(networkpolicy.SeedingPolicy)
+	if !ok {
+		t.Fatalf("event policy has unexpected type: %T", eventData["seedingPolicy"])
+	}
+
+	ratio = 9
+	if *updated.SeedingPolicy.RatioLimit != 1.5 ||
+		*active.SeedingPolicy.RatioLimit != 1.5 ||
+		*durable.SeedingPolicy.RatioLimit != 1.5 ||
+		*event.Job.SeedingPolicy.RatioLimit != 1.5 ||
+		*eventPolicy.RatioLimit != 1.5 {
+		t.Fatalf("source pointer mutation leaked: returned=%v active=%v durable=%v event=%v eventData=%v",
+			*updated.SeedingPolicy.RatioLimit, *active.SeedingPolicy.RatioLimit,
+			*durable.SeedingPolicy.RatioLimit, *event.Job.SeedingPolicy.RatioLimit, *eventPolicy.RatioLimit)
+	}
+	if source.RatioLimit == updated.SeedingPolicy.RatioLimit ||
+		source.RatioLimit == active.SeedingPolicy.RatioLimit ||
+		source.RatioLimit == durable.SeedingPolicy.RatioLimit ||
+		updated.SeedingPolicy.RatioLimit == active.SeedingPolicy.RatioLimit ||
+		updated.SeedingPolicy.RatioLimit == durable.SeedingPolicy.RatioLimit ||
+		active.SeedingPolicy.RatioLimit == durable.SeedingPolicy.RatioLimit {
+		t.Fatal("policy pointer fields are aliased across source, API, active, or repository state")
 	}
 }
 

@@ -76,6 +76,7 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 	if err := networkpolicy.ValidateSeeding(policy); err != nil {
 		return nil, &AppError{Code: ErrInvalidSeedingPolicy, Message: err.Error()}
 	}
+	policy = cloneSeedingPolicy(policy)
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
 		return nil, err
@@ -88,6 +89,20 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 	default:
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot change seeding policy for a %s job", j.Status)}
 	}
+	if m.torrentRepo == nil {
+		return nil, &AppError{Code: ErrInternalError, Message: "torrent policy record is unavailable"}
+	}
+	rec, err := m.torrentRepo.GetTorrentJob(ctx, id)
+	if err != nil || rec == nil {
+		return nil, &AppError{Code: ErrInternalError, Message: "torrent policy record is unavailable"}
+	}
+	rec = cloneTorrentRecord(rec)
+	oldPolicy := cloneSeedingPolicy(rec.SeedingPolicy)
+	oldSeedAfterComplete := rec.SeedAfterComplete
+	synchronizeJobSeedingState(j, rec)
+	j.SeedingPolicy = cloneSeedingPolicy(oldPolicy)
+	j.SeedAfterComplete = oldSeedAfterComplete
+
 	if j.Status == StatusSeeding && policy.Mode == networkpolicy.SeedingModeNone {
 		stopped, stopErr := m.stopSeedingWithReason(ctx, j, "policy_none")
 		if stopErr != nil {
@@ -103,12 +118,9 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 			}
 			return nil, &AppError{Code: ErrInternalError, Message: "failed to finalize torrent"}
 		}
-		m.bus.Publish(Event{Type: EventJobSeedingPolicyUpdated, Job: *j, Data: map[string]any{
-			"jobId": id, "seedingPolicy": j.SeedingPolicy,
-		}})
+		m.publishSeedingPolicyUpdated(id, j)
 		return j, nil
 	}
-	oldPolicy := j.SeedingPolicy
 	engine, ok := m.engines.Get(j.Engine)
 	if !ok {
 		return nil, &AppError{Code: ErrEngineError, Message: "torrent engine not available"}
@@ -122,17 +134,7 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 			return nil, &AppError{Code: ErrSeedingPolicyApplicationFailed, Message: "failed to apply seeding policy"}
 		}
 	}
-	rec, err := m.torrentRepo.GetTorrentJob(ctx, id)
-	if err != nil || rec == nil {
-		if j.EngineID != "" {
-			if rollbackErr := controller.ApplySeedingPolicy(ctx, j, oldPolicy); rollbackErr != nil {
-				return nil, &AppError{Code: ErrSeedingPolicyStateAmbiguous, Message: "seeding record lookup and rollback both failed"}
-			}
-		}
-		return nil, &AppError{Code: ErrInternalError, Message: "torrent policy record is unavailable"}
-	}
-	rec = cloneTorrentRecord(rec)
-	rec.SeedingPolicy = policy
+	rec.SeedingPolicy = cloneSeedingPolicy(policy)
 	rec.SeedAfterComplete = policy.Mode != networkpolicy.SeedingModeNone
 	if err := m.torrentRepo.UpdateTorrentJob(ctx, rec); err != nil {
 		if j.EngineID != "" {
@@ -142,13 +144,18 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: "failed to persist seeding policy"}
 	}
-	j.SeedingPolicy = policy
-	j.SeedAfterComplete = rec.SeedAfterComplete
+	synchronizeJobSeedingState(j, rec)
 	j.UpdatedAt = time.Now()
-	m.bus.Publish(Event{Type: EventJobSeedingPolicyUpdated, Job: *j, Data: map[string]any{
-		"jobId": id, "seedingPolicy": policy,
-	}})
+	m.updateActiveJobSeedingState(id, rec)
+	m.publishSeedingPolicyUpdated(id, j)
 	return j, nil
+}
+
+func (m *Manager) publishSeedingPolicyUpdated(id string, j *Job) {
+	eventJob := cloneJobSeedingState(j)
+	m.bus.Publish(Event{Type: EventJobSeedingPolicyUpdated, Job: eventJob, Data: map[string]any{
+		"jobId": id, "seedingPolicy": cloneSeedingPolicy(eventJob.SeedingPolicy),
+	}})
 }
 
 func seedingThresholdReason(policy networkpolicy.SeedingPolicy, ratio float64, seconds int64) string {
@@ -227,8 +234,45 @@ func cloneTorrentRecord(record *TorrentJobRecord) *TorrentJobRecord {
 		return nil
 	}
 	copyRecord := *record
+	copyRecord.SeedingPolicy = cloneSeedingPolicy(record.SeedingPolicy)
+	copyRecord.SeedingStartedAt = cloneTimePointer(record.SeedingStartedAt)
 	copyRecord.CustomTrackers = append([]string(nil), record.CustomTrackers...)
 	return &copyRecord
+}
+
+func cloneSeedingPolicy(policy networkpolicy.SeedingPolicy) networkpolicy.SeedingPolicy {
+	copyPolicy := policy
+	if policy.RatioLimit != nil {
+		ratio := *policy.RatioLimit
+		copyPolicy.RatioLimit = &ratio
+	}
+	if policy.TimeLimitSeconds != nil {
+		duration := *policy.TimeLimitSeconds
+		copyPolicy.TimeLimitSeconds = &duration
+	}
+	return copyPolicy
+}
+
+func cloneTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
+func synchronizeJobSeedingState(j *Job, record *TorrentJobRecord) {
+	j.SeedingPolicy = cloneSeedingPolicy(record.SeedingPolicy)
+	j.SeedAfterComplete = record.SeedAfterComplete
+	j.SeedingStartedAt = cloneTimePointer(record.SeedingStartedAt)
+	j.SeedingStopReason = record.SeedingStopReason
+}
+
+func cloneJobSeedingState(j *Job) Job {
+	copyJob := *j
+	copyJob.SeedingPolicy = cloneSeedingPolicy(j.SeedingPolicy)
+	copyJob.SeedingStartedAt = cloneTimePointer(j.SeedingStartedAt)
+	return copyJob
 }
 
 func unsupportedTorrentControl(name string) error {

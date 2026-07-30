@@ -1752,10 +1752,7 @@ func (m *Manager) hydrateJob(ctx context.Context, j *Job) {
 	if j.Type == TypeTorrent && m.torrentRepo != nil {
 		rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
 		if err == nil && rec != nil {
-			j.SeedAfterComplete = rec.SeedAfterComplete
-			j.SeedingPolicy = rec.SeedingPolicy
-			j.SeedingStartedAt = rec.SeedingStartedAt
-			j.SeedingStopReason = rec.SeedingStopReason
+			synchronizeJobSeedingState(j, rec)
 			j.CustomTrackers = append([]string(nil), rec.CustomTrackers...)
 			if j.TorrentInfo == nil && (rec.Name != "" || rec.TotalSize > 0) {
 				j.TorrentInfo = &TorrentInfo{
@@ -1775,7 +1772,7 @@ func (m *Manager) GetActiveJobs() map[string]*Job {
 
 	snapshot := make(map[string]*Job, len(m.activeJobs))
 	for k, v := range m.activeJobs {
-		jobCopy := *v
+		jobCopy := cloneJobSeedingState(v)
 		snapshot[k] = &jobCopy
 	}
 	return snapshot
@@ -1808,6 +1805,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			}
 			if prevStatus != StatusSeeding {
 				_ = m.repo.Update(ctx, j)
+				m.addActive(j)
 				m.publish(EventJobUpdated, j)
 				if m.scheduler != nil {
 					m.scheduler.Kick()
@@ -2031,6 +2029,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 
 		if prevStatus != StatusSeeding {
 			m.repo.Update(ctx, j)
+			m.addActive(j)
 			m.publish(EventJobUpdated, j)
 			if m.scheduler != nil {
 				m.scheduler.Kick()
@@ -2494,6 +2493,14 @@ func (m *Manager) updateActiveJobFinalization(jobID, finalPath, name string) {
 	}
 }
 
+func (m *Manager) updateActiveJobSeedingState(jobID string, record *TorrentJobRecord) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if active := m.activeJobs[jobID]; active != nil {
+		synchronizeJobSeedingState(active, record)
+	}
+}
+
 func (m *Manager) removeCompletedTorrent(ctx context.Context, j *Job) error {
 	eng, ok := m.engines.Get(j.Engine)
 	if !ok {
@@ -2601,6 +2608,10 @@ func (m *Manager) stopSeedingWithReason(ctx context.Context, j *Job, stopReason 
 	if current.Status != StatusSeeding {
 		return false, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot stop seeding a %s job", current.Status)}
 	}
+	current.SeedingPolicy = cloneSeedingPolicy(j.SeedingPolicy)
+	current.SeedAfterComplete = j.SeedAfterComplete
+	current.SeedingStartedAt = cloneTimePointer(j.SeedingStartedAt)
+	current.SeedingStopReason = j.SeedingStopReason
 	eng, ok := m.engines.Get(current.Engine)
 	if !ok {
 		return false, fmt.Errorf("engine not available")

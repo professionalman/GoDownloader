@@ -338,7 +338,7 @@ func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *Torre
 	if f.createErr != nil {
 		return f.createErr
 	}
-	f.torrentJobs[rec.JobID] = rec
+	f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
 	return nil
 }
 
@@ -361,7 +361,7 @@ func (f *fakeTorrentRepository) UpdateTorrentJob(ctx context.Context, rec *Torre
 	if f.updateErr != nil {
 		return f.updateErr
 	}
-	f.torrentJobs[rec.JobID] = rec
+	f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
 	return nil
 }
 
@@ -416,7 +416,8 @@ func (f *fakeTorrentRepository) FinalizeTorrent(ctx context.Context, j *Job, sto
 	defer f.mu.Unlock()
 	if rec := f.torrentJobs[j.ID]; rec != nil {
 		rec.SeedAfterComplete = j.SeedAfterComplete
-		rec.SeedingPolicy = j.SeedingPolicy
+		rec.SeedingPolicy = cloneSeedingPolicy(j.SeedingPolicy)
+		rec.SeedingStartedAt = cloneTimePointer(j.SeedingStartedAt)
 		rec.SeedingStopReason = stopReason
 		rec.SeedingReconcilePending = false
 	}
