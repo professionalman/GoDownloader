@@ -40,6 +40,11 @@ type DispatchReservation struct {
 	TargetError  string
 }
 
+const (
+	defaultReconciliationRetryDelay = 1 * time.Second
+	maxReconciliationRetryDelay     = 30 * time.Second
+)
+
 // Scheduler manages queued download execution policy and capacity constraints.
 type Scheduler struct {
 	repo               IJobRepository
@@ -51,8 +56,12 @@ type Scheduler struct {
 	addActiveFn        AddActiveFunc
 	prepareActiveJobFn PrepareActiveJobFunc
 
-	mu       sync.Mutex
-	inFlight map[string]*DispatchReservation
+	mu                         sync.Mutex
+	inFlight                   map[string]*DispatchReservation
+	reconciliationRetryInitial time.Duration
+	reconciliationRetryMax     time.Duration
+	reconciliationRetryCurrent time.Duration
+	reconciliationRetryTimer   *time.Timer
 
 	kickCh chan struct{}
 	ctx    context.Context
@@ -68,12 +77,15 @@ func NewScheduler(
 	dispatchFn SchedulerDispatchFunc,
 ) *Scheduler {
 	return &Scheduler{
-		repo:       repo,
-		queueRepo:  queueRepo,
-		getLimit:   getLimit,
-		dispatchFn: dispatchFn,
-		inFlight:   make(map[string]*DispatchReservation),
-		kickCh:     make(chan struct{}, 1),
+		repo:                       repo,
+		queueRepo:                  queueRepo,
+		getLimit:                   getLimit,
+		dispatchFn:                 dispatchFn,
+		inFlight:                   make(map[string]*DispatchReservation),
+		kickCh:                     make(chan struct{}, 1),
+		reconciliationRetryInitial: defaultReconciliationRetryDelay,
+		reconciliationRetryMax:     maxReconciliationRetryDelay,
+		reconciliationRetryCurrent: defaultReconciliationRetryDelay,
 	}
 }
 
@@ -97,6 +109,87 @@ func (s *Scheduler) SetPrepareActiveJobFunc(fn PrepareActiveJobFunc) {
 	s.prepareActiveJobFn = fn
 }
 
+// SetReconciliationRetryDelay configures initial and max delay for automatic reconciliation retries.
+func (s *Scheduler) SetReconciliationRetryDelay(initial, max time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if initial > 0 {
+		s.reconciliationRetryInitial = initial
+		s.reconciliationRetryCurrent = initial
+	}
+	if max > 0 {
+		s.reconciliationRetryMax = max
+	}
+}
+
+func (s *Scheduler) scheduleReconciliationRetry() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx == nil || s.ctx.Err() != nil {
+		return
+	}
+
+	var hasDirty bool
+	for _, res := range s.inFlight {
+		if res.Dirty {
+			hasDirty = true
+			break
+		}
+	}
+	if !hasDirty {
+		return
+	}
+
+	if s.reconciliationRetryTimer != nil {
+		return
+	}
+
+	delay := s.reconciliationRetryCurrent
+	if delay <= 0 {
+		delay = defaultReconciliationRetryDelay
+	}
+
+	log.Printf("scheduler: reconciliation remains pending; retrying in %v", delay)
+
+	s.reconciliationRetryTimer = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		s.reconciliationRetryTimer = nil
+		stopped := s.ctx != nil && s.ctx.Err() != nil
+		s.mu.Unlock()
+
+		if !stopped {
+			log.Printf("scheduler: reconciliation retry triggered")
+			s.Kick()
+		}
+	})
+
+	maxDelay := s.reconciliationRetryMax
+	if maxDelay <= 0 {
+		maxDelay = maxReconciliationRetryDelay
+	}
+	nextDelay := s.reconciliationRetryCurrent * 2
+	if nextDelay > maxDelay {
+		nextDelay = maxDelay
+	}
+	s.reconciliationRetryCurrent = nextDelay
+}
+
+func (s *Scheduler) resetReconciliationRetry() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.reconciliationRetryTimer != nil {
+		s.reconciliationRetryTimer.Stop()
+		s.reconciliationRetryTimer = nil
+	}
+	if s.reconciliationRetryInitial > 0 {
+		s.reconciliationRetryCurrent = s.reconciliationRetryInitial
+	} else {
+		s.reconciliationRetryCurrent = defaultReconciliationRetryDelay
+	}
+}
+
 // Start launches the single scheduler background loop.
 func (s *Scheduler) Start(parentCtx context.Context) {
 	s.ctx, s.cancel = context.WithCancel(parentCtx)
@@ -109,6 +202,12 @@ func (s *Scheduler) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.mu.Lock()
+	if s.reconciliationRetryTimer != nil {
+		s.reconciliationRetryTimer.Stop()
+		s.reconciliationRetryTimer = nil
+	}
+	s.mu.Unlock()
 	s.wg.Wait()
 }
 
@@ -233,15 +332,17 @@ func (s *Scheduler) inFlightCount() int {
 
 func (s *Scheduler) schedule() {
 	for {
-		if s.ctx.Err() != nil {
+		if s.ctx != nil && s.ctx.Err() != nil {
 			return
 		}
 
 		if s.hasUnresolvedReconciliations() {
 			s.reconcileAll(s.ctx)
 			if s.hasUnresolvedReconciliations() {
+				s.scheduleReconciliationRetry()
 				return
 			}
+			s.resetReconciliationRetry()
 		}
 
 		max := s.getLimit(s.ctx)
@@ -274,6 +375,9 @@ func (s *Scheduler) schedule() {
 		if err := s.dispatchSingle(next); err != nil {
 			if errors.Is(err, ErrDispatchPersistenceFailed) {
 				log.Printf("scheduler: stopping fill loop due to persistence failure for job %s", next.JobID)
+				if s.hasUnresolvedReconciliations() {
+					s.scheduleReconciliationRetry()
+				}
 				return
 			}
 		}

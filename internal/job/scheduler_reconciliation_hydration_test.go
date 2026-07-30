@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,9 +63,7 @@ func setupReconciliationTestEnv(t *testing.T, initialStatus JobStatus, policy ne
 		SeedingPolicy:     policy,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
-	}
-	if initialStatus == StatusPaused {
-		j.EngineID = "rec1111222233334444555566667777"
+		EngineID:          "rec1111222233334444555566667777",
 	}
 	_ = jobRepo.Create(context.Background(), j)
 
@@ -377,5 +376,336 @@ func TestSchedulerReconciliation_NonTorrentActivationUnaffected(t *testing.T) {
 	active := mgr.GetActiveJobs()
 	if _, ok := active[j.ID]; !ok {
 		t.Error("expected non-torrent job in activeJobs")
+	}
+}
+
+// --- AUTOMATIC BACKGROUND RETRY TESTS ---
+
+// Test 1: Automatic Background Retry After Hydration Failure Recovery
+func TestSchedulerReconciliation_AutomaticallyRetriesHydrationFailure(t *testing.T) {
+	ratioVal := 1.5
+	policy := networkpolicy.SeedingPolicy{
+		Mode:       networkpolicy.SeedingModeRatio,
+		RatioLimit: &ratioVal,
+	}
+	mgr, sched, failRepo, _, _, j := setupReconciliationTestEnv(t, StatusQueued, policy)
+
+	// Wrap prepareActiveJobFn to fail ONCE during initial reconciliation
+	var prepFailures int32 = 1
+	sched.SetPrepareActiveJobFunc(func(ctx context.Context, job *Job) error {
+		if atomic.CompareAndSwapInt32(&prepFailures, 1, 0) {
+			return errors.New("simulated temporary hydration failure")
+		}
+		return mgr.prepareJobForActivation(ctx, job)
+	})
+
+	// Cause generic jobs Update to fail on dispatch persistence write
+	failRepo.failUpdateCount = 1
+
+	// Enqueue start action in queue repository
+	_ = mgr.queueRepo.Enqueue(context.Background(), &QueueEntry{
+		JobID:      j.ID,
+		Action:     QueueActionStart,
+		Position:   1,
+		EnqueuedAt: time.Now(),
+		UpdatedAt:  time.Now(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched.SetReconciliationRetryDelay(20*time.Millisecond, 50*time.Millisecond)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	// Trigger initial dispatch
+	sched.Kick()
+
+	// Wait for automatic background retry timer to trigger and succeed
+	deadline := time.Now().Add(2 * time.Second)
+	var activeJob *Job
+	for time.Now().Before(deadline) {
+		if !sched.hasUnresolvedReconciliations() {
+			active := mgr.GetActiveJobs()
+			if act, ok := active[j.ID]; ok {
+				activeJob = act
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if activeJob == nil {
+		t.Fatalf("expected job %s to be activated automatically by background retry", j.ID)
+	}
+	if activeJob.SeedingPolicy.RatioLimit == nil || *activeJob.SeedingPolicy.RatioLimit != 1.5 {
+		t.Errorf("expected ratio policy 1.5 on automatically reconciled job, got %+v", activeJob.SeedingPolicy)
+	}
+}
+
+// Test 2: Automatic Retry Preserves Policy None
+func TestSchedulerReconciliation_AutomaticRetryPreservesNonePolicy(t *testing.T) {
+	policy := networkpolicy.SeedingPolicy{
+		Mode: networkpolicy.SeedingModeNone,
+	}
+	mgr, sched, failRepo, _, fakeEng, j := setupReconciliationTestEnv(t, StatusQueued, policy)
+
+	var prepFailures int32 = 1
+	sched.SetPrepareActiveJobFunc(func(ctx context.Context, job *Job) error {
+		if atomic.CompareAndSwapInt32(&prepFailures, 1, 0) {
+			return errors.New("simulated temporary hydration failure")
+		}
+		return mgr.prepareJobForActivation(ctx, job)
+	})
+
+	failRepo.failUpdateCount = 1
+
+	_ = mgr.queueRepo.Enqueue(context.Background(), &QueueEntry{
+		JobID:      j.ID,
+		Action:     QueueActionStart,
+		Position:   1,
+		EnqueuedAt: time.Now(),
+		UpdatedAt:  time.Now(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched.SetReconciliationRetryDelay(20*time.Millisecond, 50*time.Millisecond)
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Kick()
+
+	// Wait for automatic retry
+	deadline := time.Now().Add(2 * time.Second)
+	var activeJob *Job
+	for time.Now().Before(deadline) {
+		active := mgr.GetActiveJobs()
+		if act, ok := active[j.ID]; ok {
+			activeJob = act
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if activeJob == nil {
+		t.Fatalf("expected job %s to be activated automatically", j.ID)
+	}
+	if activeJob.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || activeJob.SeedAfterComplete {
+		t.Errorf("expected policy none and SeedAfterComplete=false, got %+v (SeedAfterComplete=%v)", activeJob.SeedingPolicy, activeJob.SeedAfterComplete)
+	}
+
+	// Simulate engine completion
+	fakeEng.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:         StatusCompleted,
+			Progress:       100.0,
+			TotalBytes:     1000,
+			CompletedBytes: 1000,
+		}, nil
+	}
+
+	mgr.UpdateJobFromEngine(ctx, activeJob, &EngineStatus{
+		Status:         StatusCompleted,
+		Progress:       100.0,
+		TotalBytes:     1000,
+		CompletedBytes: 1000,
+	}, true)
+
+	updated, _ := failRepo.GetByID(ctx, j.ID)
+	if updated.Status != StatusCompleted {
+		t.Errorf("expected job to complete without entering SEEDING, got %s", updated.Status)
+	}
+}
+
+// Test 3: Repeated Failure / Bounded Attempt / No Busy Loop
+func TestSchedulerReconciliation_RetryIsDelayedAndSingleFlight(t *testing.T) {
+	jobRepo := newFakeJobRepository()
+	failRepo := &failingUpdateJobRepository{IJobRepository: jobRepo}
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	bus := newFakeEventBus()
+	reg := &fakeEngineRegistry{engines: make(map[string]IEngine)}
+
+	downloadDir := t.TempDir()
+	dataDir := t.TempDir()
+
+	mgr := NewManager(failRepo, reg, bus, downloadDir, nil, dataDir)
+	mgr.queueRepo = queueRepo
+
+	sched := NewScheduler(
+		failRepo,
+		queueRepo,
+		func(ctx context.Context) int { return 5 },
+		mgr.dispatchQueuedJob,
+	)
+	sched.SetEngineRegistry(reg)
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *Job) (*EngineStatus, error) {
+			return &EngineStatus{Status: StatusDownloading}, nil
+		},
+	}
+	reg.engines["qbittorrent"] = fakeEng
+
+	var attemptCount int32
+	sched.SetPrepareActiveJobFunc(func(ctx context.Context, j *Job) error {
+		atomic.AddInt32(&attemptCount, 1)
+		return errors.New("persistent hydration error")
+	})
+
+	j := &Job{
+		ID:             "loop-test-job",
+		Source:         "magnet:?xt=urn:btih:loop1111222233334444555566667777",
+		Name:           "loop-torrent",
+		Status:         StatusQueued,
+		Type:           TypeTorrent,
+		Engine:         "qbittorrent",
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	_ = jobRepo.Create(context.Background(), j)
+
+	sched.markReservationDirtyExternal(j.ID, QueueActionStart, "hash")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched.SetReconciliationRetryDelay(30*time.Millisecond, 80*time.Millisecond)
+	sched.Start(ctx)
+
+	sched.Kick()
+
+	// Let the scheduler run for 150ms
+	time.Sleep(150 * time.Millisecond)
+
+	sched.Stop()
+
+	attempts := atomic.LoadInt32(&attemptCount)
+	if attempts <= 1 {
+		t.Errorf("expected background retry to attempt reconciliation more than once, got %d", attempts)
+	}
+	if attempts > 8 {
+		t.Errorf("expected attempt count to remain bounded (no tight CPU spin loop), got %d attempts in 150ms", attempts)
+	}
+	if !sched.hasUnresolvedReconciliations() {
+		t.Error("expected reservation to remain unresolved while hydration fails")
+	}
+}
+
+// Test 4: Stop Cancels Pending Retry
+func TestSchedulerReconciliation_StopCancelsPendingRetry(t *testing.T) {
+	jobRepo := newFakeJobRepository()
+	failRepo := &failingUpdateJobRepository{IJobRepository: jobRepo}
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	bus := newFakeEventBus()
+	reg := &fakeEngineRegistry{engines: make(map[string]IEngine)}
+
+	downloadDir := t.TempDir()
+	dataDir := t.TempDir()
+
+	mgr := NewManager(failRepo, reg, bus, downloadDir, nil, dataDir)
+	mgr.queueRepo = queueRepo
+
+	sched := NewScheduler(
+		failRepo,
+		queueRepo,
+		func(ctx context.Context) int { return 5 },
+		mgr.dispatchQueuedJob,
+	)
+	sched.SetEngineRegistry(reg)
+
+	fakeEng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *Job) (*EngineStatus, error) {
+			return &EngineStatus{Status: StatusDownloading}, nil
+		},
+	}
+	reg.engines["qbittorrent"] = fakeEng
+
+	var attemptCount int32
+	sched.SetPrepareActiveJobFunc(func(ctx context.Context, j *Job) error {
+		atomic.AddInt32(&attemptCount, 1)
+		return errors.New("hydration error")
+	})
+
+	j := &Job{
+		ID:             "stop-test-job",
+		Source:         "magnet:?xt=urn:btih:stop1111222233334444555566667777",
+		Name:           "stop-torrent",
+		Status:         StatusQueued,
+		Type:           TypeTorrent,
+		Engine:         "qbittorrent",
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	_ = jobRepo.Create(context.Background(), j)
+
+	sched.markReservationDirtyExternal(j.ID, QueueActionStart, "hash")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched.SetReconciliationRetryDelay(100*time.Millisecond, 200*time.Millisecond)
+	sched.Start(ctx)
+
+	sched.Kick()
+
+	// Wait 15ms so initial attempt runs and delayed retry timer is scheduled
+	time.Sleep(15 * time.Millisecond)
+
+	// Stop scheduler (cancelling timer and loop)
+	sched.Stop()
+
+	countAtStop := atomic.LoadInt32(&attemptCount)
+
+	// Wait past the 100ms timer delay
+	time.Sleep(200 * time.Millisecond)
+
+	countAfterWait := atomic.LoadInt32(&attemptCount)
+	if countAfterWait != countAtStop {
+		t.Errorf("expected no additional attempts after Stop(), attempt count increased from %d to %d", countAtStop, countAfterWait)
+	}
+}
+
+// Test 5: Backoff Resets After Success
+func TestSchedulerReconciliation_BackoffResetsAfterSuccess(t *testing.T) {
+	jobRepo := newFakeJobRepository()
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	sched := NewScheduler(
+		jobRepo,
+		queueRepo,
+		func(ctx context.Context) int { return 5 },
+		nil,
+	)
+
+	sched.SetReconciliationRetryDelay(10*time.Millisecond, 100*time.Millisecond)
+
+	if sched.reconciliationRetryCurrent != 10*time.Millisecond {
+		t.Errorf("expected initial retry delay 10ms, got %v", sched.reconciliationRetryCurrent)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.ctx = ctx
+
+	sched.markReservationDirtyExternal("job-1", QueueActionStart, "hash")
+	sched.scheduleReconciliationRetry()
+
+	if sched.reconciliationRetryCurrent != 20*time.Millisecond {
+		t.Errorf("expected delay to double to 20ms, got %v", sched.reconciliationRetryCurrent)
+	}
+
+	sched.reconciliationRetryTimer = nil
+	sched.scheduleReconciliationRetry()
+	if sched.reconciliationRetryCurrent != 40*time.Millisecond {
+		t.Errorf("expected delay to double to 40ms, got %v", sched.reconciliationRetryCurrent)
+	}
+
+	sched.resetReconciliationRetry()
+
+	if sched.reconciliationRetryCurrent != 10*time.Millisecond {
+		t.Errorf("expected delay to reset to 10ms, got %v", sched.reconciliationRetryCurrent)
 	}
 }
