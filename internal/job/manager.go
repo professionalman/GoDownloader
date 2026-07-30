@@ -1740,6 +1740,30 @@ func (m *Manager) List(ctx context.Context) ([]Job, error) {
 	return jobs, nil
 }
 
+func (m *Manager) hydrateTorrentState(ctx context.Context, j *Job) error {
+	if j == nil || j.Type != TypeTorrent || m.torrentRepo == nil {
+		return nil
+	}
+	rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch torrent record for job %s: %w", j.ID, err)
+	}
+	if rec == nil {
+		return fmt.Errorf("required torrent record missing for job %s", j.ID)
+	}
+	clonedRec := cloneTorrentRecord(rec)
+	synchronizeJobSeedingState(j, clonedRec)
+	j.CustomTrackers = append([]string(nil), clonedRec.CustomTrackers...)
+	if j.TorrentInfo == nil && (clonedRec.Name != "" || clonedRec.TotalSize > 0) {
+		j.TorrentInfo = &TorrentInfo{
+			Name:      clonedRec.Name,
+			InfoHash:  clonedRec.InfoHash,
+			TotalSize: clonedRec.TotalSize,
+		}
+	}
+	return nil
+}
+
 func (m *Manager) hydrateJob(ctx context.Context, j *Job) {
 	if j == nil {
 		return
@@ -1749,20 +1773,7 @@ func (m *Manager) hydrateJob(ctx context.Context, j *Job) {
 		j.DestinationDir = effDir
 		_ = m.repo.Update(ctx, j)
 	}
-	if j.Type == TypeTorrent && m.torrentRepo != nil {
-		rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
-		if err == nil && rec != nil {
-			synchronizeJobSeedingState(j, rec)
-			j.CustomTrackers = append([]string(nil), rec.CustomTrackers...)
-			if j.TorrentInfo == nil && (rec.Name != "" || rec.TotalSize > 0) {
-				j.TorrentInfo = &TorrentInfo{
-					Name:      rec.Name,
-					InfoHash:  rec.InfoHash,
-					TotalSize: rec.TotalSize,
-				}
-			}
-		}
-	}
+	_ = m.hydrateTorrentState(ctx, j)
 }
 
 // GetActiveJobs returns a snapshot of all active jobs.
@@ -2343,6 +2354,11 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 			m.queueRepo.Delete(ctx, qj.JobID)
 		}
 		return fmt.Errorf("job %s not found: %v", qj.JobID, err)
+	}
+
+	if err := m.hydrateTorrentState(ctx, j); err != nil {
+		log.Printf("dispatchQueuedJob: failed to hydrate torrent state for job %s: %v", j.ID, err)
+		return err
 	}
 
 	eng, ok := m.engines.Get(j.Engine)

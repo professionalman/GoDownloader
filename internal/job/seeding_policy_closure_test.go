@@ -449,3 +449,251 @@ func TestPolicyPointerFieldsAreCopied(t *testing.T) {
 func floatPointer(value float64) *float64 {
 	return &value
 }
+
+func TestQueuedTorrentPolicyUpdateIsHydratedBeforeDispatch(t *testing.T) {
+	manager, repo, torrentRepo, _, _, j := setupSeedingPolicyJob(t, StatusQueued)
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	manager.SetQueueRepository(queueRepo)
+	_ = queueRepo.Enqueue(context.Background(), &QueueEntry{JobID: j.ID, Action: QueueActionStart, Position: 1})
+
+	// Update seeding policy to none while QUEUED
+	_, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone})
+	if err != nil {
+		t.Fatalf("UpdateSeedingPolicy failed: %v", err)
+	}
+
+	// Verify durable torrent record is updated
+	durableRec, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	if durableRec.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || durableRec.SeedAfterComplete {
+		t.Fatalf("expected durable policy mode none, got %+v", durableRec)
+	}
+
+	// Dispatch queued job
+	qj := &QueuedJob{JobID: j.ID, Action: QueueActionStart}
+	if err := manager.DispatchQueuedJob(context.Background(), qj); err != nil {
+		t.Fatalf("DispatchQueuedJob failed: %v", err)
+	}
+
+	// Verify activeJobs copy is hydrated with policy=none
+	activeJobs := manager.GetActiveJobs()
+	activeJ, ok := activeJobs[j.ID]
+	if !ok {
+		t.Fatalf("expected job %s to be in activeJobs", j.ID)
+	}
+	if activeJ.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || activeJ.SeedAfterComplete {
+		t.Fatalf("expected activeJob to have policy mode none, got %+v", activeJ)
+	}
+
+	// Simulate engine completion
+	status := &EngineStatus{Status: StatusCompleted, Progress: 100}
+	manager.UpdateJobFromEngine(context.Background(), activeJ, status, true)
+
+	// Verify job reaches COMPLETED without entering SEEDING
+	finalJ, _ := repo.GetByID(context.Background(), j.ID)
+	if finalJ.Status != StatusCompleted {
+		t.Fatalf("expected job to reach StatusCompleted, got %s", finalJ.Status)
+	}
+}
+
+func TestQueuedTorrentRatioPolicyControlsPostDispatchCompletion(t *testing.T) {
+	manager, repo, _, _, engine, j := setupSeedingPolicyJob(t, StatusQueued)
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	manager.SetQueueRepository(queueRepo)
+	_ = queueRepo.Enqueue(context.Background(), &QueueEntry{JobID: j.ID, Action: QueueActionStart, Position: 1})
+
+	ratioLimit := 1.5
+	_, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratioLimit})
+	if err != nil {
+		t.Fatalf("UpdateSeedingPolicy failed: %v", err)
+	}
+
+	// Dispatch
+	if err := manager.DispatchQueuedJob(context.Background(), &QueuedJob{JobID: j.ID, Action: QueueActionStart}); err != nil {
+		t.Fatalf("DispatchQueuedJob failed: %v", err)
+	}
+
+	activeJ := manager.GetActiveJobs()[j.ID]
+	if activeJ.SeedingPolicy.Mode != networkpolicy.SeedingModeRatio || activeJ.SeedingPolicy.RatioLimit == nil || *activeJ.SeedingPolicy.RatioLimit != 1.5 {
+		t.Fatalf("expected activeJob to have ratio policy 1.5, got %+v", activeJ)
+	}
+
+	// Engine completes with ratio < 1.5
+	engine.statusFunc = func(ctx context.Context, job *Job) (*EngineStatus, error) {
+		return &EngineStatus{Status: StatusSeeding, Progress: 100, Ratio: 0.5}, nil
+	}
+	manager.UpdateJobFromEngine(context.Background(), activeJ, &EngineStatus{Status: StatusCompleted, Progress: 100, Ratio: 0.5}, true)
+
+	seedingJ, _ := repo.GetByID(context.Background(), j.ID)
+	if seedingJ.Status != StatusSeeding {
+		t.Fatalf("expected job to enter StatusSeeding when ratio < 1.5, got %s", seedingJ.Status)
+	}
+
+	// Engine ratio reaches 1.5 -> threshold reached -> stopSeeding -> COMPLETED
+	engine.statusFunc = func(ctx context.Context, job *Job) (*EngineStatus, error) {
+		return &EngineStatus{Status: StatusSeeding, Progress: 100, Ratio: 1.5}, nil
+	}
+	manager.UpdateJobFromEngine(context.Background(), activeJ, &EngineStatus{Status: StatusSeeding, Progress: 100, Ratio: 1.5}, true)
+
+	completedJ, _ := repo.GetByID(context.Background(), j.ID)
+	if completedJ.Status != StatusCompleted {
+		t.Fatalf("expected job to reach StatusCompleted when ratio reached 1.5, got %s", completedJ.Status)
+	}
+}
+
+func TestPausedTorrentPolicyUpdateIsHydratedOnResumeDispatch(t *testing.T) {
+	manager, repo, _, _, _, j := setupSeedingPolicyJob(t, StatusPaused)
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	manager.SetQueueRepository(queueRepo)
+
+	// Update policy while PAUSED
+	_, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone})
+	if err != nil {
+		t.Fatalf("UpdateSeedingPolicy failed: %v", err)
+	}
+
+	// Dispatch queued resume
+	if err := manager.DispatchQueuedJob(context.Background(), &QueuedJob{JobID: j.ID, Action: QueueActionResume}); err != nil {
+		t.Fatalf("DispatchQueuedJob failed: %v", err)
+	}
+
+	activeJ := manager.GetActiveJobs()[j.ID]
+	if activeJ == nil || activeJ.SeedingPolicy.Mode != networkpolicy.SeedingModeNone {
+		t.Fatalf("expected activeJob to be hydrated with policy=none on resume, got %+v", activeJ)
+	}
+
+	// Simulate engine completion
+	manager.UpdateJobFromEngine(context.Background(), activeJ, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+	finalJ, _ := repo.GetByID(context.Background(), j.ID)
+	if finalJ.Status != StatusCompleted {
+		t.Fatalf("expected job to reach StatusCompleted without seeding, got %s", finalJ.Status)
+	}
+}
+
+func TestPausedTorrentRatioPolicySurvivesResume(t *testing.T) {
+	manager, repo, _, _, engine, j := setupSeedingPolicyJob(t, StatusPaused)
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	manager.SetQueueRepository(queueRepo)
+
+	ratioLimit := 2.0
+	_, err := manager.UpdateSeedingPolicy(context.Background(), j.ID, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratioLimit})
+	if err != nil {
+		t.Fatalf("UpdateSeedingPolicy failed: %v", err)
+	}
+
+	if err := manager.DispatchQueuedJob(context.Background(), &QueuedJob{JobID: j.ID, Action: QueueActionResume}); err != nil {
+		t.Fatalf("DispatchQueuedJob failed: %v", err)
+	}
+
+	activeJ := manager.GetActiveJobs()[j.ID]
+	if activeJ.SeedingPolicy.Mode != networkpolicy.SeedingModeRatio || activeJ.SeedingPolicy.RatioLimit == nil || *activeJ.SeedingPolicy.RatioLimit != 2.0 {
+		t.Fatalf("expected activeJob to have ratio policy 2.0, got %+v", activeJ)
+	}
+
+	// Engine completes with ratio 2.0 -> reaches COMPLETED directly
+	engine.statusFunc = func(ctx context.Context, job *Job) (*EngineStatus, error) {
+		return &EngineStatus{Status: StatusSeeding, Progress: 100, Ratio: 2.0}, nil
+	}
+	manager.UpdateJobFromEngine(context.Background(), activeJ, &EngineStatus{Status: StatusCompleted, Progress: 100, Ratio: 2.0}, true)
+
+	finalJ, _ := repo.GetByID(context.Background(), j.ID)
+	if finalJ.Status != StatusCompleted {
+		t.Fatalf("expected job to reach StatusCompleted when ratio reached 2.0, got %s", finalJ.Status)
+	}
+}
+
+func TestTorrentDispatch_FailsClosedOnHydrationFailure(t *testing.T) {
+	manager, repo, torrentRepo, _, engine, j := setupSeedingPolicyJob(t, StatusQueued)
+	queueRepo := &fakeQueueRepo{entries: make(map[string]*QueueEntry)}
+	manager.SetQueueRepository(queueRepo)
+	_ = queueRepo.Enqueue(context.Background(), &QueueEntry{JobID: j.ID, Action: QueueActionStart, Position: 1})
+
+	// Delete the torrent_jobs record so hydration fails
+	_ = torrentRepo.DeleteTorrentJob(context.Background(), j.ID)
+
+	startCalled := false
+	engine.startDownloadFunc = func(string) error {
+		startCalled = true
+		return nil
+	}
+
+	err := manager.DispatchQueuedJob(context.Background(), &QueuedJob{JobID: j.ID, Action: QueueActionStart})
+	if err == nil {
+		t.Fatalf("expected DispatchQueuedJob to fail when torrent record is missing")
+	}
+
+	if startCalled {
+		t.Fatalf("expected StartDownload to NOT be called on engine when hydration fails")
+	}
+
+	if activeJ := manager.GetActiveJobs()[j.ID]; activeJ != nil {
+		t.Fatalf("expected job to NOT be inserted into activeJobs when hydration fails")
+	}
+
+	// Verify job status remains QUEUED in repository
+	inDB, _ := repo.GetByID(context.Background(), j.ID)
+	if inDB.Status != StatusQueued {
+		t.Fatalf("expected job status to remain StatusQueued, got %s", inDB.Status)
+	}
+}
+
+func TestRecovery_HydratesTorrentPolicyFromTorrentRepo(t *testing.T) {
+	manager, repo, torrentRepo, _, engine, j := setupSeedingPolicyJob(t, StatusDownloading)
+
+	// Set generic jobs row to stale policy none
+	j.SeedingPolicy = networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
+	j.SeedAfterComplete = false
+	_ = repo.Update(context.Background(), j)
+
+	// Set torrent_jobs row to ratio 1.5
+	ratioLimit := 1.5
+	rec, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	rec.SeedingPolicy = networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratioLimit}
+	rec.SeedAfterComplete = true
+	_ = torrentRepo.UpdateTorrentJob(context.Background(), rec)
+
+	engine.statusFunc = func(ctx context.Context, job *Job) (*EngineStatus, error) {
+		return &EngineStatus{Status: StatusDownloading, Progress: 50}, nil
+	}
+
+	// Perform recovery
+	manager.recover(context.Background())
+
+	// Verify active runtime job has ratio 1.5
+	activeJ := manager.GetActiveJobs()[j.ID]
+	if activeJ == nil {
+		t.Fatalf("expected job %s to be active after recovery", j.ID)
+	}
+	if activeJ.SeedingPolicy.Mode != networkpolicy.SeedingModeRatio || activeJ.SeedingPolicy.RatioLimit == nil || *activeJ.SeedingPolicy.RatioLimit != 1.5 || !activeJ.SeedAfterComplete {
+		t.Fatalf("expected recovered activeJob to be hydrated with ratio policy 1.5, got %+v", activeJ)
+	}
+}
+
+func TestHydrateTorrentState_PointerIndependence(t *testing.T) {
+	manager, _, torrentRepo, _, _, j := setupSeedingPolicyJob(t, StatusQueued)
+	ratioVal := 1.5
+	timeVal := int64(3600)
+	nowVal := time.Now()
+	expectedTime := nowVal
+
+	rec, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	rec.SeedingPolicy = networkpolicy.SeedingPolicy{
+		Mode:             networkpolicy.SeedingModeRatioOrDuration,
+		RatioLimit:       &ratioVal,
+		TimeLimitSeconds: &timeVal,
+	}
+	rec.SeedingStartedAt = &nowVal
+	_ = torrentRepo.UpdateTorrentJob(context.Background(), rec)
+
+	if err := manager.hydrateTorrentState(context.Background(), j); err != nil {
+		t.Fatalf("hydrateTorrentState failed: %v", err)
+	}
+
+	// Mutate local variables
+	ratioVal = 9.9
+	timeVal = 9999
+	nowVal = nowVal.Add(10 * time.Hour)
+
+	if *j.SeedingPolicy.RatioLimit != 1.5 || *j.SeedingPolicy.TimeLimitSeconds != 3600 || j.SeedingStartedAt == nil || !j.SeedingStartedAt.Equal(expectedTime) {
+		t.Fatalf("pointer fields in hydrated job were mutated when local source variables changed: %+v", j)
+	}
+}

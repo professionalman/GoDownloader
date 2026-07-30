@@ -24,6 +24,19 @@ func (m *Manager) recover(ctx context.Context) {
 
 	for i := range jobs {
 		j := &jobs[i]
+		if j.Type == TypeTorrent {
+			if err := m.hydrateTorrentState(ctx, j); err != nil {
+				log.Printf("recovery: failed to hydrate torrent state for job %s: %v", j.ID, err)
+				j.Status = StatusFailed
+				j.Error = "Torrent metadata state could not be recovered."
+				j.SpeedBytesPerSecond = 0
+				j.ETASeconds = 0
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				continue
+			}
+		}
 		m.hydrateJob(ctx, j)
 		m.recoverJob(ctx, j)
 	}

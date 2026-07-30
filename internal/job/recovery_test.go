@@ -237,6 +237,7 @@ func TestRecovery_Torrent_AwaitingSelection_SurvivesRestart(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 	m.repo.Create(ctx, j)
+	m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{JobID: j.ID, InfoHash: j.EngineID})
 
 	m.recover(ctx)
 
@@ -276,6 +277,7 @@ func TestRecovery_Torrent_Downloading_Reattaches(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 	m.repo.Create(ctx, j)
+	m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{JobID: j.ID, InfoHash: j.EngineID})
 
 	m.recover(ctx)
 
@@ -586,6 +588,7 @@ func TestRecovery_V05_TorrentQueued_SurvivesRestart(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 	m.repo.Create(ctx, j)
+	m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{JobID: j.ID, InfoHash: j.EngineID})
 
 	m.recover(ctx)
 
