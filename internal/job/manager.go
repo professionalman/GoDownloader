@@ -117,6 +117,10 @@ func (m *Manager) SetTrackerEntryProvider(provider ITrackerEntryProvider) {
 	m.trackerEntries = provider
 }
 
+func (m *Manager) prepareJobForActivation(ctx context.Context, j *Job) error {
+	return m.hydrateTorrentState(ctx, j)
+}
+
 // SetScheduler wires the scheduler instance.
 func (m *Manager) SetScheduler(s *Scheduler) {
 	m.scheduler = s
@@ -124,6 +128,7 @@ func (m *Manager) SetScheduler(s *Scheduler) {
 		s.SetEventBus(m.bus)
 		s.SetEngineRegistry(m.engines)
 		s.SetAddActiveFunc(m.addActive)
+		s.SetPrepareActiveJobFunc(m.prepareJobForActivation)
 	}
 }
 

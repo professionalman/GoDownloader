@@ -18,6 +18,9 @@ type SchedulerLimitFunc func(ctx context.Context) int
 // AddActiveFunc defines the callback for adding a job to Manager's active set.
 type AddActiveFunc func(j *Job)
 
+// PrepareActiveJobFunc defines the callback for hydrating/preparing a job before active registration.
+type PrepareActiveJobFunc func(ctx context.Context, job *Job) error
+
 // ReconciliationKind distinguishes external execution failure from state persistence failure.
 type ReconciliationKind string
 
@@ -39,13 +42,14 @@ type DispatchReservation struct {
 
 // Scheduler manages queued download execution policy and capacity constraints.
 type Scheduler struct {
-	repo        IJobRepository
-	queueRepo   IQueueRepository
-	getLimit    SchedulerLimitFunc
-	dispatchFn  SchedulerDispatchFunc
-	bus         IEventBus
-	engines     IEngineRegistry
-	addActiveFn AddActiveFunc
+	repo               IJobRepository
+	queueRepo          IQueueRepository
+	getLimit           SchedulerLimitFunc
+	dispatchFn         SchedulerDispatchFunc
+	bus                IEventBus
+	engines            IEngineRegistry
+	addActiveFn        AddActiveFunc
+	prepareActiveJobFn PrepareActiveJobFunc
 
 	mu       sync.Mutex
 	inFlight map[string]*DispatchReservation
@@ -86,6 +90,11 @@ func (s *Scheduler) SetEngineRegistry(engines IEngineRegistry) {
 // SetAddActiveFunc injects the callback to register active jobs upon successful reconciliation.
 func (s *Scheduler) SetAddActiveFunc(fn AddActiveFunc) {
 	s.addActiveFn = fn
+}
+
+// SetPrepareActiveJobFunc injects the callback to prepare/hydrate a job before active registration.
+func (s *Scheduler) SetPrepareActiveJobFunc(fn PrepareActiveJobFunc) {
+	s.prepareActiveJobFn = fn
 }
 
 // Start launches the single scheduler background loop.
@@ -381,6 +390,12 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 			log.Printf("scheduler: external reconciliation failed to persist DOWNLOADING for job %s: %v", res.JobID, updateErr)
 			return
 		}
+		if s.prepareActiveJobFn != nil {
+			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
+				log.Printf("scheduler: external reconciliation failed to prepare job %s for activation: %v", current.ID, prepErr)
+				return
+			}
+		}
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
 			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
 		}
@@ -397,6 +412,12 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
 			log.Printf("scheduler: external reconciliation failed to persist PROCESSING for job %s: %v", res.JobID, updateErr)
 			return
+		}
+		if s.prepareActiveJobFn != nil {
+			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
+				log.Printf("scheduler: external reconciliation failed to prepare job %s for activation: %v", current.ID, prepErr)
+				return
+			}
 		}
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
 			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
@@ -415,6 +436,12 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 			log.Printf("scheduler: external reconciliation failed to persist SEEDING for job %s: %v", res.JobID, updateErr)
 			return
 		}
+		if s.prepareActiveJobFn != nil {
+			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
+				log.Printf("scheduler: external reconciliation failed to prepare job %s for activation: %v", current.ID, prepErr)
+				return
+			}
+		}
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
 			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
 		}
@@ -431,6 +458,12 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
 			log.Printf("scheduler: external reconciliation failed to restore DOWNLOADING for completed job %s: %v", res.JobID, updateErr)
 			return
+		}
+		if s.prepareActiveJobFn != nil {
+			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
+				log.Printf("scheduler: external reconciliation failed to prepare job %s for activation: %v", current.ID, prepErr)
+				return
+			}
 		}
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
 			log.Printf("scheduler: external reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
