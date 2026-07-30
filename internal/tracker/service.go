@@ -23,7 +23,11 @@ const (
 	maxTrackerLines  = 10000
 )
 
-var ErrNotFound = errors.New("tracker source not found")
+var (
+	ErrNotFound   = errors.New("tracker source not found")
+	ErrValidation = errors.New("invalid tracker source")
+	ErrFetch      = errors.New("tracker source refresh failed")
+)
 
 type Service struct {
 	repo   Repository
@@ -68,7 +72,7 @@ func (s *Service) EnabledEntries(ctx context.Context) ([]string, error) {
 
 func (s *Service) Create(ctx context.Context, input networkpolicy.TrackerSourceInput) (*networkpolicy.TrackerSource, error) {
 	if err := networkpolicy.ValidateTrackerSource(input); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrValidation, err)
 	}
 	now := time.Now().UTC()
 	source := &networkpolicy.TrackerSource{
@@ -85,7 +89,7 @@ func (s *Service) Create(ctx context.Context, input networkpolicy.TrackerSourceI
 
 func (s *Service) Update(ctx context.Context, id string, input networkpolicy.TrackerSourceInput) (*networkpolicy.TrackerSource, error) {
 	if err := networkpolicy.ValidateTrackerSource(input); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrValidation, err)
 	}
 	source, err := s.repo.Get(ctx, id)
 	if err != nil {
@@ -223,11 +227,13 @@ func parseEntries(reader io.Reader) ([]string, error) {
 
 func (s *Service) fail(ctx context.Context, source *networkpolicy.TrackerSource, cause error, checkedAt time.Time) error {
 	message := sanitizeError(cause.Error())
-	_ = s.repo.RecordFailure(ctx, source.ID, message, checkedAt)
+	if err := s.repo.RecordFailure(ctx, source.ID, message, checkedAt); err != nil {
+		return err
+	}
 	source.LastCheckedAt = &checkedAt
 	source.LastError = message
 	s.publish(job.EventTrackerSourceFailed, map[string]any{"sourceId": source.ID, "message": message})
-	return fmt.Errorf("%s", message)
+	return fmt.Errorf("%w: %s", ErrFetch, message)
 }
 
 func sanitizeError(message string) string {
@@ -281,21 +287,38 @@ func (s *Service) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sources, err := s.repo.List(ctx)
-			if err != nil {
-				continue
-			}
-			now := time.Now()
-			for _, source := range sources {
-				if !source.Enabled {
-					continue
-				}
-				if source.LastCheckedAt == nil || now.Sub(*source.LastCheckedAt) >= time.Duration(source.RefreshIntervalSeconds)*time.Second {
-					go s.Refresh(ctx, source.ID)
-				}
-			}
+			_ = s.refreshDue(ctx, time.Now())
 		}
 	}
+}
+
+func (s *Service) refreshDue(ctx context.Context, now time.Time) []error {
+	sources, err := s.repo.List(ctx)
+	if err != nil {
+		return []error{err}
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errorsOut []error
+	for _, source := range sources {
+		if !source.Enabled {
+			continue
+		}
+		if source.LastCheckedAt != nil && now.Sub(*source.LastCheckedAt) < time.Duration(source.RefreshIntervalSeconds)*time.Second {
+			continue
+		}
+		wg.Add(1)
+		go func(sourceID string) {
+			defer wg.Done()
+			if _, err := s.Refresh(ctx, sourceID); err != nil {
+				mu.Lock()
+				errorsOut = append(errorsOut, err)
+				mu.Unlock()
+			}
+		}(source.ID)
+	}
+	wg.Wait()
+	return errorsOut
 }
 
 func (s *Service) publish(eventType string, data any) {

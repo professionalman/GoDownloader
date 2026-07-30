@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"downloader/internal/networkpolicy"
+	appsettings "downloader/internal/settings"
 )
 
 type NetworkLimitUpdate struct {
@@ -247,6 +248,77 @@ func (m *Manager) ReconcileNetworkPolicies(ctx context.Context) {
 		j.UpdatedAt = time.Now()
 		_ = m.repo.Update(ctx, j)
 	}
+}
+
+func (m *Manager) ReconcileNetworkPoliciesWithResults(ctx context.Context) []appsettings.ApplicationResult {
+	results := []appsettings.ApplicationResult{{
+		Target: "settings", Status: "persisted",
+		Message: "desired network settings were persisted",
+	}}
+	if m.settings == nil {
+		return append(results,
+			appsettings.ApplicationResult{Target: "aria2", Status: "unavailable", Message: "settings service is unavailable"},
+			appsettings.ApplicationResult{Target: "qbittorrent", Status: "unavailable", Message: "settings service is unavailable"},
+			appsettings.ApplicationResult{Target: "yt-dlp", Status: "future_jobs_only", Message: "applies when future media processes start"},
+		)
+	}
+
+	current, settingsErr := m.settings.GetSettings(ctx)
+	if settingsErr != nil {
+		return append(results,
+			appsettings.ApplicationResult{Target: "aria2", Status: "pending", Message: "desired state is awaiting reconciliation"},
+			appsettings.ApplicationResult{Target: "qbittorrent", Status: "pending", Message: "desired state is awaiting reconciliation"},
+			appsettings.ApplicationResult{Target: "yt-dlp", Status: "future_jobs_only", Message: "applies when future media processes start"},
+		)
+	}
+
+	if engine, ok := m.engines.Get("aria2"); !ok {
+		results = append(results, appsettings.ApplicationResult{Target: "aria2", Status: "unavailable", Message: "aria2 is unavailable; desired state remains pending"})
+	} else if controller, supported := engine.(IGlobalDownloadLimitController); !supported || !engine.Capabilities().GlobalDownloadLimit {
+		results = append(results, appsettings.ApplicationResult{Target: "aria2", Status: "unsupported", Message: "aria2 global download limits are unsupported"})
+	} else if err := m.applyCachedLimit("global:aria2", current.Network.GlobalDownloadLimitBytesPerSecond, func() error {
+		return controller.SetGlobalDownloadLimit(ctx, current.Network.GlobalDownloadLimitBytesPerSecond)
+	}); err != nil {
+		results = append(results, appsettings.ApplicationResult{Target: "aria2", Status: "pending", Message: "aria2 is unavailable; desired state remains pending"})
+	} else {
+		results = append(results, appsettings.ApplicationResult{Target: "aria2", Status: "applied", Message: "applied to the aria2 daemon aggregate"})
+	}
+
+	m.ReconcileNetworkPolicies(ctx)
+	if engine, ok := m.engines.Get("qbittorrent"); !ok {
+		results = append(results, appsettings.ApplicationResult{Target: "qbittorrent", Status: "unavailable", Message: "qBittorrent is unavailable; desired state remains pending"})
+	} else if !engine.Capabilities().PerJobDownloadLimit {
+		results = append(results, appsettings.ApplicationResult{Target: "qbittorrent", Status: "unsupported", Message: "owned-torrent limits are unsupported"})
+	} else if jobs, err := m.repo.List(ctx); err != nil {
+		results = append(results, appsettings.ApplicationResult{Target: "qbittorrent", Status: "pending", Message: "owned-torrent reconciliation is pending"})
+	} else {
+		owned := 0
+		pending := false
+		for i := range jobs {
+			j := &jobs[i]
+			if j.Type != TypeTorrent || j.EngineID == "" ||
+				(j.Status != StatusDownloading && j.Status != StatusPaused && j.Status != StatusSeeding) {
+				continue
+			}
+			owned++
+			pending = pending || j.NetworkReconcilePending
+		}
+		if pending {
+			results = append(results, appsettings.ApplicationResult{Target: "qbittorrent", Status: "pending", Message: "one or more GoDownloader-owned torrents are awaiting reconciliation"})
+		} else {
+			results = append(results, appsettings.ApplicationResult{
+				Target: "qbittorrent", Status: "applied",
+				Message: fmt.Sprintf("applied to %d GoDownloader-owned torrents", owned),
+			})
+		}
+	}
+
+	if _, ok := m.engines.Get("ytdlp"); ok {
+		results = append(results, appsettings.ApplicationResult{Target: "yt-dlp", Status: "future_jobs_only", Message: "applies when future media processes start"})
+	} else {
+		results = append(results, appsettings.ApplicationResult{Target: "yt-dlp", Status: "unavailable", Message: "yt-dlp is unavailable; future jobs retain desired settings"})
+	}
+	return results
 }
 
 func (m *Manager) reconcileManagedTorrentProxy(ctx context.Context) {

@@ -320,6 +320,8 @@ type fakeTorrentRepository struct {
 	getActiveErr error
 	getErr       error
 	createErr    error
+	updateErr    error
+	finalizeErr  error
 }
 
 func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
@@ -356,6 +358,9 @@ func (f *fakeTorrentRepository) GetTorrentJob(ctx context.Context, jobID string)
 func (f *fakeTorrentRepository) UpdateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return f.updateErr
+	}
 	f.torrentJobs[rec.JobID] = rec
 	return nil
 }
@@ -401,12 +406,17 @@ func (f *fakeTorrentRepository) GetActiveTorrentJobByInfoHash(ctx context.Contex
 }
 
 func (f *fakeTorrentRepository) FinalizeTorrent(ctx context.Context, j *Job, stopReason string) error {
+	if f.finalizeErr != nil {
+		return f.finalizeErr
+	}
 	if err := f.jobRepo.Update(ctx, j); err != nil {
 		return err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if rec := f.torrentJobs[j.ID]; rec != nil {
+		rec.SeedAfterComplete = j.SeedAfterComplete
+		rec.SeedingPolicy = j.SeedingPolicy
 		rec.SeedingStopReason = stopReason
 		rec.SeedingReconcilePending = false
 	}

@@ -2,6 +2,36 @@ import React, { useEffect, useState } from 'react';
 import type { Job, JobCapabilities, SeedingMode, SeedingPolicy } from '../types';
 import { addTorrentTrackers, getJobCapabilities, updateJobNetwork, updateSeedingPolicy } from '../api';
 
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function formatSpeed(bytesPerSecond: number): string {
+  if (!bytesPerSecond) return '0 B/s';
+  const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
+  let value = bytesPerSecond;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function policyLabel(mode: SeedingMode): string {
+  switch (mode) {
+    case 'unlimited': return 'Unlimited';
+    case 'ratio': return 'Stop at ratio';
+    case 'duration': return 'Stop after active seeding time';
+    case 'ratio_or_duration': return 'Stop at ratio or duration';
+    default: return 'Do not seed';
+  }
+}
+
 export const JobPowerControls: React.FC<{ job: Job; onUpdated?: (job: Job) => void }> = ({ job, onUpdated }) => {
   const [capabilities, setCapabilities] = useState<JobCapabilities | null>(null);
   const [download, setDownload] = useState(job.networkPolicy?.downloadLimitBytesPerSecond ?? 0);
@@ -39,7 +69,7 @@ export const JobPowerControls: React.FC<{ job: Job; onUpdated?: (job: Job) => vo
   };
 
   return (
-    <details className="job-power-controls">
+    <details className="job-power-controls" open={job.status === 'seeding' ? true : undefined}>
       <summary>Network & torrent controls</summary>
       <div className="power-grid">
         {capabilities.downloadLimit.supported && <label>Download bytes/s<input type="number" min="0" value={download} disabled={!capabilities.downloadLimit.mutableNow} onChange={(e) => setDownload(Number(e.target.value))} /></label>}
@@ -54,7 +84,13 @@ export const JobPowerControls: React.FC<{ job: Job; onUpdated?: (job: Job) => vo
         </>}
       </div>
       <div className="setting-hint">Effective ↓ {job.effectiveDownloadLimitBytesPerSecond || 'unlimited'} B/s · ↑ {job.effectiveUploadLimitBytesPerSecond || 'unlimited'} B/s{job.networkReconcilePending ? ' · reconciliation pending' : ''}</div>
-      {job.seedingStartedAt && <div className="setting-hint">Seeding since {new Date(job.seedingStartedAt).toLocaleString()} · ratio {job.torrentInfo?.ratio?.toFixed(2) ?? '0.00'}</div>}
+      {job.status === 'seeding' && <div className="active-seeding-summary" aria-label="Active seeding status">
+        <div>Ratio: {job.torrentInfo?.ratio?.toFixed(2) ?? '0.00'}{job.seedingPolicy?.ratioLimit != null ? ` / ${job.seedingPolicy.ratioLimit.toFixed(2)}` : ''}</div>
+        <div>Seeding time: {formatDuration(job.torrentInfo?.seedingTimeSeconds ?? 0)}{job.seedingPolicy?.timeLimitSeconds != null ? ` / ${formatDuration(job.seedingPolicy.timeLimitSeconds)}` : ''}</div>
+        <div>Upload speed: {formatSpeed(job.torrentInfo?.uploadSpeed ?? 0)}</div>
+        <div>Seeders: {job.torrentInfo?.seeders ?? 0} · Leechers: {job.torrentInfo?.leechers ?? 0}</div>
+        <div>Policy: {policyLabel(job.seedingPolicy?.mode ?? 'none')}</div>
+      </div>}
       {message && <div className="setting-notice">{message}</div>}
     </details>
   );

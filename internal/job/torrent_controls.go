@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -82,6 +83,31 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 	if j.Type != TypeTorrent {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: "seeding policy is only available for torrents"}
 	}
+	switch j.Status {
+	case StatusAwaitingSelection, StatusQueued, StatusDownloading, StatusPaused, StatusSeeding:
+	default:
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot change seeding policy for a %s job", j.Status)}
+	}
+	if j.Status == StatusSeeding && policy.Mode == networkpolicy.SeedingModeNone {
+		stopped, stopErr := m.stopSeedingWithReason(ctx, j, "policy_none")
+		if stopErr != nil {
+			var finalizeErr *TorrentFinalizeError
+			if errors.As(stopErr, &finalizeErr) {
+				if finalizeErr.Kind == TorrentFinalizeCleanupFailure {
+					return j, &AppError{Code: ErrSeedingPolicyApplicationFailed, Message: "torrent completed but daemon cleanup is pending"}
+				}
+				return nil, &AppError{Code: ErrInternalError, Message: "failed to persist completed torrent state"}
+			}
+			if !stopped {
+				return nil, &AppError{Code: ErrSeedingPolicyApplicationFailed, Message: "failed to stop seeding"}
+			}
+			return nil, &AppError{Code: ErrInternalError, Message: "failed to finalize torrent"}
+		}
+		m.bus.Publish(Event{Type: EventJobSeedingPolicyUpdated, Job: *j, Data: map[string]any{
+			"jobId": id, "seedingPolicy": j.SeedingPolicy,
+		}})
+		return j, nil
+	}
 	oldPolicy := j.SeedingPolicy
 	engine, ok := m.engines.Get(j.Engine)
 	if !ok {
@@ -93,13 +119,15 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 	}
 	if j.EngineID != "" {
 		if err := controller.ApplySeedingPolicy(ctx, j, policy); err != nil {
-			return nil, &AppError{Code: ErrNetworkSettingApplicationFailed, Message: "failed to apply seeding policy"}
+			return nil, &AppError{Code: ErrSeedingPolicyApplicationFailed, Message: "failed to apply seeding policy"}
 		}
 	}
 	rec, err := m.torrentRepo.GetTorrentJob(ctx, id)
 	if err != nil || rec == nil {
 		if j.EngineID != "" {
-			_ = controller.ApplySeedingPolicy(ctx, j, oldPolicy)
+			if rollbackErr := controller.ApplySeedingPolicy(ctx, j, oldPolicy); rollbackErr != nil {
+				return nil, &AppError{Code: ErrSeedingPolicyStateAmbiguous, Message: "seeding record lookup and rollback both failed"}
+			}
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: "torrent policy record is unavailable"}
 	}
@@ -109,7 +137,7 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 	if err := m.torrentRepo.UpdateTorrentJob(ctx, rec); err != nil {
 		if j.EngineID != "" {
 			if rollbackErr := controller.ApplySeedingPolicy(ctx, j, oldPolicy); rollbackErr != nil {
-				return nil, &AppError{Code: ErrNetworkSettingStateAmbiguous, Message: "seeding persistence and rollback both failed"}
+				return nil, &AppError{Code: ErrSeedingPolicyStateAmbiguous, Message: "seeding persistence and rollback both failed"}
 			}
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: "failed to persist seeding policy"}
@@ -117,26 +145,6 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 	j.SeedingPolicy = policy
 	j.SeedAfterComplete = rec.SeedAfterComplete
 	j.UpdatedAt = time.Now()
-	if err := m.repo.Update(ctx, j); err != nil {
-		if j.EngineID != "" {
-			if rollbackErr := controller.ApplySeedingPolicy(ctx, j, oldPolicy); rollbackErr != nil {
-				return nil, &AppError{Code: ErrNetworkSettingStateAmbiguous, Message: "job persistence and rollback both failed"}
-			}
-		}
-		return nil, &AppError{Code: ErrInternalError, Message: "failed to persist job seeding policy"}
-	}
-	if j.Status == StatusSeeding && policy.Mode == networkpolicy.SeedingModeNone {
-		torrentEngine, torrentOK := engine.(ITorrentEngine)
-		if !torrentOK {
-			return nil, &AppError{Code: ErrCapabilityNotSupported, Message: "torrent stop is unsupported"}
-		}
-		if err := torrentEngine.StopDownload(ctx, j.EngineID); err != nil {
-			return nil, &AppError{Code: ErrNetworkSettingApplicationFailed, Message: "failed to stop seeding"}
-		}
-		if err := m.finalizeCompletedTorrentWithReason(ctx, j, "policy_none"); err != nil {
-			return nil, err
-		}
-	}
 	m.bus.Publish(Event{Type: EventJobSeedingPolicyUpdated, Job: *j, Data: map[string]any{
 		"jobId": id, "seedingPolicy": policy,
 	}})
@@ -209,6 +217,7 @@ func (m *Manager) enterSeeding(ctx context.Context, j *Job, status *EngineStatus
 		j.TorrentInfo.Ratio = status.Ratio
 		j.TorrentInfo.Seeders = status.Seeders
 		j.TorrentInfo.Leechers = status.Leechers
+		j.TorrentInfo.SeedingTimeSeconds = status.SeedingTimeSeconds
 	}
 	return false
 }

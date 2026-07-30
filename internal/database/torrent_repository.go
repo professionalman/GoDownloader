@@ -210,8 +210,11 @@ func (r *SQLiteTorrentRepository) FinalizeTorrent(ctx context.Context, j *job.Jo
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE torrent_jobs SET seeding_stop_reason=?,
-		seeding_reconcile_pending=0 WHERE job_id=?`, stopReason, j.ID)
+	_, err = tx.ExecContext(ctx, `UPDATE torrent_jobs SET seed_after_complete=?,
+		seeding_mode=?, seed_ratio_limit=?, seed_time_limit_seconds=?,
+		seeding_stop_reason=?, seeding_reconcile_pending=0 WHERE job_id=?`,
+		j.SeedAfterComplete, j.SeedingPolicy.Mode, j.SeedingPolicy.RatioLimit,
+		j.SeedingPolicy.TimeLimitSeconds, stopReason, j.ID)
 	if err != nil {
 		return err
 	}

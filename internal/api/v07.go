@@ -118,7 +118,11 @@ func (h *Handler) CreateTrackerSource(w http.ResponseWriter, r *http.Request) {
 	}
 	source, err := h.trackers.Create(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+		if errors.Is(err, tracker.ErrValidation) {
+			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to create tracker source")
 		return
 	}
 	writeJSON(w, http.StatusCreated, source)
@@ -135,8 +139,20 @@ func (h *Handler) UpdateTrackerSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source, err := h.trackers.Update(r.Context(), mux.Vars(r)["id"], input)
-	if err != nil || source == nil {
-		writeError(w, http.StatusNotFound, job.ErrTrackerSourceNotFound, "tracker source not found")
+	if err != nil {
+		if errors.Is(err, tracker.ErrNotFound) {
+			writeError(w, http.StatusNotFound, job.ErrTrackerSourceNotFound, "tracker source not found")
+			return
+		}
+		if errors.Is(err, tracker.ErrValidation) {
+			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to update tracker source")
+		return
+	}
+	if source == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to update tracker source")
 		return
 	}
 	writeJSON(w, http.StatusOK, source)
@@ -169,7 +185,11 @@ func (h *Handler) RefreshTrackerSource(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, job.ErrTrackerSourceNotFound, "tracker source not found")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, job.ErrTrackerSourceFetchFailed, err.Error())
+		if errors.Is(err, tracker.ErrFetch) {
+			writeError(w, http.StatusServiceUnavailable, job.ErrTrackerSourceFetchFailed, "tracker source refresh failed")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to refresh tracker source")
 		return
 	}
 	writeJSON(w, http.StatusOK, source)

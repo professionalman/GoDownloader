@@ -1,11 +1,60 @@
 import React, { useEffect, useState } from 'react';
 import type { AppSettings, ProxyMode, ProxyProtocol, SeedingMode, SeedingPolicy, TrackerSource, UpdateSettingsPayload } from '../types';
-import { createTrackerSource, deleteTrackerSource, getTrackerSources, refreshAllTrackerSources, refreshTrackerSource } from '../api';
+import { createTrackerSource, deleteTrackerSource, getTrackerSources, refreshAllTrackerSources, refreshTrackerSource, updateTrackerSource } from '../api';
 
 interface Props {
   settings: AppSettings | null;
   onSave: (payload: UpdateSettingsPayload) => Promise<void>;
 }
+
+interface TrackerSourceRowProps {
+  source: TrackerSource;
+  onChanged: (source: TrackerSource) => void;
+  onDeleted: (id: string) => void;
+  onError: (message: string) => void;
+}
+
+const TrackerSourceRow: React.FC<TrackerSourceRowProps> = ({ source, onChanged, onDeleted, onError }) => {
+  const [name, setName] = useState(source.name);
+  const [url, setURL] = useState(source.url);
+  const [enabled, setEnabled] = useState(source.enabled);
+  const [interval, setInterval] = useState(source.refreshIntervalSeconds);
+  const save = async (nextEnabled = enabled) => {
+    const updated = await updateTrackerSource(source.id, {
+      name, url, enabled: nextEnabled, refreshIntervalSeconds: interval,
+    });
+    setEnabled(updated.enabled);
+    setInterval(updated.refreshIntervalSeconds);
+    onChanged(updated);
+  };
+  return (
+    <div className="tracker-source-row">
+      <div className="power-grid tracker-source-fields">
+        <label>Name<input aria-label={`Tracker name ${source.name}`} value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label>HTTP(S) list URL<input aria-label={`Tracker URL ${source.name}`} value={url} onChange={(event) => setURL(event.target.value)} /></label>
+        <label>Refresh interval (seconds)<input aria-label={`Refresh interval ${source.name}`} type="number" min="900" max="2592000" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label>
+        <label><input aria-label={`Enabled ${source.name}`} type="checkbox" checked={enabled} onChange={(event) => {
+          const next = event.target.checked;
+          setEnabled(next);
+          save(next).catch((error) => {
+            setEnabled(enabled);
+            onError(error.message);
+          });
+        }} /> Enabled</label>
+      </div>
+      <div className="setting-hint">
+        {source.trackerCount} trackers · Last checked: {source.lastCheckedAt ? new Date(source.lastCheckedAt).toLocaleString() : 'Never'}
+        {' · '}Last successful refresh: {source.lastSuccessAt ? new Date(source.lastSuccessAt).toLocaleString() : 'Never'}
+        {source.lastError ? ` · Last error: ${source.lastError}` : ''}
+      </div>
+      <span>
+        <button type="button" className="btn btn-sm btn-secondary" onClick={() => save().catch((error) => onError(error.message))}>Save</button>{' '}
+        <button type="button" className="btn btn-sm btn-secondary" onClick={() => refreshTrackerSource(source.id).then(onChanged).catch((error) => onError(error.message))}>Refresh</button>{' '}
+        <button type="button" className="btn btn-sm btn-danger" onClick={() => deleteTrackerSource(source.id).then(() => onDeleted(source.id)).catch((error) => onError(error.message))}>Delete</button>
+      </span>
+    </div>
+  );
+};
 
 export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
   const network = settings?.network;
@@ -39,6 +88,8 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
   const [sources, setSources] = useState<TrackerSource[]>([]);
   const [sourceName, setSourceName] = useState('');
   const [sourceURL, setSourceURL] = useState('');
+  const [sourceEnabled, setSourceEnabled] = useState(true);
+  const [sourceInterval, setSourceInterval] = useState(3600);
   const [status, setStatus] = useState('');
 
   useEffect(() => {
@@ -84,10 +135,14 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
   };
 
   const addSource = async () => {
-    const source = await createTrackerSource({ name: sourceName, url: sourceURL, enabled: true, refreshIntervalSeconds: 3600 });
+    const source = await createTrackerSource({
+      name: sourceName, url: sourceURL, enabled: sourceEnabled, refreshIntervalSeconds: sourceInterval,
+    });
     setSources((current) => [...current, source]);
     setSourceName('');
     setSourceURL('');
+    setSourceEnabled(true);
+    setSourceInterval(3600);
   };
 
   return (
@@ -137,13 +192,21 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
       </section>
       <section className="setting-section" style={{ marginTop: '1.5rem' }}>
         <h4>Tracker Sources</h4>
-        {sources.map((source) => <div key={source.id} className="tracker-source-row">
-          <span><strong>{source.name}</strong> · {source.trackerCount} trackers {source.lastError && `· ${source.lastError}`}</span>
-          <span><button type="button" className="btn btn-sm btn-secondary" onClick={() => refreshTrackerSource(source.id).then((updated) => setSources((all) => all.map((item) => item.id === updated.id ? updated : item)))}>Refresh</button> <button type="button" className="btn btn-sm btn-danger" onClick={() => deleteTrackerSource(source.id).then(() => setSources((all) => all.filter((item) => item.id !== source.id)))}>Delete</button></span>
-        </div>)}
-        <div className="power-grid"><label>Name<input value={sourceName} onChange={(e) => setSourceName(e.target.value)} /></label><label>HTTP(S) list URL<input value={sourceURL} onChange={(e) => setSourceURL(e.target.value)} /></label></div>
+        {sources.map((source) => <TrackerSourceRow
+          key={source.id}
+          source={source}
+          onChanged={(updated) => setSources((all) => all.map((item) => item.id === updated.id ? updated : item))}
+          onDeleted={(id) => setSources((all) => all.filter((item) => item.id !== id))}
+          onError={setStatus}
+        />)}
+        <div className="power-grid">
+          <label>Name<input aria-label="New tracker source name" value={sourceName} onChange={(e) => setSourceName(e.target.value)} /></label>
+          <label>HTTP(S) list URL<input aria-label="New tracker source URL" value={sourceURL} onChange={(e) => setSourceURL(e.target.value)} /></label>
+          <label>Refresh interval (seconds)<input aria-label="New tracker refresh interval" type="number" min="900" max="2592000" value={sourceInterval} onChange={(e) => setSourceInterval(Number(e.target.value))} /></label>
+          <label><input aria-label="New tracker source enabled" type="checkbox" checked={sourceEnabled} onChange={(e) => setSourceEnabled(e.target.checked)} /> Enabled</label>
+        </div>
         <button type="button" className="btn btn-secondary" onClick={() => addSource().catch((error) => setStatus(error.message))}>Add source</button>{' '}
-        <button type="button" className="btn btn-secondary" onClick={() => refreshAllTrackerSources().then(() => getTrackerSources().then(setSources))}>Refresh all</button>
+        <button type="button" className="btn btn-secondary" onClick={() => refreshAllTrackerSources().then(() => getTrackerSources().then(setSources)).catch((error) => setStatus(error.message))}>Refresh all</button>
       </section>
     </>
   );

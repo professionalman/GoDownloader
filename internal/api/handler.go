@@ -590,7 +590,9 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, code, err.Error())
 			return
 		}
-		h.manager.ReconcileNetworkPolicies(r.Context())
+		if h.manager != nil {
+			st.ApplicationResults = append(st.ApplicationResults, h.manager.ReconcileNetworkPoliciesWithResults(r.Context())...)
+		}
 	}
 
 	if st == nil {

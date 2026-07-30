@@ -162,6 +162,7 @@ export interface TorrentInfo {
   uploaded: number;
   uploadSpeed: number;
   ratio: number;
+  seedingTimeSeconds: number;
 }
 
 export interface TorrentFile {

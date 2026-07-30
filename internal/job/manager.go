@@ -1302,25 +1302,14 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot stop seeding a %s job", j.Status)}
 	}
 
-	eng, ok := m.engines.Get(j.Engine)
-	if !ok {
-		return nil, &AppError{Code: ErrEngineError, Message: "engine not available"}
-	}
-
-	torrentEng, ok := eng.(ITorrentEngine)
-	if !ok {
-		return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
-	}
-
-	if err := torrentEng.StopDownload(ctx, j.EngineID); err != nil {
-		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to stop torrent seeding: %v", err)}
-	}
-	j.SeedAfterComplete = false
-	j.SeedingPolicy = networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
-	if err := m.finalizeCompletedTorrentWithReason(ctx, j, "manual"); err != nil {
+	stopped, err := m.stopSeedingWithReason(ctx, j, "manual")
+	if err != nil {
 		var finErr *TorrentFinalizeError
 		if errors.As(err, &finErr) && finErr.Kind == TorrentFinalizeCleanupFailure {
 			return j, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("torrent completed but qBittorrent cleanup is pending: %v", err)}
+		}
+		if !stopped {
+			return nil, &AppError{Code: ErrEngineError, Message: "failed to stop torrent seeding"}
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist completed status: %v", err)}
 	}
@@ -2535,7 +2524,10 @@ func (m *Manager) finalizeCompletedTorrentWithReason(ctx context.Context, j *Job
 	lock := m.terminalLock(j.ID)
 	lock.Lock()
 	defer lock.Unlock()
+	return m.finalizeCompletedTorrentWithReasonLocked(ctx, j, stopReason)
+}
 
+func (m *Manager) finalizeCompletedTorrentWithReasonLocked(ctx context.Context, j *Job, stopReason string) error {
 	if current, err := m.repo.GetByID(ctx, j.ID); err == nil && current != nil && current.Status == StatusCompleted && !current.EngineCleanupPending {
 		*j = *current
 		return nil
@@ -2592,6 +2584,46 @@ func (m *Manager) finalizeCompletedTorrentWithReason(ctx context.Context, j *Job
 	*j = candidate
 	m.publish(EventJobCompleted, j)
 	return nil
+}
+
+func (m *Manager) stopSeedingWithReason(ctx context.Context, j *Job, stopReason string) (bool, error) {
+	lock := m.terminalLock(j.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	current, err := m.repo.GetByID(ctx, j.ID)
+	if err != nil {
+		return false, err
+	}
+	if current == nil {
+		return false, &AppError{Code: ErrJobNotFound, Message: "job not found"}
+	}
+	if current.Status != StatusSeeding {
+		return false, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot stop seeding a %s job", current.Status)}
+	}
+	eng, ok := m.engines.Get(current.Engine)
+	if !ok {
+		return false, fmt.Errorf("engine not available")
+	}
+	torrentEng, ok := eng.(ITorrentEngine)
+	if !ok {
+		return false, fmt.Errorf("engine does not support torrent operations")
+	}
+	if err := torrentEng.StopDownload(ctx, current.EngineID); err != nil {
+		return false, err
+	}
+
+	candidate := *current
+	candidate.SeedAfterComplete = false
+	candidate.SeedingPolicy = networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
+	if err := m.finalizeCompletedTorrentWithReasonLocked(ctx, &candidate, stopReason); err != nil {
+		if candidate.Status == StatusCompleted {
+			*j = candidate
+		}
+		return true, err
+	}
+	*j = candidate
+	return true, nil
 }
 
 func (m *Manager) terminalLock(jobID string) *sync.Mutex {

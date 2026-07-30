@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,6 +50,38 @@ func TestSettingsValidateCompleteRequestBeforePersistence(t *testing.T) {
 	}
 	if got.Queue.MaxConcurrentDownloads != settings.DefaultMaxConcurrent {
 		t.Fatalf("queue was partially persisted: %d", got.Queue.MaxConcurrentDownloads)
+	}
+}
+
+func TestSettingsUpdateReturnsTruthfulApplicationResultsAndKeepsDesiredState(t *testing.T) {
+	router, _, service := setupAPITestRouter(t)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewBufferString(
+		`{"network":{"globalDownloadLimitBytesPerSecond":4096}}`,
+	))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response settings.AppSettings
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	results := map[string]string{}
+	for _, result := range response.ApplicationResults {
+		results[result.Target] = result.Status
+	}
+	if results["settings"] != "persisted" || results["aria2"] != "unavailable" ||
+		results["qbittorrent"] != "unavailable" || results["yt-dlp"] != "unavailable" {
+		t.Fatalf("unexpected application results: %+v", response.ApplicationResults)
+	}
+	durable, err := service.GetSettings(req.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durable.Network.GlobalDownloadLimitBytesPerSecond != 4096 {
+		t.Fatalf("desired state was discarded while engines were unavailable: %+v", durable.Network)
 	}
 }
 

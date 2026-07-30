@@ -77,14 +77,15 @@ func ValidPriority(p TorrentFilePriority) bool {
 
 // TorrentInfo holds normalized torrent metadata owned by GoDownloader.
 type TorrentInfo struct {
-	Name        string  `json:"name"`
-	InfoHash    string  `json:"infoHash"`
-	TotalSize   int64   `json:"totalSize"`
-	Seeders     int     `json:"seeders"`
-	Leechers    int     `json:"leechers"`
-	Uploaded    int64   `json:"uploaded"`
-	UploadSpeed int64   `json:"uploadSpeed"`
-	Ratio       float64 `json:"ratio"`
+	Name               string  `json:"name"`
+	InfoHash           string  `json:"infoHash"`
+	TotalSize          int64   `json:"totalSize"`
+	Seeders            int     `json:"seeders"`
+	Leechers           int     `json:"leechers"`
+	Uploaded           int64   `json:"uploaded"`
+	UploadSpeed        int64   `json:"uploadSpeed"`
+	Ratio              float64 `json:"ratio"`
+	SeedingTimeSeconds int64   `json:"seedingTimeSeconds"`
 }
 
 // TorrentFile represents a single file within a torrent.

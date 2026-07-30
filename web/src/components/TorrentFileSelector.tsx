@@ -19,9 +19,9 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
   const [files, setFiles] = useState<TorrentFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [seedingMode, setSeedingMode] = useState<SeedingMode>('none');
-  const [ratioLimit, setRatioLimit] = useState(1);
-  const [durationHours, setDurationHours] = useState(24);
+  const [seedingMode, setSeedingMode] = useState<SeedingMode>(job.seedingPolicy?.mode ?? 'none');
+  const [ratioLimit, setRatioLimit] = useState(job.seedingPolicy?.ratioLimit ?? 1);
+  const [durationHours, setDurationHours] = useState((job.seedingPolicy?.timeLimitSeconds ?? 86400) / 3600);
 
   useEffect(() => {
     getTorrentFiles(job.id)
