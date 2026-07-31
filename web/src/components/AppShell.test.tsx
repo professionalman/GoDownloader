@@ -1,0 +1,111 @@
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import App from '../App';
+import { AppShell } from './AppShell';
+
+const sse = vi.hoisted(() => {
+  const listeners = new Map<string, () => void>();
+  const source = {
+    addEventListener: vi.fn((event: string, listener: () => void) => listeners.set(event, listener)),
+    removeEventListener: vi.fn((event: string) => listeners.delete(event)),
+    close: vi.fn(),
+  };
+  return { listeners, source };
+});
+
+vi.mock('../api', async () => {
+  const actual = await vi.importActual<typeof import('../api')>('../api');
+  return {
+    ...actual,
+    getJobs: vi.fn().mockResolvedValue([]),
+    getQueueSnapshot: vi.fn().mockResolvedValue({
+      maxConcurrentDownloads: 3,
+      runningDownloads: 0,
+      queuedDownloads: 0,
+      pausedDownloads: 0,
+      items: [],
+    }),
+    getSettings: vi.fn().mockResolvedValue(null),
+    connectSSE: vi.fn(() => sse.source),
+  };
+});
+
+vi.mock('./DownloadForm', () => ({ DownloadForm: () => <div>Download form</div> }));
+vi.mock('./JobList', () => ({ JobList: () => <div>Job list</div> }));
+vi.mock('./QueueSection', () => ({ QueueSection: () => <div>Queue section</div> }));
+vi.mock('./SettingsPanel', () => ({ SettingsPanel: () => <div>Settings panel</div> }));
+vi.mock('./FormatSelector', () => ({ FormatSelector: () => <div>Format selector</div> }));
+vi.mock('./TorrentFileSelector', () => ({ TorrentFileSelector: () => <div>Torrent selector</div> }));
+
+describe('AppShell', () => {
+  beforeEach(() => {
+    sse.listeners.clear();
+    vi.clearAllMocks();
+  });
+
+  it('renders state-based desktop and compact navigation with counts and settings', () => {
+    const onViewModeChange = vi.fn();
+    const onOpenSettings = vi.fn();
+
+    render(
+      <AppShell
+        viewMode="downloads"
+        downloadCount={7}
+        queueCount={2}
+        connectionState="connected"
+        onViewModeChange={onViewModeChange}
+        onOpenSettings={onOpenSettings}
+      >
+        <div>Existing content</div>
+      </AppShell>,
+    );
+
+    const desktopNav = screen.getByRole('navigation', { name: 'Main navigation' });
+    const compactNav = screen.getByRole('navigation', { name: 'Compact navigation' });
+    expect(within(desktopNav).getByRole('button', { name: /Downloads/ })).toHaveAttribute('aria-current', 'page');
+    expect(within(desktopNav).getByLabelText('7 downloads')).toBeInTheDocument();
+    expect(within(compactNav).getByLabelText('2 queue')).toBeInTheDocument();
+    expect(screen.getByText('Version 0.7')).toBeInTheDocument();
+    expect(within(compactNav).getByText('v0.7')).toBeInTheDocument();
+
+    fireEvent.click(within(desktopNav).getByRole('button', { name: /Queue/ }));
+    expect(onViewModeChange).toHaveBeenCalledWith('queue');
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it('projects only the supplied EventSource lifecycle state', () => {
+    const props = {
+      viewMode: 'downloads' as const,
+      downloadCount: 0,
+      queueCount: 0,
+      onViewModeChange: vi.fn(),
+      onOpenSettings: vi.fn(),
+      children: <div />,
+    };
+    const { rerender } = render(<AppShell {...props} connectionState="connecting" />);
+    expect(screen.getByLabelText('GoDownloader Connecting')).toBeInTheDocument();
+
+    rerender(<AppShell {...props} connectionState="connected" />);
+    expect(screen.getByLabelText('GoDownloader Connected')).toBeInTheDocument();
+
+    rerender(<AppShell {...props} connectionState="reconnecting" />);
+    expect(screen.getByLabelText('GoDownloader Reconnecting')).toBeInTheDocument();
+  });
+
+  it('updates connection status from the existing EventSource lifecycle and closes it', () => {
+    const { unmount } = render(<App />);
+    expect(screen.getByLabelText('GoDownloader Connecting')).toBeInTheDocument();
+
+    act(() => sse.listeners.get('open')?.());
+    expect(screen.getByLabelText('GoDownloader Connected')).toBeInTheDocument();
+
+    act(() => sse.listeners.get('error')?.());
+    expect(screen.getByLabelText('GoDownloader Reconnecting')).toBeInTheDocument();
+
+    expect(sse.source.addEventListener).toHaveBeenCalledWith('open', expect.any(Function));
+    expect(sse.source.addEventListener).toHaveBeenCalledWith('error', expect.any(Function));
+    unmount();
+    expect(sse.source.close).toHaveBeenCalledOnce();
+  });
+});

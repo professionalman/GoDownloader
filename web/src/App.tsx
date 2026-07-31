@@ -5,6 +5,8 @@ import { QueueSection } from './components/QueueSection';
 import { SettingsPanel } from './components/SettingsPanel';
 import { FormatSelector } from './components/FormatSelector';
 import { TorrentFileSelector } from './components/TorrentFileSelector';
+import { AppShell } from './components/AppShell';
+import type { ConnectionState } from './components/AppShell';
 import type { Job, JobPriority, QueueSnapshot, AppSettings, TorrentFileSelection, JobNetworkPolicyOverride, SeedingPolicy } from './types';
 import {
   getJobs,
@@ -40,6 +42,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [formatJobId, setFormatJobId] = useState<string | null>(null);
   const [torrentJobId, setTorrentJobId] = useState<string | null>(null);
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
   const fetchQueue = useCallback(async () => {
     try {
@@ -83,7 +86,17 @@ function App() {
       fetchQueue();
     });
 
-    return () => es.close();
+    const handleOpen = () => setConnectionState('connected');
+    const handleError = () => setConnectionState('reconnecting');
+
+    es.addEventListener('open', handleOpen);
+    es.addEventListener('error', handleError);
+
+    return () => {
+      es.removeEventListener('open', handleOpen);
+      es.removeEventListener('error', handleError);
+      es.close();
+    };
   }, [fetchQueue]);
 
   const handleDownload = useCallback(async (
@@ -279,43 +292,15 @@ function App() {
   const torrentJob = torrentJobId ? jobs.find((j) => j.id === torrentJobId) : null;
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="header-brand">
-          <h1>⬇ GoDownloader</h1>
-          <span className="app-version">v0.6</span>
-        </div>
-
-        <div className="header-nav">
-          <div className="tab-group">
-            <button
-              type="button"
-              className={`tab-btn ${viewMode === 'downloads' ? 'active' : ''}`}
-              onClick={() => setViewMode('downloads')}
-            >
-              📥 All Downloads ({jobs.length})
-            </button>
-            <button
-              type="button"
-              className={`tab-btn ${viewMode === 'queue' ? 'active' : ''}`}
-              onClick={() => setViewMode('queue')}
-            >
-              ⏳ Smart Queue {queueSnapshot?.queuedDownloads ? `(${queueSnapshot.queuedDownloads})` : ''}
-            </button>
-          </div>
-
-          <button
-            type="button"
-            className="btn btn-secondary btn-settings"
-            onClick={() => setShowSettings(true)}
-            title="Settings"
-          >
-            ⚙️ Settings
-          </button>
-        </div>
-      </header>
-
-      <main className="app-main">
+    <>
+      <AppShell
+        viewMode={viewMode}
+        downloadCount={jobs.length}
+        queueCount={queueSnapshot?.queuedDownloads ?? 0}
+        connectionState={connectionState}
+        onViewModeChange={setViewMode}
+        onOpenSettings={() => setShowSettings(true)}
+      >
         <DownloadForm onSubmit={handleDownload} onUploadTorrent={handleUploadTorrent} disabled={loading} />
 
         {error && (
@@ -374,7 +359,7 @@ function App() {
             onCancel={handleCancel}
           />
         )}
-      </main>
+      </AppShell>
 
       {/* Settings Modal */}
       {showSettings && (
@@ -402,7 +387,7 @@ function App() {
           onClose={() => setTorrentJobId(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 
