@@ -8,6 +8,7 @@ import { TorrentFileSelector } from './components/TorrentFileSelector';
 import { AppShell } from './components/AppShell';
 import type { ConnectionState } from './components/AppShell';
 import type { Job, JobPriority, QueueSnapshot, AppSettings, TorrentFileSelection, JobNetworkPolicyOverride, SeedingPolicy } from './types';
+import { replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
 import {
   getJobs,
   createJob,
@@ -65,7 +66,7 @@ function App() {
   // Fetch initial data on mount
   useEffect(() => {
     getJobs()
-      .then(setJobs)
+      .then((loadedJobs) => setJobs((currentJobs) => replaceJobsFromInitialLoad(currentJobs, loadedJobs)))
       .catch((err) => setError(err.message));
     fetchQueue();
     fetchSettings();
@@ -74,15 +75,7 @@ function App() {
   // Connect SSE for live progress
   useEffect(() => {
     const es = connectSSE((_eventType: string, updatedJob: Job) => {
-      setJobs((prev) => {
-        const idx = prev.findIndex((j) => j.id === updatedJob.id);
-        if (idx === -1) {
-          return [updatedJob, ...prev];
-        }
-        const updated = [...prev];
-        updated[idx] = updatedJob;
-        return updated;
-      });
+      setJobs((currentJobs) => upsertJob(currentJobs, updatedJob));
       fetchQueue();
     });
 
@@ -114,13 +107,13 @@ function App() {
     try {
       if (sources.length === 1) {
         const job = await createJob(sources[0], priority, categoryId, destinationDir, conflictPolicy, networkPolicy, seedingPolicy, trackers);
-        setJobs((prev) => [job, ...prev]);
+        setJobs((currentJobs) => upsertJob(currentJobs, job));
       } else {
         const resp = await createBatchJobs(
           sources.map((s) => ({ source: s, priority, categoryId, destinationDir, conflictPolicy, networkPolicy, seedingPolicy, trackers }))
         );
         const newJobs = resp.items.map((it) => it.job).filter((j): j is Job => !!j);
-        setJobs((prev) => [...newJobs, ...prev]);
+        setJobs((currentJobs) => upsertJobs(currentJobs, newJobs));
       }
       fetchQueue();
     } catch (err: unknown) {
@@ -143,7 +136,7 @@ function App() {
     setError('');
     try {
       const job = await uploadTorrent(file, priority, categoryId, destinationDir, networkPolicy, seedingPolicy, trackers);
-      setJobs((prev) => [job, ...prev]);
+      setJobs((currentJobs) => upsertJob(currentJobs, job));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to upload torrent');
@@ -171,11 +164,8 @@ function App() {
 
     try {
       const resp = await bulkAction(action, ids);
-      const updatedMap = new Map<string, Job>();
-      resp.results.forEach((r) => {
-        if (r.job) updatedMap.set(r.jobId, r.job);
-      });
-      setJobs((prev) => prev.map((j) => updatedMap.get(j.id) || j));
+      const updatedJobs = resp.results.map((result) => result.job).filter((job): job is Job => !!job);
+      setJobs((currentJobs) => upsertJobs(currentJobs, updatedJobs));
       setSelectedIds(new Set());
       fetchQueue();
     } catch (err: unknown) {
@@ -186,7 +176,7 @@ function App() {
   const handleSetPriority = useCallback(async (jobId: string, priority: JobPriority) => {
     try {
       const updated = await setJobPriority(jobId, priority);
-      setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to change priority');
@@ -211,7 +201,7 @@ function App() {
   const handleCancel = useCallback(async (id: string) => {
     try {
       const updated = await cancelJob(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to cancel download');
@@ -221,7 +211,7 @@ function App() {
   const handlePause = useCallback(async (id: string) => {
     try {
       const updated = await pauseJob(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to pause download');
@@ -231,7 +221,7 @@ function App() {
   const handleResume = useCallback(async (id: string) => {
     try {
       const updated = await resumeJob(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to resume download');
@@ -241,7 +231,7 @@ function App() {
   const handleRetry = useCallback(async (id: string) => {
     try {
       const updated = await retryJob(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to retry download');
@@ -255,7 +245,7 @@ function App() {
   const handleFormatSelected = useCallback(async (jobId: string, formatId: string) => {
     try {
       const updated = await selectFormat(jobId, formatId);
-      setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       setFormatJobId(null);
       fetchQueue();
     } catch (err: unknown) {
@@ -270,7 +260,7 @@ function App() {
   const handleStartTorrent = useCallback(async (jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy) => {
     try {
       const updated = await startTorrent(jobId, files, seedingPolicy);
-      setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       setTorrentJobId(null);
       fetchQueue();
     } catch (err: unknown) {
@@ -281,7 +271,7 @@ function App() {
   const handleStopSeeding = useCallback(async (id: string) => {
     try {
       const updated = await stopSeeding(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((currentJobs) => upsertJob(currentJobs, updated));
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to stop seeding');

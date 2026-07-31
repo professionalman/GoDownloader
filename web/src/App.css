@@ -318,6 +318,27 @@
   .shell-main {
     padding: 0.875rem;
   }
+
+  .form-action-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .priority-selector {
+    justify-content: space-between;
+  }
+
+  .form-action-bar .button-group {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-action-bar .button-group .btn {
+    min-width: 0;
+    padding-right: 0.75rem;
+    padding-left: 0.75rem;
+  }
 }
 
 @media (max-width: 27rem) {
