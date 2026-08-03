@@ -34,10 +34,15 @@ type qbTorrentProperties struct {
 type qbTracker struct {
 	URL    string `json:"url"`
 	Status int    `json:"status"`
+	Msg    string `json:"msg"`
 	Tier   int    `json:"tier"`
 }
 
 type qbPreferences struct {
+	DHT                  bool   `json:"dht"`
+	PEX                  bool   `json:"pex"`
+	LSD                  bool   `json:"lsd"`
+	NetworkInterface     string `json:"bittorrent_network_interface"`
 	ProxyType            int    `json:"proxy_type"`
 	ProxyIP              string `json:"proxy_ip"`
 	ProxyPort            int    `json:"proxy_port"`

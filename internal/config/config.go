@@ -8,18 +8,19 @@ import (
 
 // Config holds the application configuration.
 type Config struct {
-	ListenAddr   string
-	DownloadDir  string
-	Aria2RPCURL  string
-	Aria2Secret  string
-	WebDir       string
-	YtdlpPath    string
-	FFmpegPath   string
-	QBitURL      string
-	QBitUsername string
-	QBitPassword string
-	QBitTimeout  int
-	DataDir      string
+	ListenAddr                 string
+	DownloadDir                string
+	Aria2RPCURL                string
+	Aria2Secret                string
+	WebDir                     string
+	YtdlpPath                  string
+	FFmpegPath                 string
+	QBitURL                    string
+	QBitUsername               string
+	QBitPassword               string
+	QBitTimeout                int
+	QBitMetadataTimeoutSeconds int
+	DataDir                    string
 }
 
 // New creates a Config populated from environment variables with sensible defaults.
@@ -44,19 +45,28 @@ func New() *Config {
 		qbitTimeout = 30
 	}
 
+	qbitMetaTimeout, _ := strconv.Atoi(getEnv("QBIT_METADATA_TIMEOUT_SECONDS", "300"))
+	if qbitMetaTimeout < 10 {
+		qbitMetaTimeout = 300
+	}
+	if qbitMetaTimeout > 3600 {
+		qbitMetaTimeout = 3600
+	}
+
 	return &Config{
-		ListenAddr:   getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
-		DownloadDir:  absDir,
-		Aria2RPCURL:  getEnv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc"),
-		Aria2Secret:  getEnv("ARIA2_SECRET", ""),
-		WebDir:       getEnv("WEB_DIR", "./web/dist"),
-		YtdlpPath:    getEnv("YTDLP_PATH", "yt-dlp"),
-		FFmpegPath:   getEnv("FFMPEG_PATH", ""),
-		QBitURL:      getEnv("QBIT_URL", "http://127.0.0.1:8081"),
-		QBitUsername: getEnv("QBIT_USERNAME", "admin"),
-		QBitPassword: getEnv("QBIT_PASSWORD", ""),
-		QBitTimeout:  qbitTimeout,
-		DataDir:      absDataDir,
+		ListenAddr:                 getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
+		DownloadDir:                absDir,
+		Aria2RPCURL:                getEnv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc"),
+		Aria2Secret:                getEnv("ARIA2_SECRET", ""),
+		WebDir:                     getEnv("WEB_DIR", "./web/dist"),
+		YtdlpPath:                  getEnv("YTDLP_PATH", "yt-dlp"),
+		FFmpegPath:                 getEnv("FFMPEG_PATH", ""),
+		QBitURL:                    getEnv("QBIT_URL", "http://127.0.0.1:8081"),
+		QBitUsername:               getEnv("QBIT_USERNAME", "admin"),
+		QBitPassword:               getEnv("QBIT_PASSWORD", ""),
+		QBitTimeout:                qbitTimeout,
+		QBitMetadataTimeoutSeconds: qbitMetaTimeout,
+		DataDir:                    absDataDir,
 	}
 }
 

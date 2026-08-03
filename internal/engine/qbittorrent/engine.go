@@ -287,7 +287,7 @@ func (e *Engine) AddMagnet(ctx context.Context, magnet, savePath string, jobID s
 		return "", fmt.Errorf("failed to extract info hash from magnet: %w", err)
 	}
 
-	err = e.client.AddMagnet(ctx, magnet, savePath, CategoryName, []string{jobID}, true)
+	err = e.client.AddMagnet(ctx, magnet, savePath, CategoryName, []string{jobID}, false)
 	if err != nil {
 		return "", err
 	}
@@ -398,4 +398,30 @@ func (e *Engine) GetTorrentInfo(ctx context.Context, infoHash string) (*job.Torr
 
 func extractMagnetHash(magnet string) (string, error) {
 	return job.ExtractMagnetHash(magnet)
+}
+
+type DiscoveryDiagnostics struct {
+	DHTEnabled       bool   `json:"dhtEnabled"`
+	PEXEnabled       bool   `json:"pexEnabled"`
+	LSDEnabled       bool   `json:"lsdEnabled"`
+	NetworkInterface string `json:"networkInterface"`
+	ProxyMode        string `json:"proxyMode"`
+}
+
+func (e *Engine) GetDiscoveryDiagnostics(ctx context.Context) (*DiscoveryDiagnostics, error) {
+	prefs, err := e.client.GetPreferences(ctx)
+	if err != nil {
+		return nil, err
+	}
+	proxyMode := "disabled"
+	if prefs.ProxyType > 0 {
+		proxyMode = "custom"
+	}
+	return &DiscoveryDiagnostics{
+		DHTEnabled:       prefs.DHT,
+		PEXEnabled:       prefs.PEX,
+		LSDEnabled:       prefs.LSD,
+		NetworkInterface: prefs.NetworkInterface,
+		ProxyMode:        proxyMode,
+	}, nil
 }

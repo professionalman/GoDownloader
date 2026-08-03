@@ -37,6 +37,8 @@ type Manager struct {
 	trackerEntries ITrackerEntryProvider
 	scheduler      *Scheduler
 
+	metadataTimeoutSeconds int
+
 	mu              sync.RWMutex
 	activeJobs      map[string]*Job // id -> job (in-memory cache for active jobs)
 	activeCancels   map[string]context.CancelFunc
@@ -54,18 +56,40 @@ func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, dow
 		dDir = dataDir[0]
 	}
 	m := &Manager{
-		repo:          repo,
-		engines:       engines,
-		bus:           bus,
-		downloadDir:   downloadDir,
-		dataDir:       dDir,
-		torrentRepo:   torrentRepo,
-		activeJobs:    make(map[string]*Job),
-		activeCancels: make(map[string]context.CancelFunc),
-		appliedLimits: make(map[string]int64),
-		terminalLocks: make(map[string]*sync.Mutex),
+		repo:                   repo,
+		engines:                engines,
+		bus:                    bus,
+		downloadDir:            downloadDir,
+		dataDir:                dDir,
+		torrentRepo:            torrentRepo,
+		metadataTimeoutSeconds: 300,
+		activeJobs:             make(map[string]*Job),
+		activeCancels:          make(map[string]context.CancelFunc),
+		appliedLimits:          make(map[string]int64),
+		terminalLocks:          make(map[string]*sync.Mutex),
 	}
 	return m
+}
+
+func (m *Manager) SetMetadataTimeoutSeconds(sec int) {
+	if sec < 1 {
+		sec = 300
+	}
+	if sec > 3600 {
+		sec = 3600
+	}
+	m.mu.Lock()
+	m.metadataTimeoutSeconds = sec
+	m.mu.Unlock()
+}
+
+func (m *Manager) getMetadataTimeoutSeconds() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.metadataTimeoutSeconds <= 0 {
+		return 300
+	}
+	return m.metadataTimeoutSeconds
 }
 
 // GetDefaultDownloadDir returns the manager's fallback default download directory.
@@ -928,7 +952,6 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		return
 	}
 
-	// Add torrent to qBittorrent (stopped)
 	saveDir := j.DestinationDir
 	if saveDir == "" {
 		saveDir = m.downloadDir
@@ -962,7 +985,6 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		rec, err := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, infoHash)
 		if err != nil {
 			log.Printf("acquireTorrentMetadata: active job lookup failed for job %s (infoHash=%s): %v", jobID, infoHash, err)
-			// Ownership lookup failed due to DB error. Fail closed without calling RemoveTorrent to prevent deleting an existing active torrent.
 			errText := fmt.Sprintf("failed to verify torrent ownership: %v", err)
 			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
 			rec = cloneTorrentRecord(rec)
@@ -984,8 +1006,6 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		}
 		if rec != nil && rec.JobID != jobID {
 			log.Printf("acquireTorrentMetadata: duplicate info hash %s detected for job %s (already managed by active job %s)", infoHash, jobID, rec.JobID)
-			// DO NOT call RemoveTorrent(infoHash) because qBittorrent deduplicates by infoHash!
-			// DO NOT delete torrentFilePath! Preserve new job's .torrent file and TorrentJobRecord so Retry() remains possible after original job completes.
 			errTxt := fmt.Sprintf("a torrent with info hash %s is already managed by job %s", infoHash, rec.JobID)
 			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
 			rec = cloneTorrentRecord(rec)
@@ -1007,18 +1027,28 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		}
 	}
 
-	// Poll for metadata with cancellation support & file readiness validation
-	var metadata *TorrentInfo
+	timeoutSecs := m.getMetadataTimeoutSeconds()
+	timeoutCh := time.After(time.Duration(timeoutSecs) * time.Second)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	timeoutCh := time.After(120 * time.Second)
+	var metadata *TorrentInfo
+	var lastState string
+	var seeders int
+	var leechers int
+	var wasPaused bool
+	var errorState string
+	var disappeared bool
+	var trackerError string
 
 loop:
 	for {
 		select {
 		case <-ctx.Done():
 			log.Printf("acquireTorrentMetadata: job %s background task cancelled", jobID)
+			if infoHash != "" {
+				_ = torrentEng.RemoveTorrent(context.Background(), infoHash, false)
+			}
 			return
 		case <-timeoutCh:
 			break loop
@@ -1026,27 +1056,88 @@ loop:
 			current, err := m.repo.GetByID(ctx, jobID)
 			if err != nil || current == nil || current.Status == StatusCancelled {
 				log.Printf("acquireTorrentMetadata: job %s cancelled in DB", jobID)
+				if infoHash != "" {
+					_ = torrentEng.RemoveTorrent(context.Background(), infoHash, false)
+				}
 				return
 			}
 
-			info, err := torrentEng.GetTorrentInfo(ctx, infoHash)
-			if err == nil && info != nil && info.Name != "" && info.Name != infoHash {
-				files, errFiles := torrentEng.GetFiles(ctx, infoHash)
-				if errFiles == nil && len(files) > 0 {
-					metadata = info
+			status, errStatus := torrentEng.Status(ctx, j)
+			if errStatus == nil && status != nil {
+				lastState = string(status.Status)
+				if status.Status == StatusFailed || lastState == "error" || lastState == "missingFiles" {
+					errorState = lastState
 					break loop
+				}
+				if lastState == "pausedDL" || lastState == "stoppedDL" || status.Status == StatusPaused {
+					wasPaused = true
+				}
+			}
+
+			info, err := torrentEng.GetTorrentInfo(ctx, infoHash)
+			if err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "not found") {
+					disappeared = true
+					break loop
+				}
+				continue
+			}
+
+			if info != nil {
+				seeders = info.Seeders
+				leechers = info.Leechers
+
+				if info.Name != "" && info.Name != infoHash {
+					files, errFiles := torrentEng.GetFiles(ctx, infoHash)
+					if errFiles == nil && len(files) > 0 {
+						metadata = info
+						// Immediately stop torrent download before file selection
+						_ = torrentEng.StopDownload(ctx, infoHash)
+						break loop
+					}
 				}
 			}
 		}
 	}
 
 	if metadata == nil {
+		var normErr string
+		if disappeared {
+			normErr = "torrent disappeared from qBittorrent"
+		} else if errorState != "" {
+			normErr = fmt.Sprintf("qBittorrent returned error state: %s", errorState)
+		} else if wasPaused || lastState == "pausedDL" || lastState == "stoppedDL" {
+			normErr = "metadata timed out while torrent was paused"
+		} else if trackerError != "" {
+			normErr = fmt.Sprintf("tracker reported an error: %s", trackerError)
+		} else {
+			normErr = fmt.Sprintf("metadata timed out with zero connected peers (%d seeds, %d leechers)", seeders, leechers)
+		}
+
+		log.Printf("acquireTorrentMetadata: job %s metadata acquisition failed (infoHash=%s): %s", jobID, infoHash, normErr)
+
+		// Persist retry info before removing torrent from qBittorrent
+		if m.torrentRepo != nil && infoHash != "" {
+			rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+			rec = cloneTorrentRecord(rec)
+			if rec == nil {
+				rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: j.SeedingPolicy, CustomTrackers: j.CustomTrackers}
+			}
+			rec.InfoHash = infoHash
+			rec.TorrentFilePath = torrentFilePath
+			_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
+		}
+
+		j.EngineID = infoHash
 		j.Status = StatusFailed
-		j.Error = "Timed out waiting for torrent metadata from peers"
+		j.Error = normErr
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobFailed, j)
-		torrentEng.RemoveTorrent(ctx, infoHash, false)
+
+		if infoHash != "" {
+			_ = torrentEng.RemoveTorrent(ctx, infoHash, false)
+		}
 		return
 	}
 
@@ -1054,6 +1145,9 @@ loop:
 	current, err := m.repo.GetByID(ctx, jobID)
 	if err != nil || current == nil || current.Status == StatusCancelled {
 		log.Printf("acquireTorrentMetadata: job %s was cancelled before completion", jobID)
+		if infoHash != "" {
+			_ = torrentEng.RemoveTorrent(context.Background(), infoHash, false)
+		}
 		return
 	}
 
@@ -1102,7 +1196,7 @@ loop:
 	}
 
 	m.publish(EventJobUpdated, j)
-	log.Printf("acquireTorrentMetadata: job %s metadata acquired: %s (%d files)", jobID, metadata.Name, 0)
+	log.Printf("acquireTorrentMetadata: metadata acquired for job %s (infoHash=%s): %s", jobID, infoHash, metadata.Name)
 }
 
 // StartTorrent starts a torrent download after file selection.

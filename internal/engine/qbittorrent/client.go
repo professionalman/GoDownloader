@@ -281,6 +281,9 @@ func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category strin
 	}
 	if stopped {
 		data.Set("stopped", "true")
+	} else {
+		data.Set("stopped", "false")
+		data.Set("stop_condition", "MetadataReceived")
 	}
 
 	resp, err := c.doAuthenticatedRequest(ctx, "POST", "/api/v2/torrents/add", []byte(data.Encode()), "application/x-www-form-urlencoded")
