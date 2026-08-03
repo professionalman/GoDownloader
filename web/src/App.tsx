@@ -250,6 +250,7 @@ function App() {
       fetchQueue();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to select format');
+      throw err;
     }
   }, [fetchQueue]);
 
