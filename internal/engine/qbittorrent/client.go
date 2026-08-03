@@ -441,6 +441,12 @@ func (c *Client) postForm(ctx context.Context, path string, data url.Values) err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		lr := io.LimitReader(resp.Body, 4096)
+		bodyBytes, _ := io.ReadAll(lr)
+		bodyStr := strings.TrimSpace(string(bodyBytes))
+		if bodyStr != "" {
+			return fmt.Errorf("%s failed with status %d: %s", path, resp.StatusCode, bodyStr)
+		}
 		return fmt.Errorf("%s failed with status: %d", path, resp.StatusCode)
 	}
 	return nil
@@ -501,6 +507,7 @@ func (c *Client) SetShareLimits(ctx context.Context, hash string, ratio float64,
 		"ratioLimit":               {strconv.FormatFloat(ratio, 'f', -1, 64)},
 		"seedingTimeLimit":         {strconv.FormatInt(seedingMinutes, 10)},
 		"inactiveSeedingTimeLimit": {"-1"},
+		"shareLimitAction":         {"-1"},
 	}
 	return c.postForm(ctx, "/api/v2/torrents/setShareLimits", data)
 }

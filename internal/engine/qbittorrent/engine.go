@@ -204,9 +204,15 @@ func (e *Engine) ApplySeedingPolicy(ctx context.Context, j *job.Job, policy netw
 	if j.EngineID == "" {
 		return errors.New("missing persisted torrent hash")
 	}
+	if policy.Mode == networkpolicy.SeedingModeNone {
+		return nil
+	}
 	ratio := float64(-1)
 	minutes := int64(-1)
 	switch policy.Mode {
+	case networkpolicy.SeedingModeUnlimited:
+		ratio = -1
+		minutes = -1
 	case networkpolicy.SeedingModeRatio:
 		ratio = *policy.RatioLimit
 	case networkpolicy.SeedingModeDuration:

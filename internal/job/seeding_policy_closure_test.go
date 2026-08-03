@@ -697,3 +697,64 @@ func TestHydrateTorrentState_PointerIndependence(t *testing.T) {
 		t.Fatalf("pointer fields in hydrated job were mutated when local source variables changed: %+v", j)
 	}
 }
+
+func TestStartTorrentWithPolicy_ModeNone_DoesNotCallApplySeedingPolicyAndProceeds(t *testing.T) {
+	manager, _, torrentRepo, _, engine, j := setupSeedingPolicyJob(t, StatusAwaitingSelection)
+	engine.getFilesFunc = func(hash string) ([]TorrentFile, error) {
+		return []TorrentFile{{Index: 0, Path: "file1.mp4", Size: 1024, Priority: PriorityNormal, Selected: true}}, nil
+	}
+
+	selections := []TorrentFileSelection{{Index: 0, Priority: PriorityNormal}}
+	policy := networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone}
+
+	startedJ, err := manager.StartTorrentWithPolicy(context.Background(), j.ID, selections, policy)
+	if err != nil {
+		t.Fatalf("expected StartTorrentWithPolicy to succeed for mode none, got %v", err)
+	}
+
+	if startedJ.Status != StatusQueued && startedJ.Status != StatusDownloading {
+		t.Fatalf("expected started job status to be queued or downloading, got %s", startedJ.Status)
+	}
+
+	if startedJ.SeedAfterComplete {
+		t.Fatalf("expected SeedAfterComplete=false for mode none, got true")
+	}
+
+	durableRecord, _ := torrentRepo.GetTorrentJob(context.Background(), j.ID)
+	if durableRecord.SeedingPolicy.Mode != networkpolicy.SeedingModeNone || durableRecord.SeedAfterComplete {
+		t.Fatalf("expected persisted record to have mode none and SeedAfterComplete=false, got %+v", durableRecord)
+	}
+}
+
+func TestStartTorrentWithPolicy_SeedingPolicyFailure_DoesNotEnqueueOrLoseSelections(t *testing.T) {
+	manager, repo, _, _, engine, j := setupSeedingPolicyJob(t, StatusAwaitingSelection)
+	engine.getFilesFunc = func(hash string) ([]TorrentFile, error) {
+		return []TorrentFile{{Index: 0, Path: "file1.mp4", Size: 1024, Priority: PriorityNormal, Selected: true}}, nil
+	}
+	engine.applyFailure = 1
+
+	selections := []TorrentFileSelection{{Index: 0, Priority: PriorityNormal}}
+	ratioVal := 1.5
+	policy := networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeRatio, RatioLimit: &ratioVal}
+
+	_, err := manager.StartTorrentWithPolicy(context.Background(), j.ID, selections, policy)
+	if err == nil {
+		t.Fatal("expected StartTorrentWithPolicy to fail when ApplySeedingPolicy returns error")
+	}
+
+	appErr, ok := err.(*AppError)
+	if !ok || appErr.Code != ErrNetworkSettingApplicationFailed {
+		t.Fatalf("expected ErrNetworkSettingApplicationFailed, got %#v", err)
+	}
+
+	// Verify job remains in StatusAwaitingSelection in DB
+	durableJob, _ := repo.GetByID(context.Background(), j.ID)
+	if durableJob.Status != StatusAwaitingSelection {
+		t.Fatalf("expected job to remain StatusAwaitingSelection on seeding failure, got %s", durableJob.Status)
+	}
+
+	// Verify job was NOT enqueued
+	if activeJ := manager.GetActiveJobs()[j.ID]; activeJ != nil && activeJ.Status != StatusAwaitingSelection {
+		t.Fatalf("expected job to NOT be active/enqueued on seeding failure, got status %s", activeJ.Status)
+	}
+}
