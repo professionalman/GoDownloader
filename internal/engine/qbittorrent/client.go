@@ -41,9 +41,29 @@ func NewClient(baseURL, username, password string, timeout time.Duration) *Clien
 	}
 }
 
+func (c *Client) hasValidSessionCookie(reqURL *url.URL, respCookies []*http.Cookie) bool {
+	var cookies []*http.Cookie
+	if reqURL != nil && c.httpClient != nil && c.httpClient.Jar != nil {
+		cookies = append(cookies, c.httpClient.Jar.Cookies(reqURL)...)
+	}
+	cookies = append(cookies, respCookies...)
+
+	for _, cookie := range cookies {
+		if cookie == nil || cookie.Value == "" {
+			continue
+		}
+		if cookie.Name == "SID" || strings.HasPrefix(cookie.Name, "QBT_SID_") {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) Login(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.authenticated = false
 
 	data := url.Values{}
 	data.Set("username", c.username)
@@ -62,13 +82,30 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return errors.New("login failed: invalid credentials")
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("login failed with status: %s", resp.Status)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "Ok." {
-		return errors.New("login failed: invalid credentials")
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("login failed to read response body: %w", err)
+	}
+
+	if !c.hasValidSessionCookie(req.URL, resp.Cookies()) {
+		return errors.New("login failed: missing session cookie")
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if strings.TrimSpace(string(body)) != "Ok." {
+			return errors.New("login failed: invalid credentials")
+		}
+	case http.StatusNoContent:
+		// 204 No Content is valid if a valid session cookie exists
 	}
 
 	c.authenticated = true
@@ -108,7 +145,7 @@ func (c *Client) doAuthenticatedRequest(ctx context.Context, method, path string
 		return nil, err
 	}
 
-	if resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
 		if err := c.Login(ctx); err != nil {
 			return nil, err
@@ -122,9 +159,9 @@ func (c *Client) doAuthenticatedRequest(ctx context.Context, method, path string
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode == http.StatusForbidden {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 			resp.Body.Close()
-			return nil, errors.New("forbidden: authentication failed even after retry")
+			return nil, fmt.Errorf("authentication failed even after retry (status: %d)", resp.StatusCode)
 		}
 	}
 

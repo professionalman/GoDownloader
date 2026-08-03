@@ -15,6 +15,7 @@ func TestSeedingPolicyRoundsNativeMinutesUp(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v2/auth/login":
+			w.Header().Set("Set-Cookie", "SID=12345; Path=/; HttpOnly")
 			_, _ = w.Write([]byte("Ok."))
 		case "/api/v2/torrents/setShareLimits":
 			if err := r.ParseForm(); err != nil {
@@ -45,6 +46,7 @@ func TestPerTorrentLimitUsesOnlyPersistedJobHash(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v2/auth/login":
+			w.Header().Set("Set-Cookie", "SID=12345; Path=/; HttpOnly")
 			_, _ = w.Write([]byte("Ok."))
 		case "/api/v2/torrents/setDownloadLimit":
 			_ = r.ParseForm()

@@ -181,6 +181,7 @@ func TestClient_403_Reauth(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v2/auth/login" {
 			authCount++
+			w.Header().Set("Set-Cookie", "SID=12345; Path=/; HttpOnly")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("Ok."))
 			return
@@ -272,6 +273,7 @@ func TestClient_ValidateCompatibility(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/api/v2/auth/login" {
+					w.Header().Set("Set-Cookie", "SID=12345; Path=/; HttpOnly")
 					w.WriteHeader(http.StatusOK)
 					w.Write([]byte("Ok."))
 					return
