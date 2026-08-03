@@ -91,7 +91,11 @@ func (r *SQLiteTorrentRepository) CreateTorrentJob(ctx context.Context, rec *job
 		seedInt = 1
 	}
 	if rec.SeedingPolicy.Mode == "" {
-		rec.SeedingPolicy.Mode = networkpolicy.SeedingModeNone
+		if rec.SeedAfterComplete {
+			rec.SeedingPolicy.Mode = networkpolicy.SeedingModeUnlimited
+		} else {
+			rec.SeedingPolicy.Mode = networkpolicy.SeedingModeNone
+		}
 	}
 	ratio, duration, started, trackersJSON, marshalErr := torrentPolicyValues(rec)
 	if marshalErr != nil {
@@ -128,6 +132,13 @@ func (r *SQLiteTorrentRepository) UpdateTorrentJob(ctx context.Context, rec *job
 	seedInt := 0
 	if rec.SeedAfterComplete {
 		seedInt = 1
+	}
+	if rec.SeedingPolicy.Mode == "" {
+		if rec.SeedAfterComplete {
+			rec.SeedingPolicy.Mode = networkpolicy.SeedingModeUnlimited
+		} else {
+			rec.SeedingPolicy.Mode = networkpolicy.SeedingModeNone
+		}
 	}
 	ratio, duration, started, trackersJSON, marshalErr := torrentPolicyValues(rec)
 	if marshalErr != nil {
@@ -210,10 +221,18 @@ func (r *SQLiteTorrentRepository) FinalizeTorrent(ctx context.Context, j *job.Jo
 	if err != nil {
 		return err
 	}
+	seedingMode := j.SeedingPolicy.Mode
+	if seedingMode == "" {
+		if j.SeedAfterComplete {
+			seedingMode = networkpolicy.SeedingModeUnlimited
+		} else {
+			seedingMode = networkpolicy.SeedingModeNone
+		}
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE torrent_jobs SET seed_after_complete=?,
 		seeding_mode=?, seed_ratio_limit=?, seed_time_limit_seconds=?,
 		seeding_stop_reason=?, seeding_reconcile_pending=0 WHERE job_id=?`,
-		j.SeedAfterComplete, j.SeedingPolicy.Mode, j.SeedingPolicy.RatioLimit,
+		j.SeedAfterComplete, seedingMode, j.SeedingPolicy.RatioLimit,
 		j.SeedingPolicy.TimeLimitSeconds, stopReason, j.ID)
 	if err != nil {
 		return err

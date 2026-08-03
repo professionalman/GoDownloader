@@ -4,8 +4,22 @@ import { getTorrentFiles } from '../api';
 
 interface TorrentFileSelectorProps {
   job: Job;
-  onStart: (jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy) => void;
+  onStart: (jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy) => Promise<void>;
   onClose: () => void;
+}
+
+export function normalizeSeedingMode(value: unknown): SeedingMode {
+  if (typeof value !== 'string') return 'none';
+  switch (value) {
+    case 'none':
+    case 'unlimited':
+    case 'ratio':
+    case 'duration':
+    case 'ratio_or_duration':
+      return value;
+    default:
+      return 'none';
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -19,7 +33,9 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
   const [files, setFiles] = useState<TorrentFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [seedingMode, setSeedingMode] = useState<SeedingMode>(job.seedingPolicy?.mode ?? 'none');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const [seedingMode, setSeedingMode] = useState<SeedingMode>(() => normalizeSeedingMode(job.seedingPolicy?.mode));
   const [ratioLimit, setRatioLimit] = useState(job.seedingPolicy?.ratioLimit ?? 1);
   const [durationHours, setDurationHours] = useState((job.seedingPolicy?.timeLimitSeconds ?? 86400) / 3600);
 
@@ -47,15 +63,30 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
     setFiles(prev => prev.map(f => ({ ...f, selected })));
   };
 
-  const handleStart = () => {
+  const handleStart = async () => {
+    if (isSubmitting || selectedCount === 0) return;
+    setIsSubmitting(true);
+    setSubmitError('');
+
     const selection = files.map(f => ({
       index: f.index,
       priority: f.selected ? f.priority : ('skip' as TorrentFilePriority)
     }));
+
     const policy: SeedingPolicy = { mode: seedingMode };
-    if (seedingMode === 'ratio' || seedingMode === 'ratio_or_duration') policy.ratioLimit = ratioLimit;
-    if (seedingMode === 'duration' || seedingMode === 'ratio_or_duration') policy.timeLimitSeconds = Math.round(durationHours * 3600);
-    onStart(job.id, selection, policy);
+    if (seedingMode === 'ratio' || seedingMode === 'ratio_or_duration') {
+      policy.ratioLimit = ratioLimit;
+    }
+    if (seedingMode === 'duration' || seedingMode === 'ratio_or_duration') {
+      policy.timeLimitSeconds = Math.round(durationHours * 3600);
+    }
+
+    try {
+      await onStart(job.id, selection, policy);
+    } catch (err: unknown) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+      setIsSubmitting(false);
+    }
   };
 
   const selectedCount = files.filter(f => f.selected).length;
@@ -67,6 +98,7 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
       <div className="modal-content torrent-modal">
         <h2>Select Files for {job.name}</h2>
         {error && <div className="app-error">{error}</div>}
+        {submitError && <div className="app-error">{submitError}</div>}
         
         {loading ? (
           <div style={{ textAlign: 'center', padding: '20px' }}>Loading files...</div>
@@ -74,8 +106,8 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
           <>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
               <div>
-                <button className="btn btn-sm btn-secondary" onClick={() => selectAll(true)} style={{ marginRight: '8px' }}>Select All</button>
-                <button className="btn btn-sm btn-secondary" onClick={() => selectAll(false)}>Deselect All</button>
+                <button className="btn btn-sm btn-secondary" onClick={() => selectAll(true)} style={{ marginRight: '8px' }} disabled={isSubmitting}>Select All</button>
+                <button className="btn btn-sm btn-secondary" onClick={() => selectAll(false)} disabled={isSubmitting}>Deselect All</button>
               </div>
               <div>
                 Selected: {selectedCount}/{files.length} ({formatBytes(selectedSize)} / {formatBytes(totalSize)})
@@ -86,7 +118,7 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
               <table className="format-table torrent-file-table">
                 <thead>
                   <tr>
-                    <th><input type="checkbox" onChange={(e) => selectAll(e.target.checked)} checked={selectedCount === files.length && files.length > 0} /></th>
+                    <th><input type="checkbox" onChange={(e) => selectAll(e.target.checked)} checked={selectedCount === files.length && files.length > 0} disabled={isSubmitting} /></th>
                     <th>File Path</th>
                     <th>Size</th>
                     <th>Priority</th>
@@ -96,7 +128,7 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
                   {files.map(f => (
                     <tr key={f.index}>
                       <td>
-                        <input type="checkbox" checked={f.selected} onChange={() => toggleSelection(f.index)} />
+                        <input type="checkbox" checked={f.selected} onChange={() => toggleSelection(f.index)} disabled={isSubmitting} />
                       </td>
                       <td style={{ wordBreak: 'break-all' }}>{f.path}</td>
                       <td>{formatBytes(f.size)}</td>
@@ -104,7 +136,7 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
                         <select
                           value={f.priority}
                           onChange={(e) => changePriority(f.index, e.target.value as TorrentFilePriority)}
-                          disabled={!f.selected}
+                          disabled={!f.selected || isSubmitting}
                           style={{ background: '#21262d', color: '#e1e4e8', border: '1px solid #30363d', borderRadius: '4px', padding: '2px 4px' }}
                         >
                           <option value="normal">Normal</option>
@@ -120,7 +152,12 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
             
             <div style={{ marginTop: '16px', display: 'grid', gap: '8px' }}>
               <label htmlFor="seeding-mode">Seeding policy</label>
-              <select id="seeding-mode" value={seedingMode} onChange={(e) => setSeedingMode(e.target.value as SeedingMode)}>
+              <select
+                id="seeding-mode"
+                value={seedingMode}
+                onChange={(e) => setSeedingMode(normalizeSeedingMode(e.target.value))}
+                disabled={isSubmitting}
+              >
                 <option value="none">Do not seed</option>
                 <option value="unlimited">Seed without a limit</option>
                 <option value="ratio">Stop at ratio</option>
@@ -128,10 +165,10 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
                 <option value="ratio_or_duration">Stop at ratio or duration</option>
               </select>
               {(seedingMode === 'ratio' || seedingMode === 'ratio_or_duration') && (
-                <label>Ratio target <input aria-label="Ratio target" type="number" min="0.01" max="1000" step="0.1" value={ratioLimit} onChange={(e) => setRatioLimit(Number(e.target.value))} /></label>
+                <label>Ratio target <input aria-label="Ratio target" type="number" min="0.01" max="1000" step="0.1" value={ratioLimit} onChange={(e) => setRatioLimit(Number(e.target.value))} disabled={isSubmitting} /></label>
               )}
               {(seedingMode === 'duration' || seedingMode === 'ratio_or_duration') && (
-                <label>Active seeding hours <input aria-label="Active seeding hours" type="number" min="0.01" max="87600" step="0.5" value={durationHours} onChange={(e) => setDurationHours(Number(e.target.value))} /></label>
+                <label>Active seeding hours <input aria-label="Active seeding hours" type="number" min="0.01" max="87600" step="0.5" value={durationHours} onChange={(e) => setDurationHours(Number(e.target.value))} disabled={isSubmitting} /></label>
               )}
             </div>
             <div style={{ fontSize: '0.78rem', opacity: 0.6, marginTop: '4px' }}>
@@ -139,9 +176,9 @@ export const TorrentFileSelector: React.FC<TorrentFileSelectorProps> = ({ job, o
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
-              <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary" onClick={handleStart} disabled={selectedCount === 0}>
-                Start Download
+              <button className="btn btn-secondary" onClick={onClose} disabled={isSubmitting}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleStart} disabled={selectedCount === 0 || isSubmitting}>
+                {isSubmitting ? 'Starting…' : 'Start Download'}
               </button>
             </div>
           </>

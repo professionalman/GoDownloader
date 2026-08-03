@@ -259,14 +259,10 @@ function App() {
   }, []);
 
   const handleStartTorrent = useCallback(async (jobId: string, files: TorrentFileSelection[], seedingPolicy: SeedingPolicy) => {
-    try {
-      const updated = await startTorrent(jobId, files, seedingPolicy);
-      setJobs((currentJobs) => upsertJob(currentJobs, updated));
-      setTorrentJobId(null);
-      fetchQueue();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to start torrent');
-    }
+    const updated = await startTorrent(jobId, files, seedingPolicy);
+    setJobs((currentJobs) => upsertJob(currentJobs, updated));
+    setTorrentJobId(null);
+    fetchQueue();
   }, [fetchQueue]);
 
   const handleStopSeeding = useCallback(async (id: string) => {

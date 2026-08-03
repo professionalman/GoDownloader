@@ -64,6 +64,12 @@ func TestSeedingModesAndTrackerSchemes(t *testing.T) {
 	if err := ValidateSeeding(SeedingPolicy{Mode: SeedingModeRatio}); err == nil {
 		t.Fatal("ratio without threshold should fail")
 	}
+	if err := ValidateSeeding(SeedingPolicy{Mode: ""}); err == nil || err.Error() != "invalid seeding mode" {
+		t.Fatalf("empty seeding mode must be rejected, got: %v", err)
+	}
+	if err := ValidateSeeding(SeedingPolicy{Mode: "invalid_unknown_mode"}); err == nil || err.Error() != "invalid seeding mode" {
+		t.Fatalf("unknown seeding mode must be rejected, got: %v", err)
+	}
 	values, err := ValidateTrackerURLs([]string{
 		"https://tracker.example/announce", "udp://tracker.example:80/announce",
 		"ws://tracker.example/announce", "wss://tracker.example/announce",

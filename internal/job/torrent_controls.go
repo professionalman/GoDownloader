@@ -234,7 +234,14 @@ func cloneTorrentRecord(record *TorrentJobRecord) *TorrentJobRecord {
 		return nil
 	}
 	copyRecord := *record
-	copyRecord.SeedingPolicy = cloneSeedingPolicy(record.SeedingPolicy)
+	if copyRecord.SeedingPolicy.Mode == "" {
+		if copyRecord.SeedAfterComplete {
+			copyRecord.SeedingPolicy.Mode = networkpolicy.SeedingModeUnlimited
+		} else {
+			copyRecord.SeedingPolicy.Mode = networkpolicy.SeedingModeNone
+		}
+	}
+	copyRecord.SeedingPolicy = cloneSeedingPolicy(copyRecord.SeedingPolicy)
 	copyRecord.SeedingStartedAt = cloneTimePointer(record.SeedingStartedAt)
 	copyRecord.CustomTrackers = append([]string(nil), record.CustomTrackers...)
 	return &copyRecord
@@ -262,7 +269,16 @@ func cloneTimePointer(value *time.Time) *time.Time {
 }
 
 func synchronizeJobSeedingState(j *Job, record *TorrentJobRecord) {
+	mode := record.SeedingPolicy.Mode
+	if mode == "" {
+		if record.SeedAfterComplete {
+			mode = networkpolicy.SeedingModeUnlimited
+		} else {
+			mode = networkpolicy.SeedingModeNone
+		}
+	}
 	j.SeedingPolicy = cloneSeedingPolicy(record.SeedingPolicy)
+	j.SeedingPolicy.Mode = mode
 	j.SeedAfterComplete = record.SeedAfterComplete
 	j.SeedingStartedAt = cloneTimePointer(record.SeedingStartedAt)
 	j.SeedingStopReason = record.SeedingStopReason

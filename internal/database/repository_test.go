@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"downloader/internal/job"
+	"downloader/internal/networkpolicy"
 )
 
 func setupTestDB(t *testing.T) (*DB, func()) {
@@ -511,4 +512,39 @@ func TestSQLite_Migrations(t *testing.T) {
 			t.Errorf("expected idx_torrent_jobs_info_hash index after V0.4 migration, got count %d, err=%v", idxCount, err)
 		}
 	})
+}
+
+func TestTorrentRepository_LegacyEmptySeedingModeHydration(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := NewSQLiteTorrentRepository(db)
+	ctx := context.Background()
+
+	// 1. Insert record with seeding_mode = '' and seed_after_complete = 0
+	_, err := db.conn.ExecContext(ctx, `INSERT INTO torrent_jobs (job_id, info_hash, name, total_size, seed_after_complete, torrent_file_path, seeding_mode, custom_trackers_json) VALUES (?, ?, ?, ?, 0, ?, '', '[]')`, "job-legacy-none", "hash1", "torrent1", 100, "file1.torrent")
+	if err != nil {
+		t.Fatalf("failed to insert legacy record: %v", err)
+	}
+
+	rec1, err := repo.GetTorrentJob(ctx, "job-legacy-none")
+	if err != nil {
+		t.Fatalf("GetTorrentJob failed: %v", err)
+	}
+	if rec1.SeedingPolicy.Mode != networkpolicy.SeedingModeNone {
+		t.Fatalf("expected legacy mode '' with seed_after_complete=0 to normalize to 'none', got %q", rec1.SeedingPolicy.Mode)
+	}
+
+	// 2. Insert record with seeding_mode = '' and seed_after_complete = 1
+	_, err = db.conn.ExecContext(ctx, `INSERT INTO torrent_jobs (job_id, info_hash, name, total_size, seed_after_complete, torrent_file_path, seeding_mode, custom_trackers_json) VALUES (?, ?, ?, ?, 1, ?, '', '[]')`, "job-legacy-unlimited", "hash2", "torrent2", 200, "file2.torrent")
+	if err != nil {
+		t.Fatalf("failed to insert legacy record: %v", err)
+	}
+
+	rec2, err := repo.GetTorrentJob(ctx, "job-legacy-unlimited")
+	if err != nil {
+		t.Fatalf("GetTorrentJob failed: %v", err)
+	}
+	if rec2.SeedingPolicy.Mode != networkpolicy.SeedingModeUnlimited {
+		t.Fatalf("expected legacy mode '' with seed_after_complete=1 to normalize to 'unlimited', got %q", rec2.SeedingPolicy.Mode)
+	}
 }

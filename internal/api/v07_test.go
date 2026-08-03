@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -95,5 +96,19 @@ func TestTorrentStartRejectsLegacyAndNormalizedSeedingTogether(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTorrentStartRejectsEmptyAndInvalidSeedingPolicyMode(t *testing.T) {
+	router, _, _ := setupAPITestRouter(t)
+	for _, mode := range []string{"", "invalid_mode"} {
+		body := fmt.Sprintf(`{"files":[{"index":0,"priority":"normal"}],"seedingPolicy":{"mode":%q}}`, mode)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/torrent/start", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("mode=%q expected 400, got status=%d body=%s", mode, rec.Code, rec.Body.String())
+		}
 	}
 }
