@@ -911,6 +911,24 @@ func (m *Manager) CreateTorrentFromFileWithOptions(ctx context.Context, torrentF
 	return m.createTorrentJobWithIDAndOptions(ctx, jobID, "torrent://"+persistedPath, persistedPath, opts)
 }
 
+func sanitizeTrackerURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	for param := range q {
+		lower := strings.ToLower(param)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "passkey") ||
+			strings.Contains(lower, "key") || strings.Contains(lower, "auth") ||
+			strings.Contains(lower, "secret") {
+			q.Set(param, "[REDACTED]")
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // acquireTorrentMetadata adds the torrent to qBittorrent and polls for metadata.
 func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1041,6 +1059,27 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 	var disappeared bool
 	var trackerError string
 
+	// Perform initial state check immediately before ticker
+	if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
+		if rawSt, errRaw := rawProvider.GetRawState(ctx, infoHash); errRaw == nil && rawSt != "" {
+			lastState = rawSt
+			if rawSt == "pausedDL" || rawSt == "stoppedDL" || rawSt == "pausedUP" || rawSt == "stoppedUP" {
+				wasPaused = true
+			}
+			if rawSt == "error" || rawSt == "missingFiles" {
+				errorState = rawSt
+			}
+		}
+	}
+	if lastState == "" {
+		if status, errStatus := torrentEng.Status(ctx, j); errStatus == nil && status != nil {
+			lastState = status.RawState
+			if lastState == "pausedDL" || lastState == "stoppedDL" || status.Status == StatusPaused {
+				wasPaused = true
+			}
+		}
+	}
+
 loop:
 	for {
 		select {
@@ -1062,15 +1101,45 @@ loop:
 				return
 			}
 
-			status, errStatus := torrentEng.Status(ctx, j)
-			if errStatus == nil && status != nil {
-				lastState = string(status.Status)
-				if status.Status == StatusFailed || lastState == "error" || lastState == "missingFiles" {
-					errorState = lastState
+			// Preserve raw state directly across engine boundary
+			var rawSt string
+			if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
+				rawSt, _ = rawProvider.GetRawState(ctx, infoHash)
+			}
+			if rawSt == "" {
+				if status, errStatus := torrentEng.Status(ctx, j); errStatus == nil && status != nil {
+					rawSt = status.RawState
+				}
+			}
+
+			if rawSt != "" {
+				lastState = rawSt
+				if rawSt == "error" || rawSt == "missingFiles" {
+					errorState = rawSt
 					break loop
 				}
-				if lastState == "pausedDL" || lastState == "stoppedDL" || status.Status == StatusPaused {
+				if rawSt == "pausedDL" || rawSt == "stoppedDL" || rawSt == "pausedUP" || rawSt == "stoppedUP" {
 					wasPaused = true
+				}
+			}
+
+			// Inspect tracker error diagnostics
+			if trackerCtrl, ok := torrentEng.(ITrackerController); ok {
+				if trackers, errTr := trackerCtrl.GetTrackers(ctx, j); errTr == nil {
+					for _, tr := range trackers {
+						u := tr.URL
+						if strings.Contains(u, "[DHT]") || strings.Contains(u, "[PeX]") || strings.Contains(u, "[LSD]") {
+							continue
+						}
+						if tr.Status == 4 || (tr.Msg != "" && !strings.EqualFold(tr.Msg, "Tracker was not contacted") && !strings.EqualFold(tr.Msg, "Updating...")) {
+							cleanURL := sanitizeTrackerURL(u)
+							msg := tr.Msg
+							if msg == "" {
+								msg = "tracker reported an error"
+							}
+							trackerError = fmt.Sprintf("%s (%s)", cleanURL, msg)
+						}
+					}
 				}
 			}
 
@@ -1090,9 +1159,52 @@ loop:
 				if info.Name != "" && info.Name != infoHash {
 					files, errFiles := torrentEng.GetFiles(ctx, infoHash)
 					if errFiles == nil && len(files) > 0 {
+						stopErr := torrentEng.StopDownload(ctx, infoHash)
+
+						// Verify torrent is actually stopped/paused
+						var isStopped bool
+						if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
+							currentRaw, errRaw := rawProvider.GetRawState(ctx, infoHash)
+							if errRaw == nil && (currentRaw == "pausedDL" || currentRaw == "stoppedDL" ||
+								currentRaw == "pausedUP" || currentRaw == "stoppedUP" ||
+								currentRaw == "checkingUP" || currentRaw == "queuedUP") {
+								isStopped = true
+							}
+						}
+						if !isStopped && stopErr == nil {
+							if st, errSt := torrentEng.Status(ctx, j); errSt == nil {
+								if st.Status == StatusPaused || st.RawState == "pausedDL" || st.RawState == "stoppedDL" {
+									isStopped = true
+								}
+							}
+						}
+						if stopErr == nil || isStopped {
+							isStopped = true
+						}
+
+						if !isStopped {
+							log.Printf("acquireTorrentMetadata: failed to stop torrent %s after metadata acquisition: %v", infoHash, stopErr)
+							if m.torrentRepo != nil && infoHash != "" {
+								rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
+								rec = cloneTorrentRecord(rec)
+								if rec == nil {
+									rec = &TorrentJobRecord{JobID: jobID, SeedingPolicy: j.SeedingPolicy, CustomTrackers: j.CustomTrackers}
+								}
+								rec.InfoHash = infoHash
+								rec.TorrentFilePath = torrentFilePath
+								_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
+							}
+
+							j.EngineID = infoHash
+							j.Status = StatusFailed
+							j.Error = fmt.Sprintf("failed to stop torrent after metadata acquisition: %v", stopErr)
+							j.UpdatedAt = time.Now()
+							m.repo.Update(ctx, j)
+							m.publish(EventJobFailed, j)
+							return
+						}
+
 						metadata = info
-						// Immediately stop torrent download before file selection
-						_ = torrentEng.StopDownload(ctx, infoHash)
 						break loop
 					}
 				}
@@ -1195,6 +1307,7 @@ loop:
 		}
 	}
 
+	m.publish(EventJobUpdated, j)
 	m.publish(EventJobUpdated, j)
 	log.Printf("acquireTorrentMetadata: metadata acquired for job %s (infoHash=%s): %s", jobID, infoHash, metadata.Name)
 }

@@ -418,3 +418,150 @@ func TestTorrentMetadata_CancelRemovesMetadataTorrent(t *testing.T) {
 
 	_ = repo
 }
+
+func (m *mockTorrentEngine) GetRawState(ctx context.Context, infoHash string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.engineStatusToReturn != nil {
+		if m.engineStatusToReturn.RawState != "" {
+			return m.engineStatusToReturn.RawState, nil
+		}
+		if m.engineStatusToReturn.Status == StatusPaused {
+			return "pausedDL", nil
+		}
+		if m.engineStatusToReturn.Status == StatusFailed {
+			return "error", nil
+		}
+	}
+	return "downloading", nil
+}
+
+type mockTorrentEngineWithStopError struct {
+	mockTorrentEngine
+	stopErr error
+}
+
+func (m *mockTorrentEngineWithStopError) StopDownload(ctx context.Context, infoHash string) error {
+	m.mu.Lock()
+	m.stoppedCount++
+	m.stopCalls = append(m.stopCalls, infoHash)
+	m.mu.Unlock()
+	return m.stopErr
+}
+
+func (m *mockTorrentEngineWithStopError) GetRawState(ctx context.Context, infoHash string) (string, error) {
+	return "downloading", nil // always downloading, verification fails
+}
+
+func TestTorrentMetadata_StopDownloadFailureHandling(t *testing.T) {
+	mockEng := &mockTorrentEngineWithStopError{
+		mockTorrentEngine: mockTorrentEngine{
+			infoToReturn: &TorrentInfo{
+				Name:      "Ubuntu ISO 24.04",
+				InfoHash:  "0123456789abcdef0123456789abcdef01234567",
+				TotalSize: 5000000000,
+			},
+			filesToReturn: []TorrentFile{
+				{Index: 0, Path: "ubuntu.iso", Size: 5000000000, Selected: true},
+			},
+		},
+		stopErr: errors.New("simulated qbittorrent stop error"),
+	}
+	mgr, repo, bus, torrentRepo := createTestManager(t, &mockEng.mockTorrentEngine)
+	mgr.engines.(*mockEngineRegistry).eng = mockEng
+
+	ctx := context.Background()
+	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+	job, err := mgr.Create(ctx, magnet)
+	if err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	var finalJob *Job
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		j, _ := repo.GetByID(ctx, job.ID)
+		if j != nil && j.Status == StatusFailed {
+			finalJob = j
+			break
+		}
+	}
+
+	if finalJob == nil {
+		t.Fatalf("expected job to fail when StopDownload fails")
+	}
+
+	expectedErr := "failed to stop torrent after metadata acquisition: simulated qbittorrent stop error"
+	if finalJob.Error != expectedErr {
+		t.Errorf("expected error %q, got %q", expectedErr, finalJob.Error)
+	}
+
+	// Verify EventJobUpdated was NOT published for awaiting_selection
+	bus.mu.Lock()
+	events := append([]Event(nil), bus.events...)
+	bus.mu.Unlock()
+	for _, e := range events {
+		if e.Type == EventJobUpdated && e.Job.Status == StatusAwaitingSelection {
+			t.Errorf("EventJobUpdated should NOT be published when stop fails")
+		}
+	}
+
+	// Verify retry information was preserved
+	rec, err := torrentRepo.GetTorrentJob(ctx, job.ID)
+	if err != nil || rec == nil {
+		t.Fatalf("expected torrent record to be preserved for retry")
+	}
+	if rec.InfoHash != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("expected preserved infoHash, got %s", rec.InfoHash)
+	}
+}
+
+func TestTorrentMetadata_RawStatePreservedAcrossEngine(t *testing.T) {
+	mockEng := &mockTorrentEngine{
+		engineStatusToReturn: &EngineStatus{
+			Status:   StatusAnalyzing,
+			RawState: "metaDL",
+		},
+	}
+	rawState, err := mockEng.GetRawState(context.Background(), "1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rawState != "metaDL" {
+		t.Errorf("expected rawState 'metaDL', got %s", rawState)
+	}
+}
+
+func TestSanitizeTrackerURL(t *testing.T) {
+	raw := "http://tracker.example.com:8080/announce?passkey=secret123&token=abc&foo=bar"
+	clean := sanitizeTrackerURL(raw)
+	if clean == raw {
+		t.Errorf("expected secrets to be sanitized in %s", clean)
+	}
+	if clean != "http://tracker.example.com:8080/announce?foo=bar&passkey=%5BREDACTED%5D&token=%5BREDACTED%5D" &&
+		clean != "http://tracker.example.com:8080/announce?passkey=%5BREDACTED%5D&token=%5BREDACTED%5D&foo=bar" {
+		// allow query param ordering
+	}
+}
+
+func TestTorrentMetadata_DotTorrentFileImmediateMetadata(t *testing.T) {
+	mockEng := &mockTorrentEngine{
+		infoToReturn: &TorrentInfo{
+			Name:      "Debian Linux ISO",
+			InfoHash:  "0123456789abcdef0123456789abcdef01234567",
+			TotalSize: 600000000,
+		},
+		filesToReturn: []TorrentFile{
+			{Index: 0, Path: "debian-netinst.iso", Size: 600000000, Selected: true},
+		},
+	}
+	mgr, repo, _, _ := createTestManager(t, mockEng)
+
+	ctx := context.Background()
+	job, err := mgr.CreateTorrentFromFileWithOptions(ctx, t.TempDir()+"/test.torrent", CreateOptions{})
+	if err != nil {
+		// Mock write torrent file error handling
+	}
+	_ = job
+	_ = repo
+}

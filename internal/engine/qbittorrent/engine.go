@@ -103,6 +103,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 
 	status := &job.EngineStatus{
 		Status:              mapQBState(info.State),
+		RawState:            info.State,
 		Progress:            normalizeProgress(info.Progress),
 		SpeedBytesPerSecond: info.DLSpeed,
 		CompletedBytes:      info.CompletedSize,
@@ -120,6 +121,14 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 		status.TorrentPrivate = &properties.IsPrivate
 	}
 	return status, nil
+}
+
+func (e *Engine) GetRawState(ctx context.Context, infoHash string) (string, error) {
+	info, err := e.client.GetTorrentInfo(ctx, infoHash)
+	if err != nil {
+		return "", err
+	}
+	return info.State, nil
 }
 
 func (e *Engine) SetDownloadLimit(ctx context.Context, j *job.Job, bytesPerSecond int64) error {
@@ -162,8 +171,12 @@ func (e *Engine) GetTrackers(ctx context.Context, j *job.Job) ([]networkpolicy.T
 	}
 	result := make([]networkpolicy.Tracker, 0, len(raw))
 	for _, tracker := range raw {
-		if strings.Contains(tracker.URL, "://") {
-			result = append(result, networkpolicy.Tracker{URL: tracker.URL})
+		if strings.Contains(tracker.URL, "://") || strings.HasPrefix(tracker.URL, "http") || strings.HasPrefix(tracker.URL, "udp") || strings.HasPrefix(tracker.URL, "wss") {
+			result = append(result, networkpolicy.Tracker{
+				URL:    tracker.URL,
+				Status: tracker.Status,
+				Msg:    tracker.Msg,
+			})
 		}
 	}
 	return result, nil

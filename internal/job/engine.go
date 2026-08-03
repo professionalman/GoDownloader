@@ -8,6 +8,9 @@ import "downloader/internal/networkpolicy"
 type EngineStatus struct {
 	Status JobStatus
 
+	// RawState contains the raw unmapped state from the underlying engine (e.g. metaDL, pausedDL, stoppedDL).
+	RawState string
+
 	TotalBytes     int64
 	CompletedBytes int64
 
@@ -142,4 +145,9 @@ type ITorrentEngine interface {
 // IShutdownableEngine is optionally implemented by engines that require cleanup on backend shutdown.
 type IShutdownableEngine interface {
 	Shutdown()
+}
+
+// ITorrentRawStateProvider is optionally implemented by torrent engines to provide raw qBittorrent state strings.
+type ITorrentRawStateProvider interface {
+	GetRawState(ctx context.Context, infoHash string) (string, error)
 }

@@ -98,7 +98,9 @@ type SeedingPolicy struct {
 }
 
 type Tracker struct {
-	URL string `json:"url"`
+	URL    string `json:"url"`
+	Status int    `json:"status,omitempty"`
+	Msg    string `json:"msg,omitempty"`
 }
 
 type CapabilityState struct {

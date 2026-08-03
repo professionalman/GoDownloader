@@ -102,6 +102,7 @@ func main() {
 
 	// Initialize job manager & scheduler
 	manager := job.NewManager(repo, registry, bus, cfg.DownloadDir, torrentRepo, cfg.DataDir)
+	manager.SetMetadataTimeoutSeconds(cfg.QBitMetadataTimeoutSeconds)
 	manager.SetQueueRepository(queueRepo)
 	manager.SetSettingsService(settingsService)
 	manager.SetStorageService(storageService)
