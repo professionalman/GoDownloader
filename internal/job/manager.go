@@ -1161,29 +1161,31 @@ loop:
 					if errFiles == nil && len(files) > 0 {
 						stopErr := torrentEng.StopDownload(ctx, infoHash)
 
-						// Verify torrent is actually stopped/paused
+						// Poll raw qBittorrent state for up to 3s to confirm pausedDL or stoppedDL
 						var isStopped bool
-						if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
-							currentRaw, errRaw := rawProvider.GetRawState(ctx, infoHash)
-							if errRaw == nil && (currentRaw == "pausedDL" || currentRaw == "stoppedDL" ||
-								currentRaw == "pausedUP" || currentRaw == "stoppedUP" ||
-								currentRaw == "checkingUP" || currentRaw == "queuedUP") {
-								isStopped = true
+						deadline := time.Now().Add(3 * time.Second)
+						for {
+							var currentRaw string
+							if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
+								currentRaw, _ = rawProvider.GetRawState(ctx, infoHash)
 							}
-						}
-						if !isStopped && stopErr == nil {
-							if st, errSt := torrentEng.Status(ctx, j); errSt == nil {
-								if st.Status == StatusPaused || st.RawState == "pausedDL" || st.RawState == "stoppedDL" {
-									isStopped = true
+							if currentRaw == "" {
+								if st, errSt := torrentEng.Status(ctx, j); errSt == nil && st != nil {
+									currentRaw = st.RawState
 								}
 							}
-						}
-						if stopErr == nil || isStopped {
-							isStopped = true
+							if currentRaw == "pausedDL" || currentRaw == "stoppedDL" {
+								isStopped = true
+								break
+							}
+							if time.Now().After(deadline) {
+								break
+							}
+							time.Sleep(50 * time.Millisecond)
 						}
 
 						if !isStopped {
-							log.Printf("acquireTorrentMetadata: failed to stop torrent %s after metadata acquisition: %v", infoHash, stopErr)
+							log.Printf("acquireTorrentMetadata: failed to verify torrent %s stopped after metadata acquisition (stopErr=%v)", infoHash, stopErr)
 							if m.torrentRepo != nil && infoHash != "" {
 								rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
 								rec = cloneTorrentRecord(rec)
@@ -1195,9 +1197,14 @@ loop:
 								_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
 							}
 
+							errText := "failed to verify torrent stopped after metadata acquisition"
+							if stopErr != nil {
+								errText = fmt.Sprintf("failed to stop torrent after metadata acquisition: %v", stopErr)
+							}
+
 							j.EngineID = infoHash
 							j.Status = StatusFailed
-							j.Error = fmt.Sprintf("failed to stop torrent after metadata acquisition: %v", stopErr)
+							j.Error = errText
 							j.UpdatedAt = time.Now()
 							m.repo.Update(ctx, j)
 							m.publish(EventJobFailed, j)
@@ -1307,7 +1314,6 @@ loop:
 		}
 	}
 
-	m.publish(EventJobUpdated, j)
 	m.publish(EventJobUpdated, j)
 	log.Printf("acquireTorrentMetadata: metadata acquired for job %s (infoHash=%s): %s", jobID, infoHash, metadata.Name)
 }

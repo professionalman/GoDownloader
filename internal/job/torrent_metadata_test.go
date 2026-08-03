@@ -80,6 +80,9 @@ func (m *mockTorrentEngine) StopDownload(ctx context.Context, infoHash string) e
 	defer m.mu.Unlock()
 	m.stoppedCount++
 	m.stopCalls = append(m.stopCalls, infoHash)
+	if m.engineStatusToReturn != nil {
+		m.engineStatusToReturn.RawState = "pausedDL"
+	}
 	return nil
 }
 func (m *mockTorrentEngine) RemoveTorrent(ctx context.Context, infoHash string, deleteFiles bool) error {
@@ -422,6 +425,9 @@ func TestTorrentMetadata_CancelRemovesMetadataTorrent(t *testing.T) {
 func (m *mockTorrentEngine) GetRawState(ctx context.Context, infoHash string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stoppedCount > 0 {
+		return "pausedDL", nil
+	}
 	if m.engineStatusToReturn != nil {
 		if m.engineStatusToReturn.RawState != "" {
 			return m.engineStatusToReturn.RawState, nil
@@ -436,25 +442,65 @@ func (m *mockTorrentEngine) GetRawState(ctx context.Context, infoHash string) (s
 	return "downloading", nil
 }
 
-type mockTorrentEngineWithStopError struct {
+func TestTorrentMetadata_SingleSSEEventPublished(t *testing.T) {
+	mockEng := &mockTorrentEngine{
+		infoToReturn: &TorrentInfo{
+			Name:      "Ubuntu ISO 24.04",
+			InfoHash:  "0123456789abcdef0123456789abcdef01234567",
+			TotalSize: 5000000000,
+		},
+		filesToReturn: []TorrentFile{
+			{Index: 0, Path: "ubuntu-24.04.iso", Size: 5000000000, Selected: true},
+		},
+		engineStatusToReturn: &EngineStatus{Status: StatusDownloading, RawState: "metaDL"},
+	}
+	mgr, repo, bus, _ := createTestManager(t, mockEng)
+
+	ctx := context.Background()
+	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+	job, err := mgr.Create(ctx, magnet)
+	if err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		j, _ := repo.GetByID(ctx, job.ID)
+		if j != nil && j.Status == StatusAwaitingSelection {
+			break
+		}
+	}
+
+	bus.mu.Lock()
+	events := append([]Event(nil), bus.events...)
+	bus.mu.Unlock()
+
+	var updatedCount int
+	for _, e := range events {
+		if e.Type == EventJobUpdated && e.Job.ID == job.ID && e.Job.Status == StatusAwaitingSelection {
+			updatedCount++
+		}
+	}
+
+	if updatedCount != 1 {
+		t.Errorf("expected exactly 1 EventJobUpdated for awaiting_selection, got %d", updatedCount)
+	}
+}
+
+type mockEngineStateStaysDownloading struct {
 	mockTorrentEngine
-	stopErr error
 }
 
-func (m *mockTorrentEngineWithStopError) StopDownload(ctx context.Context, infoHash string) error {
-	m.mu.Lock()
-	m.stoppedCount++
-	m.stopCalls = append(m.stopCalls, infoHash)
-	m.mu.Unlock()
-	return m.stopErr
+func (m *mockEngineStateStaysDownloading) StopDownload(ctx context.Context, infoHash string) error {
+	return nil // StopDownload succeeds, but rawState stays downloading
 }
 
-func (m *mockTorrentEngineWithStopError) GetRawState(ctx context.Context, infoHash string) (string, error) {
-	return "downloading", nil // always downloading, verification fails
+func (m *mockEngineStateStaysDownloading) GetRawState(ctx context.Context, infoHash string) (string, error) {
+	return "downloading", nil
 }
 
-func TestTorrentMetadata_StopDownloadFailureHandling(t *testing.T) {
-	mockEng := &mockTorrentEngineWithStopError{
+func TestTorrentMetadata_StopDownloadSucceedsButStateRemainsDownloading(t *testing.T) {
+	mockEng := &mockEngineStateStaysDownloading{
 		mockTorrentEngine: mockTorrentEngine{
 			infoToReturn: &TorrentInfo{
 				Name:      "Ubuntu ISO 24.04",
@@ -465,9 +511,79 @@ func TestTorrentMetadata_StopDownloadFailureHandling(t *testing.T) {
 				{Index: 0, Path: "ubuntu.iso", Size: 5000000000, Selected: true},
 			},
 		},
-		stopErr: errors.New("simulated qbittorrent stop error"),
 	}
 	mgr, repo, bus, torrentRepo := createTestManager(t, &mockEng.mockTorrentEngine)
+	mgr.engines.(*mockEngineRegistry).eng = mockEng
+
+	ctx := context.Background()
+	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+	job, err := mgr.Create(ctx, magnet)
+	if err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	var finalJob *Job
+	for i := 0; i < 45; i++ {
+		time.Sleep(100 * time.Millisecond)
+		j, _ := repo.GetByID(ctx, job.ID)
+		if j != nil && j.Status == StatusFailed {
+			finalJob = j
+			break
+		}
+	}
+
+	if finalJob == nil {
+		t.Fatalf("expected job to fail when raw state remains downloading despite nil StopDownload error")
+	}
+
+	if finalJob.Status == StatusAwaitingSelection {
+		t.Errorf("job must NOT reach awaiting_selection when stop verification fails")
+	}
+
+	bus.mu.Lock()
+	events := append([]Event(nil), bus.events...)
+	bus.mu.Unlock()
+	for _, e := range events {
+		if e.Type == EventJobUpdated && e.Job.Status == StatusAwaitingSelection {
+			t.Errorf("EventJobUpdated should NOT be emitted on stop-verification failure")
+		}
+	}
+
+	rec, err := torrentRepo.GetTorrentJob(ctx, job.ID)
+	if err != nil || rec == nil {
+		t.Fatalf("expected torrent record to be preserved for retry")
+	}
+	if rec.InfoHash != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("expected preserved infoHash, got %s", rec.InfoHash)
+	}
+}
+
+type mockEngineAlreadyPausedStopError struct {
+	mockTorrentEngine
+}
+
+func (m *mockEngineAlreadyPausedStopError) StopDownload(ctx context.Context, infoHash string) error {
+	return errors.New("torrent already stopped")
+}
+
+func (m *mockEngineAlreadyPausedStopError) GetRawState(ctx context.Context, infoHash string) (string, error) {
+	return "pausedDL", nil
+}
+
+func TestTorrentMetadata_StopDownloadFailsButAlreadyPausedDL(t *testing.T) {
+	mockEng := &mockEngineAlreadyPausedStopError{
+		mockTorrentEngine: mockTorrentEngine{
+			infoToReturn: &TorrentInfo{
+				Name:      "Ubuntu ISO 24.04",
+				InfoHash:  "0123456789abcdef0123456789abcdef01234567",
+				TotalSize: 5000000000,
+			},
+			filesToReturn: []TorrentFile{
+				{Index: 0, Path: "ubuntu.iso", Size: 5000000000, Selected: true},
+			},
+		},
+	}
+	mgr, repo, bus, _ := createTestManager(t, &mockEng.mockTorrentEngine)
 	mgr.engines.(*mockEngineRegistry).eng = mockEng
 
 	ctx := context.Background()
@@ -481,38 +597,29 @@ func TestTorrentMetadata_StopDownloadFailureHandling(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		time.Sleep(100 * time.Millisecond)
 		j, _ := repo.GetByID(ctx, job.ID)
-		if j != nil && j.Status == StatusFailed {
+		if j != nil && j.Status == StatusAwaitingSelection {
 			finalJob = j
 			break
 		}
 	}
 
 	if finalJob == nil {
-		t.Fatalf("expected job to fail when StopDownload fails")
+		t.Fatalf("expected job to reach awaiting_selection when rawState is already pausedDL")
 	}
 
-	expectedErr := "failed to stop torrent after metadata acquisition: simulated qbittorrent stop error"
-	if finalJob.Error != expectedErr {
-		t.Errorf("expected error %q, got %q", expectedErr, finalJob.Error)
-	}
-
-	// Verify EventJobUpdated was NOT published for awaiting_selection
 	bus.mu.Lock()
 	events := append([]Event(nil), bus.events...)
 	bus.mu.Unlock()
+
+	var updatedCount int
 	for _, e := range events {
-		if e.Type == EventJobUpdated && e.Job.Status == StatusAwaitingSelection {
-			t.Errorf("EventJobUpdated should NOT be published when stop fails")
+		if e.Type == EventJobUpdated && e.Job.ID == job.ID && e.Job.Status == StatusAwaitingSelection {
+			updatedCount++
 		}
 	}
 
-	// Verify retry information was preserved
-	rec, err := torrentRepo.GetTorrentJob(ctx, job.ID)
-	if err != nil || rec == nil {
-		t.Fatalf("expected torrent record to be preserved for retry")
-	}
-	if rec.InfoHash != "0123456789abcdef0123456789abcdef01234567" {
-		t.Errorf("expected preserved infoHash, got %s", rec.InfoHash)
+	if updatedCount != 1 {
+		t.Errorf("expected exactly 1 EventJobUpdated event, got %d", updatedCount)
 	}
 }
 

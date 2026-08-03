@@ -75,6 +75,7 @@ func (f *fakeEngine) Detect(url string) string {
 
 type fakeTorrentEngine struct {
 	*fakeEngine
+	isStopped          bool
 	addMagnetFunc      func(magnet string) (string, error)
 	addTorrentFileFunc func(path string) (string, error)
 	getFilesFunc       func(hash string) ([]TorrentFile, error)
@@ -84,6 +85,13 @@ type fakeTorrentEngine struct {
 	removeTorrentFunc  func(hash string, deleteFiles bool) error
 	getTorrentInfoFunc func(hash string) (*TorrentInfo, error)
 	statusFunc         func(ctx context.Context, j *Job) (*EngineStatus, error)
+}
+
+func (f *fakeTorrentEngine) GetRawState(ctx context.Context, infoHash string) (string, error) {
+	if f.isStopped {
+		return "pausedDL", nil
+	}
+	return "downloading", nil
 }
 
 func (f *fakeTorrentEngine) Cancel(ctx context.Context, j *Job) error {
@@ -103,7 +111,11 @@ func (f *fakeTorrentEngine) Status(ctx context.Context, j *Job) (*EngineStatus, 
 	if f.fakeEngine != nil && f.fakeEngine.statusFunc != nil {
 		return f.fakeEngine.statusFunc(ctx, j)
 	}
-	return &EngineStatus{Status: StatusDownloading}, nil
+	raw := "downloading"
+	if f.isStopped {
+		raw = "pausedDL"
+	}
+	return &EngineStatus{Status: StatusDownloading, RawState: raw}, nil
 }
 
 func (f *fakeTorrentEngine) AddMagnet(ctx context.Context, magnet, savePath, jobID string) (string, error) {
@@ -133,12 +145,14 @@ func (f *fakeTorrentEngine) SetFilePriorities(ctx context.Context, infoHash stri
 	return nil
 }
 func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) error {
+	f.isStopped = false
 	if f.startDownloadFunc != nil {
 		return f.startDownloadFunc(infoHash)
 	}
 	return nil
 }
 func (f *fakeTorrentEngine) StopDownload(ctx context.Context, infoHash string) error {
+	f.isStopped = true
 	if f.stopDownloadFunc != nil {
 		return f.stopDownloadFunc(infoHash)
 	}
