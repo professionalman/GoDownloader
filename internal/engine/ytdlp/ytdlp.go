@@ -94,13 +94,8 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	}
 	args = appendNetworkArgs(args, j.RuntimeNetworkPolicy())
 
-	// Apply format selection if specified
-	if j.MediaInfo != nil && j.MediaInfo.SelectedFmt != "" {
-		args = append(args, "-f", j.MediaInfo.SelectedFmt)
-	} else {
-		// Default: best quality with audio+video merge
-		args = append(args, "-f", "bestvideo+bestaudio/best")
-	}
+	// Apply format selection if specified (pairing video-only selections with bestaudio)
+	args = append(args, "-f", buildFormatSelector(j))
 
 	args = append(args, j.Source)
 
@@ -391,4 +386,34 @@ func (e *Engine) Shutdown() {
 	for _, cancel := range cancels {
 		cancel()
 	}
+}
+
+// buildFormatSelector constructs a yt-dlp format selector string based on job media metadata.
+// For video-only formats, it automatically pairs the selected video format ID with +bestaudio/best
+// so that FFmpeg merges both streams into the final output.
+func buildFormatSelector(j *job.Job) string {
+	if j == nil || j.MediaInfo == nil || j.MediaInfo.SelectedFmt == "" {
+		return "bestvideo+bestaudio/best"
+	}
+
+	var targetFmt *job.MediaFormat
+	for i := range j.MediaInfo.Formats {
+		if j.MediaInfo.Formats[i].FormatID == j.MediaInfo.SelectedFmt {
+			targetFmt = &j.MediaInfo.Formats[i]
+			break
+		}
+	}
+
+	if targetFmt == nil {
+		return j.MediaInfo.SelectedFmt
+	}
+
+	hasVideo := targetFmt.VCodec != "" && targetFmt.VCodec != "none"
+	hasAudio := targetFmt.ACodec != "" && targetFmt.ACodec != "none"
+
+	if hasVideo && !hasAudio {
+		return j.MediaInfo.SelectedFmt + "+bestaudio/best"
+	}
+
+	return j.MediaInfo.SelectedFmt
 }

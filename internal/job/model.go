@@ -44,16 +44,18 @@ type MediaFormat struct {
 	FPS        float64 `json:"fps"`
 	Quality    string  `json:"quality"`
 	Note       string  `json:"note"`
+	ABR        float64 `json:"abr,omitempty"`
 }
 
 // MediaInfo holds metadata extracted from a media source by yt-dlp.
 type MediaInfo struct {
-	Title       string        `json:"title"`
-	Duration    float64       `json:"duration"`
-	Thumbnail   string        `json:"thumbnail"`
-	URL         string        `json:"url"`
-	Formats     []MediaFormat `json:"formats"`
-	SelectedFmt string        `json:"selectedFormat,omitempty"`
+	Title           string        `json:"title"`
+	Duration        float64       `json:"duration"`
+	Thumbnail       string        `json:"thumbnail"`
+	URL             string        `json:"url"`
+	Formats         []MediaFormat `json:"formats"`
+	SelectedFmt     string        `json:"selectedFormat,omitempty"`
+	BestAudioFormat *MediaFormat  `json:"bestAudioFormat,omitempty"`
 }
 
 // TorrentFilePriority represents the priority level for a torrent file.

@@ -35,6 +35,7 @@ type ytdlpFormat struct {
 	FormatNote string  `json:"format_note"`
 	Quality    float64 `json:"quality"`
 	TBR        float64 `json:"tbr"`
+	ABR        float64 `json:"abr"`
 }
 
 // Analyze runs yt-dlp --dump-json to extract media metadata.
@@ -74,13 +75,15 @@ func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *netw
 	}
 
 	formats := normalizeFormats(raw.Formats)
+	bestAudio := selectBestAudioFormat(raw.Formats, formats)
 
 	return &job.MediaInfo{
-		Title:     raw.Title,
-		Duration:  raw.Duration,
-		Thumbnail: raw.Thumbnail,
-		URL:       raw.URL,
-		Formats:   formats,
+		Title:           raw.Title,
+		Duration:        raw.Duration,
+		Thumbnail:       raw.Thumbnail,
+		URL:             raw.URL,
+		Formats:         formats,
+		BestAudioFormat: bestAudio,
 	}, nil
 }
 
@@ -130,6 +133,7 @@ func normalizeFormats(rawFormats []ytdlpFormat) []job.MediaFormat {
 			FPS:        f.FPS,
 			Quality:    quality,
 			Note:       f.FormatNote,
+			ABR:        f.ABR,
 		})
 	}
 
@@ -207,4 +211,65 @@ func cleanError(stderr string) string {
 		return lines[len(lines)-1]
 	}
 	return "unknown error"
+}
+
+// selectBestAudioFormat resolves the best audio-only format matching yt-dlp's bestaudio stream selection.
+func selectBestAudioFormat(rawFormats []ytdlpFormat, normalizedFormats []job.MediaFormat) *job.MediaFormat {
+	rawMap := make(map[string]ytdlpFormat)
+	for _, rf := range rawFormats {
+		rawMap[rf.FormatID] = rf
+	}
+
+	var audioCandidates []job.MediaFormat
+	for _, f := range normalizedFormats {
+		// Must be audio-only: no video codec, has audio codec
+		if (f.VCodec == "" || f.VCodec == "none") && (f.ACodec != "" && f.ACodec != "none") {
+			audioCandidates = append(audioCandidates, f)
+		}
+	}
+
+	if len(audioCandidates) == 0 {
+		return nil
+	}
+
+	sort.Slice(audioCandidates, func(i, j int) bool {
+		a := audioCandidates[i]
+		b := audioCandidates[j]
+		rawA := rawMap[a.FormatID]
+		rawB := rawMap[b.FormatID]
+
+		// 1. Audio Bitrate (ABR)
+		if rawA.ABR != rawB.ABR {
+			return rawA.ABR > rawB.ABR
+		}
+		// 2. Total Bitrate (TBR)
+		if rawA.TBR != rawB.TBR {
+			return rawA.TBR > rawB.TBR
+		}
+		// 3. Codec preference (opus > mp4a / aac > others)
+		prefA := audioCodecPriority(a.ACodec)
+		prefB := audioCodecPriority(b.ACodec)
+		if prefA != prefB {
+			return prefA < prefB
+		}
+		// 4. FileSize / FileSizeAp
+		if b.FileSize != a.FileSize {
+			return b.FileSize > a.FileSize
+		}
+		return a.FormatID < b.FormatID
+	})
+
+	best := audioCandidates[0]
+	return &best
+}
+
+func audioCodecPriority(acodec string) int {
+	ac := strings.ToLower(acodec)
+	if strings.Contains(ac, "opus") {
+		return 1
+	}
+	if strings.Contains(ac, "mp4a") || strings.Contains(ac, "aac") {
+		return 2
+	}
+	return 3
 }

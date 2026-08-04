@@ -44,6 +44,51 @@ export function getCodecCategory(vcodec?: string): { name: string; label: string
   return { name: baseName.toUpperCase(), label: 'Standard', isCompatible: false, isEfficient: false, priority: 4 };
 }
 
+export function isVideoOnlyFormat(format: MediaFormat): boolean {
+  const hasVideo = !!format.vcodec && format.vcodec !== 'none';
+  const hasAudio = !!format.acodec && format.acodec !== 'none';
+  return hasVideo && !hasAudio;
+}
+
+export function isAudioOnlyFormat(format: MediaFormat): boolean {
+  const hasVideo = !!format.vcodec && format.vcodec !== 'none';
+  const hasAudio = !!format.acodec && format.acodec !== 'none';
+  return !hasVideo && hasAudio;
+}
+
+export interface EstimatedSizeResult {
+  videoSize?: number;
+  audioSize?: number;
+  totalSize?: number;
+  isCombinedEstimate: boolean;
+}
+
+export function getEstimatedDownloadSize(
+  selected: MediaFormat,
+  bestAudio?: MediaFormat | null
+): EstimatedSizeResult {
+  const videoOnly = isVideoOnlyFormat(selected);
+  const audioOnly = isAudioOnlyFormat(selected);
+
+  if (videoOnly) {
+    const videoSize = selected.fileSize > 0 ? selected.fileSize : undefined;
+    const audioSize = bestAudio && bestAudio.fileSize > 0 ? bestAudio.fileSize : undefined;
+    let totalSize: number | undefined = undefined;
+    if (videoSize !== undefined && audioSize !== undefined) {
+      totalSize = videoSize + audioSize;
+    }
+    return { videoSize, audioSize, totalSize, isCombinedEstimate: true };
+  }
+
+  const size = selected.fileSize > 0 ? selected.fileSize : undefined;
+  return {
+    videoSize: !audioOnly ? size : undefined,
+    audioSize: audioOnly ? size : undefined,
+    totalSize: size,
+    isCombinedEstimate: false,
+  };
+}
+
 export function parseResolutionHeight(res?: string, note?: string): number {
   if (!res && !note) return 0;
   const str = `${res || ''} ${note || ''}`.toLowerCase();
@@ -182,6 +227,7 @@ export function groupAudioFormats(formats: MediaFormat[]): {
   }
 
   const getBitrate = (f: MediaFormat): number => {
+    if (f.abr && f.abr > 0) return f.abr;
     const str = `${f.note || ''} ${f.quality || ''}`.toLowerCase();
     const match = str.match(/(\d+)\s*k/i);
     if (match) return parseInt(match[1], 10);
@@ -217,6 +263,7 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
   const formats = mediaInfo?.formats || [];
   const { groups: videoGroups, bestVideoFormat } = groupVideoFormats(formats);
   const { audioItems, bestAudioFormat } = groupAudioFormats(formats);
+  const resolvedBestAudio = mediaInfo?.bestAudioFormat || bestAudioFormat;
 
   const hasVideo = videoGroups.length > 0 || !!bestVideoFormat;
   const hasAudio = audioItems.length > 0 || !!bestAudioFormat;
@@ -304,19 +351,29 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
     }
     if (!selectedFormat) return 'Selected format';
 
+    const est = getEstimatedDownloadSize(selectedFormat, resolvedBestAudio);
+
     if (activeTab === 'video') {
       const height = parseResolutionHeight(selectedFormat.resolution, selectedFormat.note);
       const fps = parseFPS(selectedFormat.fps, selectedFormat.note);
       const codecInfo = getCodecCategory(selectedFormat.vcodec);
       const label = height > 0 ? `${height}p` : (selectedFormat.quality || 'Video');
       const fpsStr = fps >= 45 ? ` ${fps} FPS` : '';
-      const sizeStr = formatBytes(selectedFormat.fileSize);
-      return `Selected: ${label}${fpsStr} (${codecInfo.name}) · ${sizeStr} · Best audio included`;
+
+      if (est.isCombinedEstimate) {
+        const vSizeStr = est.videoSize ? formatBytes(est.videoSize) : 'Size unavailable';
+        const aSizeStr = est.audioSize ? formatBytes(est.audioSize) : 'Size unavailable';
+        const totalStr = est.totalSize ? formatBytes(est.totalSize) : 'Unknown';
+        return `Selected: ${label}${fpsStr} (${codecInfo.name}) · Video ${vSizeStr} + best audio ${aSizeStr} · Estimated total ${totalStr}`;
+      } else {
+        const sizeStr = est.totalSize ? formatBytes(est.totalSize) : 'Size unavailable';
+        return `Selected: ${label}${fpsStr} (${codecInfo.name}) · Estimated size ${sizeStr} · Audio included`;
+      }
     } else {
       const codecInfo = getCodecCategory(selectedFormat.acodec || selectedFormat.vcodec);
       const ext = selectedFormat.ext ? `.${selectedFormat.ext}` : '';
-      const sizeStr = formatBytes(selectedFormat.fileSize);
-      return `Selected: Audio (${codecInfo.name || 'Audio'} ${ext}) · ${sizeStr}`;
+      const sizeStr = selectedFormat.fileSize > 0 ? formatBytes(selectedFormat.fileSize) : 'Size unavailable';
+      return `Selected: Audio (${codecInfo.name || 'Audio'} ${ext}) · Estimated size ${sizeStr}`;
     }
   };
 
@@ -425,20 +482,38 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
                   }}
                   data-testid="best-video-card"
                 >
-                  <div className="format-card-top">
-                    <div className="format-card-title-wrap">
-                      <span className="format-badge format-badge-recommended">
-                        <Sparkles size={12} /> Best Available
-                      </span>
-                      <h4 className="format-card-title">Best Available Video</h4>
-                    </div>
-                    <span className="format-card-size">{formatBytes(bestVideoFormat.fileSize)}</span>
-                  </div>
-                  <p className="format-card-sub">Automatically downloads the highest resolution and frame rate available.</p>
-                  <div className="format-card-audio-notice">
-                    <Volume2 size={13} />
-                    <span>Best available audio included</span>
-                  </div>
+                  {(() => {
+                    const est = getEstimatedDownloadSize(bestVideoFormat, resolvedBestAudio);
+                    const vStr = est.videoSize ? formatBytes(est.videoSize) : 'Size unavailable';
+                    const aStr = est.audioSize ? formatBytes(est.audioSize) : 'Size unavailable';
+                    const tStr = est.totalSize ? formatBytes(est.totalSize) : 'Unknown';
+                    const mainSize = est.isCombinedEstimate
+                      ? (est.totalSize ? `≈${formatBytes(est.totalSize)} total` : 'Size unavailable')
+                      : (bestVideoFormat.fileSize > 0 ? `Estimated size: ${formatBytes(bestVideoFormat.fileSize)}` : 'Size unavailable');
+
+                    return (
+                      <>
+                        <div className="format-card-top">
+                          <div className="format-card-title-wrap">
+                            <span className="format-badge format-badge-recommended">
+                              <Sparkles size={12} /> Best Available
+                            </span>
+                            <h4 className="format-card-title">Best Available Video</h4>
+                          </div>
+                          <span className="format-card-size">{mainSize}</span>
+                        </div>
+                        <p className="format-card-sub">Automatically downloads the highest resolution and frame rate available.</p>
+                        <div className="format-card-audio-notice" data-testid="best-video-breakdown">
+                          <Volume2 size={13} />
+                          {est.isCombinedEstimate ? (
+                            <span>Video: {vStr} · Best audio: {aStr} · Estimated total: {tStr}</span>
+                          ) : (
+                            <span>Best available audio included</span>
+                          )}
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -450,6 +525,13 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
                     const activeFormat = group.allFormats.find(f => f.formatId === selectedFormatId) || rec;
                     const codecInfo = getCodecCategory(activeFormat.vcodec);
                     const isExpanded = !!expandedCodecs[group.key];
+                    const est = getEstimatedDownloadSize(activeFormat, resolvedBestAudio);
+                    const vStr = est.videoSize ? formatBytes(est.videoSize) : 'Size unavailable';
+                    const aStr = est.audioSize ? formatBytes(est.audioSize) : 'Size unavailable';
+                    const tStr = est.totalSize ? formatBytes(est.totalSize) : 'Unknown';
+                    const mainSize = est.isCombinedEstimate
+                      ? (est.totalSize ? `≈${formatBytes(est.totalSize)} total` : 'Size unavailable')
+                      : (activeFormat.fileSize > 0 ? `Estimated size: ${formatBytes(activeFormat.fileSize)}` : 'Size unavailable');
 
                     return (
                       <div
@@ -480,15 +562,19 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
                               </span>
                             )}
                           </div>
-                          <span className="format-card-size">{formatBytes(activeFormat.fileSize)}</span>
+                          <span className="format-card-size">{mainSize}</span>
                         </div>
 
                         <div className="format-card-details-row">
                           <span className="format-detail-pill">Codec: {codecInfo.name}</span>
                           {activeFormat.ext && <span className="format-detail-pill">.{activeFormat.ext}</span>}
-                          <span className="format-card-audio-notice">
+                          <span className="format-card-audio-notice" data-testid={`breakdown-${group.key}`}>
                             <Volume2 size={13} />
-                            Best available audio included
+                            {est.isCombinedEstimate ? (
+                              <span>Video: {vStr} · Best audio: {aStr} · Estimated total: {tStr}</span>
+                            ) : (
+                              <span>Audio included</span>
+                            )}
                           </span>
                         </div>
 

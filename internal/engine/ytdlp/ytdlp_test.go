@@ -120,3 +120,162 @@ func TestEngine_ShutdownCancelsActiveJobs(t *testing.T) {
 		t.Errorf("expected downloads map to be empty after Shutdown, got len %d", len(eng.downloads))
 	}
 }
+
+func TestBuildFormatSelector(t *testing.T) {
+	tests := []struct {
+		name     string
+		job      *job.Job
+		expected string
+	}{
+		{
+			name:     "1. nil MediaInfo",
+			job:      &job.Job{ID: "j1", MediaInfo: nil},
+			expected: "bestvideo+bestaudio/best",
+		},
+		{
+			name:     "2. empty SelectedFmt",
+			job:      &job.Job{ID: "j2", MediaInfo: &job.MediaInfo{SelectedFmt: "", Formats: []job.MediaFormat{{FormatID: "137", VCodec: "avc1"}}}},
+			expected: "bestvideo+bestaudio/best",
+		},
+		{
+			name: "3. selected video-only format",
+			job: &job.Job{
+				ID: "j3",
+				MediaInfo: &job.MediaInfo{
+					SelectedFmt: "137",
+					Formats: []job.MediaFormat{
+						{FormatID: "137", VCodec: "avc1.640028", ACodec: "none"},
+						{FormatID: "140", VCodec: "none", ACodec: "mp4a.40.2"},
+					},
+				},
+			},
+			expected: "137+bestaudio/best",
+		},
+		{
+			name: "4. selected combined video-and-audio format",
+			job: &job.Job{
+				ID: "j4",
+				MediaInfo: &job.MediaInfo{
+					SelectedFmt: "18",
+					Formats: []job.MediaFormat{
+						{FormatID: "18", VCodec: "avc1.42001E", ACodec: "mp4a.40.2"},
+					},
+				},
+			},
+			expected: "18",
+		},
+		{
+			name: "5. selected audio-only format",
+			job: &job.Job{
+				ID: "j5",
+				MediaInfo: &job.MediaInfo{
+					SelectedFmt: "140",
+					Formats: []job.MediaFormat{
+						{FormatID: "140", VCodec: "none", ACodec: "mp4a.40.2"},
+					},
+				},
+			},
+			expected: "140",
+		},
+		{
+			name: "6. selected format ID missing from format list",
+			job: &job.Job{
+				ID: "j6",
+				MediaInfo: &job.MediaInfo{
+					SelectedFmt: "999",
+					Formats: []job.MediaFormat{
+						{FormatID: "137", VCodec: "avc1", ACodec: "none"},
+					},
+				},
+			},
+			expected: "999",
+		},
+		{
+			name: "7. codec values that are empty strings",
+			job: &job.Job{
+				ID: "j7",
+				MediaInfo: &job.MediaInfo{
+					SelectedFmt: "137",
+					Formats: []job.MediaFormat{
+						{FormatID: "137", VCodec: "", ACodec: ""},
+					},
+				},
+			},
+			expected: "137",
+		},
+		{
+			name: "8. codec values equal to none",
+			job: &job.Job{
+				ID: "j8",
+				MediaInfo: &job.MediaInfo{
+					SelectedFmt: "137",
+					Formats: []job.MediaFormat{
+						{FormatID: "137", VCodec: "none", ACodec: "none"},
+					},
+				},
+			},
+			expected: "137",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildFormatSelector(tt.job)
+			if got != tt.expected {
+				t.Errorf("buildFormatSelector() = %q, expected %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestStart_AppendsCorrectFormatSelector(t *testing.T) {
+	// 1. Video-only selection produces -f "<selectedID>+bestaudio/best"
+	videoOnlyJob := &job.Job{
+		ID:     "job-video-only",
+		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		MediaInfo: &job.MediaInfo{
+			SelectedFmt: "137",
+			Formats: []job.MediaFormat{
+				{FormatID: "137", VCodec: "avc1.640028", ACodec: "none"},
+			},
+		},
+	}
+
+	sel := buildFormatSelector(videoOnlyJob)
+	if sel != "137+bestaudio/best" {
+		t.Fatalf("expected 137+bestaudio/best, got %q", sel)
+	}
+
+	// Verify that it is NOT just "137"
+	if sel == "137" {
+		t.Fatalf("expected format selector to pair audio, got plain video ID %q", sel)
+	}
+
+	// 2. Combined selection produces -f "18"
+	combinedJob := &job.Job{
+		ID:     "job-combined",
+		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		MediaInfo: &job.MediaInfo{
+			SelectedFmt: "18",
+			Formats: []job.MediaFormat{
+				{FormatID: "18", VCodec: "avc1.42001E", ACodec: "mp4a.40.2"},
+			},
+		},
+	}
+
+	selCombined := buildFormatSelector(combinedJob)
+	if selCombined != "18" {
+		t.Fatalf("expected 18, got %q", selCombined)
+	}
+
+	// 3. No selection produces -f "bestvideo+bestaudio/best"
+	noSelJob := &job.Job{
+		ID:     "job-nosel",
+		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+	}
+
+	selDefault := buildFormatSelector(noSelJob)
+	if selDefault != "bestvideo+bestaudio/best" {
+		t.Fatalf("expected bestvideo+bestaudio/best, got %q", selDefault)
+	}
+}

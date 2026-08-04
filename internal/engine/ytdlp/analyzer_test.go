@@ -105,3 +105,48 @@ ERROR: [youtube] dQw4w9WgXcQ: Video unavailable. This video is private
 		t.Errorf("expected clean error %q, got %q", expected, cleaned)
 	}
 }
+
+func TestSelectBestAudioFormat(t *testing.T) {
+	// 1. Multiple audio-only formats: should select highest ABR (format 251 - 160k opus)
+	raw := []ytdlpFormat{
+		{FormatID: "137", VCodec: "avc1.640028", ACodec: "none", FileSize: 100000000},
+		{FormatID: "140", VCodec: "none", ACodec: "mp4a.40.2", ABR: 128, FileSize: 5000000},
+		{FormatID: "251", VCodec: "none", ACodec: "opus", ABR: 160, FileSize: 6000000},
+		{FormatID: "249", VCodec: "none", ACodec: "opus", ABR: 50, FileSize: 2000000},
+		{FormatID: "22", VCodec: "avc1", ACodec: "mp4a", ABR: 192, FileSize: 50000000}, // Combined - excluded
+	}
+
+	norm := normalizeFormats(raw)
+	best := selectBestAudioFormat(raw, norm)
+
+	if best == nil {
+		t.Fatal("expected best audio format to be selected, got nil")
+	}
+	if best.FormatID != "251" {
+		t.Fatalf("expected format 251 (highest ABR audio), got %s", best.FormatID)
+	}
+
+	// 2. Excludes video-only and combined formats
+	rawVideoOnly := []ytdlpFormat{
+		{FormatID: "137", VCodec: "avc1.640028", ACodec: "none", FileSize: 100000000},
+		{FormatID: "22", VCodec: "avc1.64001f", ACodec: "mp4a.40.2", FileSize: 50000000},
+	}
+	normVideoOnly := normalizeFormats(rawVideoOnly)
+	bestNone := selectBestAudioFormat(rawVideoOnly, normVideoOnly)
+	if bestNone != nil {
+		t.Fatalf("expected nil when no audio-only format exists, got %+v", bestNone)
+	}
+
+	// 3. Fallback to filesize_approx when filesize is 0
+	rawApprox := []ytdlpFormat{
+		{FormatID: "140", VCodec: "none", ACodec: "mp4a.40.2", FileSize: 0, FileSizeAp: 5900000, ABR: 128},
+	}
+	normApprox := normalizeFormats(rawApprox)
+	if len(normApprox) != 1 || normApprox[0].FileSize != 5900000 {
+		t.Fatalf("expected filesize_approx 5900000, got %+v", normApprox)
+	}
+	bestApprox := selectBestAudioFormat(rawApprox, normApprox)
+	if bestApprox == nil || bestApprox.FormatID != "140" || bestApprox.FileSize != 5900000 {
+		t.Fatalf("expected best audio format 140 with approx size 5900000, got %+v", bestApprox)
+	}
+}

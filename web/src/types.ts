@@ -140,6 +140,7 @@ export interface MediaFormat {
   fps: number;
   quality: string;
   note: string;
+  abr?: number;
 }
 
 export interface MediaInfo {
@@ -149,6 +150,7 @@ export interface MediaInfo {
   url: string;
   formats: MediaFormat[];
   selectedFormat?: string;
+  bestAudioFormat?: MediaFormat;
 }
 
 export type TorrentFilePriority = 'skip' | 'normal' | 'high' | 'maximum';

@@ -278,7 +278,152 @@ describe('FormatSelector component', () => {
 
   it('20. Video choices clearly state that best audio is included', () => {
     render(<FormatSelector job={sampleJob} onSelect={vi.fn()} onClose={vi.fn()} />);
-    const noticeElements = screen.getAllByText(/best available audio included/i);
+    const noticeElements = screen.getAllByText(/best audio|best available audio/i);
     expect(noticeElements.length).toBeGreaterThan(0);
+  });
+
+  it('21. Submits raw format ID without constructing yt-dlp selector syntax', async () => {
+    const onSelect = vi.fn().mockResolvedValue(undefined);
+    render(<FormatSelector job={sampleJob} onSelect={onSelect} onClose={vi.fn()} />);
+    const card720 = screen.getByTestId('video-card-720p');
+    fireEvent.click(card720);
+    fireEvent.click(screen.getByTestId('format-confirm-button'));
+
+    await waitFor(() => {
+      expect(onSelect).toHaveBeenCalledWith('job-101', 'f-720p');
+      expect(onSelect).not.toHaveBeenCalledWith('job-101', expect.stringContaining('+bestaudio'));
+    });
+  });
+
+  it('22. Video 47.5 MB + audio 5.9 MB displays ~53.4 MB total and component breakdown', () => {
+    const customJob: Job = {
+      ...sampleJob,
+      mediaInfo: {
+        title: 'Size Test Video',
+        duration: 100,
+        thumbnail: '',
+        url: 'https://youtube.com/watch?v=test',
+        formats: [
+          {
+            formatId: 'v-1080p',
+            ext: 'mp4',
+            resolution: '1920x1080',
+            fileSize: 49807360, // 47.5 MB
+            vcodec: 'avc1.640028',
+            acodec: 'none',
+            fps: 30,
+            quality: '1080p',
+            note: '1080p',
+          },
+          {
+            formatId: 'a-best',
+            ext: 'm4a',
+            resolution: 'audio only',
+            fileSize: 6186598, // 5.9 MB
+            vcodec: 'none',
+            acodec: 'mp4a.40.2',
+            fps: 0,
+            quality: 'audio only',
+            note: '128k',
+          },
+        ],
+        bestAudioFormat: {
+          formatId: 'a-best',
+          ext: 'm4a',
+          resolution: 'audio only',
+          fileSize: 6186598,
+          vcodec: 'none',
+          acodec: 'mp4a.40.2',
+          fps: 0,
+          quality: 'audio only',
+          note: '128k',
+        },
+      },
+    };
+
+    render(<FormatSelector job={customJob} onSelect={vi.fn()} onClose={vi.fn()} />);
+
+    expect(screen.getAllByText(/53\.4 MB/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Video: 47\.5 MB/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Best audio: 5\.9 MB/i).length).toBeGreaterThan(0);
+  });
+
+  it('23. Combined video/audio format does not double-count audio', () => {
+    const combinedJob: Job = {
+      ...sampleJob,
+      mediaInfo: {
+        title: 'Combined Video',
+        duration: 100,
+        thumbnail: '',
+        url: 'https://youtube.com/watch?v=test',
+        formats: [
+          {
+            formatId: 'f-combined-720',
+            ext: 'mp4',
+            resolution: '1280x720',
+            fileSize: 33659289, // ~32.1 MB
+            vcodec: 'avc1.4d401f',
+            acodec: 'mp4a.40.2',
+            fps: 30,
+            quality: '720p',
+            note: '720p',
+          },
+        ],
+      },
+    };
+
+    render(<FormatSelector job={combinedJob} onSelect={vi.fn()} onClose={vi.fn()} />);
+
+    expect(screen.getAllByText(/32\.1 MB/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Audio included/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Video: /i)).not.toBeInTheDocument();
+  });
+
+  it('24. Audio-only format displays its own size', () => {
+    render(<FormatSelector job={sampleJob} onSelect={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('tab', { name: /audio/i }));
+
+    expect(screen.getAllByText(/19\.1 MB/i).length).toBeGreaterThan(0);
+  });
+
+  it('25. Unknown video or audio size produces unknown total', () => {
+    const unknownSizeJob: Job = {
+      ...sampleJob,
+      mediaInfo: {
+        title: 'Unknown Size Video',
+        duration: 100,
+        thumbnail: '',
+        url: 'https://youtube.com/watch?v=test',
+        formats: [
+          {
+            formatId: 'v-unk',
+            ext: 'mp4',
+            resolution: '1920x1080',
+            fileSize: 0,
+            vcodec: 'avc1',
+            acodec: 'none',
+            fps: 30,
+            quality: '1080p',
+            note: '1080p',
+          },
+          {
+            formatId: 'a-known',
+            ext: 'm4a',
+            resolution: 'audio only',
+            fileSize: 6186598,
+            vcodec: 'none',
+            acodec: 'mp4a.40.2',
+            fps: 0,
+            quality: 'audio only',
+            note: '128k',
+          },
+        ],
+      },
+    };
+
+    render(<FormatSelector job={unknownSizeJob} onSelect={vi.fn()} onClose={vi.fn()} />);
+
+    expect(screen.getAllByText(/Video: Size unavailable/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Estimated total: Unknown/i).length).toBeGreaterThan(0);
   });
 });

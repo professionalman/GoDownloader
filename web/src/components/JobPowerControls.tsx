@@ -32,8 +32,18 @@ function policyLabel(mode: SeedingMode): string {
   }
 }
 
-export const JobPowerControls: React.FC<{ job: Job; onUpdated?: (job: Job) => void }> = ({ job, onUpdated }) => {
-  const [capabilities, setCapabilities] = useState<JobCapabilities | null>(null);
+interface JobPowerControlsProps {
+  job: Job;
+  capabilities?: JobCapabilities | null;
+  onUpdated?: (job: Job) => void;
+}
+
+export const JobPowerControls: React.FC<JobPowerControlsProps> = ({
+  job,
+  capabilities: passedCapabilities,
+  onUpdated,
+}) => {
+  const [localCapabilities, setLocalCapabilities] = useState<JobCapabilities | null>(passedCapabilities ?? null);
   const [download, setDownload] = useState(job.networkPolicy?.downloadLimitBytesPerSecond ?? 0);
   const [upload, setUpload] = useState(job.networkPolicy?.uploadLimitBytesPerSecond ?? 0);
   const [trackers, setTrackers] = useState('');
@@ -43,8 +53,14 @@ export const JobPowerControls: React.FC<{ job: Job; onUpdated?: (job: Job) => vo
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    getJobCapabilities(job.id).then(setCapabilities).catch(() => setCapabilities(null));
-  }, [job.id]);
+    if (passedCapabilities !== undefined) {
+      setLocalCapabilities(passedCapabilities);
+    } else {
+      getJobCapabilities(job.id).then(setLocalCapabilities).catch(() => setLocalCapabilities(null));
+    }
+  }, [job.id, passedCapabilities]);
+
+  const capabilities = localCapabilities;
 
   if (!capabilities) return null;
   const hasControls = capabilities.downloadLimit.supported || capabilities.uploadLimit.supported || capabilities.trackers.supported || capabilities.seedingPolicy.supported;

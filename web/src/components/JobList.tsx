@@ -1,100 +1,43 @@
-import React from 'react';
-import type { Job } from '../types';
+import type { Job, QueuedJob } from '../types';
 import { JobCard } from './JobCard';
 
 interface JobListProps {
   jobs: Job[];
-  selectedIds?: Set<string>;
-  onToggleSelect?: (id: string) => void;
-  onSelectAll?: (ids: string[]) => void;
+  selectedIds: Set<string>;
+  queueByJobId: ReadonlyMap<string, QueuedJob>;
+  onToggleSelect: (id: string) => void;
   onCancel: (id: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
   onOpenFolder: () => void;
   onSelectFormat: (id: string) => void;
-  onSelectTorrentFiles?: (id: string) => void;
-  onStopSeeding?: (id: string) => void;
+  onSelectTorrentFiles: (id: string) => void;
+  onStopSeeding: (id: string) => void;
+  onJobUpdated: (job: Job) => void;
 }
 
-export const JobList: React.FC<JobListProps> = ({
-  jobs,
-  selectedIds = new Set(),
-  onToggleSelect,
-  onSelectAll,
-  onCancel,
-  onPause,
-  onResume,
-  onRetry,
-  onOpenFolder,
-  onSelectFormat,
-  onSelectTorrentFiles,
-  onStopSeeding,
-}) => {
-  const activeJobs = jobs.filter(
-    (j) => j.status === 'downloading' || j.status === 'queued' || j.status === 'paused'
-      || j.status === 'analyzing' || j.status === 'processing' || j.status === 'awaiting_selection' || j.status === 'seeding'
-  );
-  const completedJobs = jobs.filter(
-    (j) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled'
-  );
-
-  const allActiveSelected = activeJobs.length > 0 && activeJobs.every(j => selectedIds.has(j.id));
-
+export function JobList(props: JobListProps) {
   return (
-    <div className="job-list">
-      <section className="job-section">
-        <div className="section-header">
-          <h2>Active Downloads ({activeJobs.length})</h2>
-          {activeJobs.length > 0 && onSelectAll && (
-            <button
-              type="button"
-              className="btn btn-sm btn-link"
-              onClick={() => onSelectAll(allActiveSelected ? [] : activeJobs.map(j => j.id))}
-            >
-              {allActiveSelected ? 'Deselect All Active' : 'Select All Active'}
-            </button>
-          )}
-        </div>
-        {activeJobs.length === 0 ? (
-          <p className="empty-message">No active downloads</p>
-        ) : (
-          activeJobs.map((job) => (
-            <JobCard
-              key={job.id}
-              job={job}
-              selected={selectedIds.has(job.id)}
-              onToggleSelect={onToggleSelect}
-              onCancel={onCancel}
-              onPause={onPause}
-              onResume={onResume}
-              onSelectFormat={onSelectFormat}
-              onSelectTorrentFiles={onSelectTorrentFiles}
-              onStopSeeding={onStopSeeding}
-              onOpenFolder={onOpenFolder}
-            />
-          ))
-        )}
-      </section>
-
-      <section className="job-section">
-        <h2>History ({completedJobs.length})</h2>
-        {completedJobs.length === 0 ? (
-          <p className="empty-message">No completed downloads</p>
-        ) : (
-          completedJobs.map((job) => (
-            <JobCard
-              key={job.id}
-              job={job}
-              selected={selectedIds.has(job.id)}
-              onToggleSelect={onToggleSelect}
-              onRetry={onRetry}
-              onOpenFolder={onOpenFolder}
-            />
-          ))
-        )}
-      </section>
-    </div>
+    <ul className="space-y-1.5">
+      {props.jobs.map((job) => (
+        <JobCard
+          key={job.id}
+          job={job}
+          queueEntry={props.queueByJobId.get(job.id)}
+          selected={props.selectedIds.has(job.id)}
+          onToggleSelect={props.onToggleSelect}
+          onCancel={props.onCancel}
+          onPause={props.onPause}
+          onResume={props.onResume}
+          onRetry={props.onRetry}
+          onOpenFolder={props.onOpenFolder}
+          onSelectFormat={props.onSelectFormat}
+          onSelectTorrentFiles={props.onSelectTorrentFiles}
+          onStopSeeding={props.onStopSeeding}
+          onJobUpdated={props.onJobUpdated}
+        />
+      ))}
+    </ul>
   );
-};
-
+}
