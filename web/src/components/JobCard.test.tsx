@@ -99,4 +99,30 @@ describe('JobCard Phase 2 convergence', () => {
 
     expect(screen.queryByText('super_secret_password_123')).not.toBeInTheDocument();
   });
+
+  it('exposes only one visible details control button', () => {
+    render(<JobCard job={sampleJob} selected={false} />);
+    const detailsButtons = screen.getAllByRole('button', { name: /Show details/i });
+    expect(detailsButtons).toHaveLength(1);
+  });
+
+  it('closes overflow menu on Escape key press and outside click', () => {
+    render(<JobCard job={sampleJob} selected={false} onCancel={vi.fn()} />);
+
+    const menuTrigger = screen.getByRole('button', { name: 'More actions' });
+    fireEvent.click(menuTrigger);
+
+    expect(screen.getByRole('menu', { name: 'Job options' })).toBeInTheDocument();
+
+    // Close on Escape key
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: 'Job options' })).not.toBeInTheDocument();
+
+    // Reopen and close on outside click
+    fireEvent.click(menuTrigger);
+    expect(screen.getByRole('menu', { name: 'Job options' })).toBeInTheDocument();
+
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('menu', { name: 'Job options' })).not.toBeInTheDocument();
+  });
 });

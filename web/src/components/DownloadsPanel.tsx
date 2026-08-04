@@ -21,6 +21,7 @@ interface DownloadsPanelProps {
   queueSnapshot: QueueSnapshot | null;
   onToggleSelect: (id: string) => void;
   onSelectVisible: (ids: string[]) => void;
+  onDeselectVisible?: (ids: string[]) => void;
   onBulkAction: (action: 'pause' | 'resume' | 'cancel' | 'retry') => void;
   onClearSelection: () => void;
   onCancel: (id: string) => void;
@@ -215,11 +216,18 @@ export function DownloadsPanel(props: DownloadsPanelProps) {
           <button
             type="button"
             className="text-xs text-muted-foreground hover:text-foreground"
-            onClick={() =>
-              props.onSelectVisible(
-                allVisibleSelected ? [] : visibleJobs.map((job) => job.id)
-              )
-            }
+            onClick={() => {
+              const visibleIds = visibleJobs.map((job) => job.id);
+              if (allVisibleSelected) {
+                if (props.onDeselectVisible) {
+                  props.onDeselectVisible(visibleIds);
+                } else {
+                  props.onSelectVisible([]);
+                }
+              } else {
+                props.onSelectVisible(visibleIds);
+              }
+            }}
           >
             {allVisibleSelected ? 'Deselect visible' : 'Select visible'}
           </button>

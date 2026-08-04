@@ -55,7 +55,14 @@ vi.mock('./JobList', () => ({
   ),
 }));
 vi.mock('./QueueSection', () => ({ QueueSection: () => <div>Queue section</div> }));
-vi.mock('./SettingsPanel', () => ({ SettingsPanel: () => <div>Settings panel</div> }));
+vi.mock('./SettingsPanel', () => ({
+  SettingsPanel: ({ onClose }: { onClose: () => void }) => (
+    <div data-testid="settings-panel">
+      <span>Settings panel</span>
+      <button type="button" onClick={onClose}>Close settings</button>
+    </div>
+  ),
+}));
 vi.mock('./FormatSelector', () => ({ FormatSelector: () => <div>Format selector</div> }));
 vi.mock('./TorrentFileSelector', () => ({ TorrentFileSelector: () => <div>Torrent selector</div> }));
 
@@ -173,5 +180,19 @@ describe('AppShell', () => {
     const jobList = screen.getByTestId('job-list');
     expect(jobList.querySelectorAll('[data-job-id="job-1"]')).toHaveLength(1);
     expect(jobList).toHaveTextContent('job-1:awaiting_selection');
+  });
+
+  it('opens SettingsPanel when clicking Settings button and hides it on close', async () => {
+    render(<App />);
+    expect(screen.queryByTestId('settings-panel')).not.toBeInTheDocument();
+
+    // Settings button is in the header actions area, not in the navigation
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect(screen.getByTestId('settings-panel')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close settings' }));
+
+    expect(screen.queryByTestId('settings-panel')).not.toBeInTheDocument();
   });
 });

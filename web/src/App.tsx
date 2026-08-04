@@ -17,6 +17,7 @@ import type {
   SeedingPolicy,
 } from './types';
 import { replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
+import { useJobSelection } from './hooks/useJobSelection';
 import {
   getJobs,
   createJob,
@@ -49,7 +50,14 @@ function App() {
   const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const {
+    selectedIds,
+    setSelectedIds,
+    toggleSelect: handleToggleSelect,
+    selectVisible: handleSelectVisible,
+    deselectVisible: handleDeselectVisible,
+    clearSelection: handleClearSelection,
+  } = useJobSelection(jobs);
   const [formatJobId, setFormatJobId] = useState<string | null>(null);
   const [torrentJobId, setTorrentJobId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
@@ -205,18 +213,7 @@ function App() {
     [fetchQueue]
   );
 
-  const handleToggleSelect = useCallback((id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
 
-  const handleSelectAll = useCallback((ids: string[]) => {
-    setSelectedIds(new Set(ids));
-  }, []);
 
   const handleJobUpdated = useCallback((updated: Job) => {
     setJobs((currentJobs) => upsertJob(currentJobs, updated));
@@ -421,7 +418,7 @@ function App() {
         queueCount={queueSnapshot?.queuedDownloads ?? 0}
         connectionState={connectionState}
         onViewModeChange={setViewMode}
-        onOpenSettings={() => setShowSettings(false)}
+        onOpenSettings={() => setShowSettings(true)}
       >
         {viewMode === 'downloads' ? (
           <>
@@ -454,9 +451,10 @@ function App() {
               selectedIds={selectedIds}
               queueSnapshot={queueSnapshot}
               onToggleSelect={handleToggleSelect}
-              onSelectVisible={handleSelectAll}
+              onSelectVisible={handleSelectVisible}
+              onDeselectVisible={handleDeselectVisible}
               onBulkAction={handleBulkAction}
-              onClearSelection={() => setSelectedIds(new Set())}
+              onClearSelection={handleClearSelection}
               onCancel={handleCancel}
               onPause={handlePause}
               onResume={handleResume}

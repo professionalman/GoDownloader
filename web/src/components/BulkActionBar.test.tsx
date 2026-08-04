@@ -102,9 +102,9 @@ describe('BulkActionBar', () => {
     ).toBeInTheDocument();
   });
 
-  it('invokes onAction with correct command on button clicks', () => {
+  it('invokes onAction with correct command and eligible IDs on button clicks', () => {
     const onAction = vi.fn();
-    const selectedIds = new Set(['job-1', 'job-2']);
+    const selectedIds = new Set(['job-1', 'job-2', 'job-3']);
     render(
       <BulkActionBar
         jobs={sampleJobs}
@@ -115,13 +115,16 @@ describe('BulkActionBar', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: /Pause/i }));
-    expect(onAction).toHaveBeenCalledWith('pause');
+    expect(onAction).toHaveBeenCalledWith('pause', ['job-1']);
 
     fireEvent.click(screen.getByRole('button', { name: /Resume/i }));
-    expect(onAction).toHaveBeenCalledWith('resume');
+    expect(onAction).toHaveBeenCalledWith('resume', ['job-2']);
+
+    fireEvent.click(screen.getByRole('button', { name: /Retry/i }));
+    expect(onAction).toHaveBeenCalledWith('retry', ['job-3']);
 
     fireEvent.click(screen.getByRole('button', { name: /Cancel/i }));
-    expect(onAction).toHaveBeenCalledWith('cancel');
+    expect(onAction).toHaveBeenCalledWith('cancel', ['job-1', 'job-2']);
   });
 
   it('invokes onClear when Clear button is clicked', () => {

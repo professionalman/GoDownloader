@@ -1,19 +1,49 @@
 import { useEffect, useState } from 'react';
 import { getJobCapabilities } from '../api';
-import type { JobCapabilities } from '../types';
+import type { Job, JobCapabilities } from '../types';
 
 const cache = new Map<string, JobCapabilities>();
 
-export function useJobCapabilities(jobId: string): {
+export function clearJobCapabilitiesCache(jobId?: string) {
+  if (jobId) {
+    for (const key of cache.keys()) {
+      if (key.startsWith(jobId + ':') || key === jobId) {
+        cache.delete(key);
+      }
+    }
+  } else {
+    cache.clear();
+  }
+}
+
+export function invalidateJobCapabilities(jobId?: string) {
+  clearJobCapabilitiesCache(jobId);
+}
+
+export function useJobCapabilities(job: Job | string | null | undefined): {
   capabilities: JobCapabilities | null;
   loading: boolean;
+  refetch: () => void;
 } {
-  const cached = cache.get(jobId) ?? null;
+  const jobId = typeof job === 'string' ? job : job?.id;
+  const jobStatus = typeof job === 'string' ? '' : job?.status ?? '';
+  const updatedAt = typeof job === 'string' ? '' : job?.updatedAt ?? '';
+
+  const cacheKey = jobId ? `${jobId}:${jobStatus}` : '';
+
+  const cached = cacheKey ? cache.get(cacheKey) ?? null : null;
   const [capabilities, setCapabilities] = useState<JobCapabilities | null>(cached);
-  const [loading, setLoading] = useState(!cached);
+  const [loading, setLoading] = useState(!cached && !!jobId);
 
   useEffect(() => {
-    const existing = cache.get(jobId);
+    if (!jobId) {
+      setCapabilities(null);
+      setLoading(false);
+      return;
+    }
+
+    const key = `${jobId}:${jobStatus}`;
+    const existing = cache.get(key);
     if (existing) {
       setCapabilities(existing);
       setLoading(false);
@@ -25,7 +55,7 @@ export function useJobCapabilities(jobId: string): {
 
     getJobCapabilities(jobId)
       .then((result) => {
-        cache.set(jobId, result);
+        cache.set(key, result);
         if (!cancelled) setCapabilities(result);
       })
       .catch(() => {
@@ -38,7 +68,22 @@ export function useJobCapabilities(jobId: string): {
     return () => {
       cancelled = true;
     };
-  }, [jobId]);
+  }, [jobId, jobStatus, updatedAt]);
 
-  return { capabilities, loading };
+  const refetch = () => {
+    if (jobId) {
+      clearJobCapabilitiesCache(jobId);
+      setLoading(true);
+      getJobCapabilities(jobId)
+        .then((result) => {
+          const key = `${jobId}:${jobStatus}`;
+          cache.set(key, result);
+          setCapabilities(result);
+        })
+        .catch(() => setCapabilities(null))
+        .finally(() => setLoading(false));
+    }
+  };
+
+  return { capabilities, loading, refetch };
 }
