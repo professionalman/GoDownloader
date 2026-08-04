@@ -121,10 +121,10 @@ export function DownloadsPanel(props: DownloadsPanelProps) {
   };
 
   return (
-    <div className="mt-2.5 space-y-2.5">
-      {/* Transfer strip */}
+    <div className="space-y-2.5">
+      {/* Transfer summary card */}
       <div
-        className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-border bg-surface px-3 py-2"
+        className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-border bg-surface px-3 py-2"
         aria-label="Transfer status"
         aria-live="polite"
       >
@@ -149,13 +149,13 @@ export function DownloadsPanel(props: DownloadsPanelProps) {
         )}
 
         <span className="ml-auto text-xs text-muted-foreground">
-          <span className="num text-foreground/90">{counts.Completed}</span>{' '}
+          <span className="num font-medium text-foreground">{counts.Completed}</span>{' '}
           completed
         </span>
       </div>
 
-      {/* Filters & Search */}
-      <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-center">
+      {/* Filters and search toolbar */}
+      <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-center">
         <div
           className="scrollbar-thin flex flex-wrap gap-1.5 sm:flex-nowrap sm:overflow-x-auto sm:pb-1"
           role="group"
@@ -170,7 +170,7 @@ export function DownloadsPanel(props: DownloadsPanelProps) {
               className={cx(
                 'flex h-8 shrink-0 items-center gap-2 rounded-md border px-3 text-sm transition-colors',
                 filter === option
-                  ? 'border-primary/40 bg-primary/15 text-foreground font-medium'
+                  ? 'border-primary/40 bg-primary/15 font-medium text-foreground'
                   : 'border-border bg-surface text-muted-foreground hover:text-foreground'
               )}
             >
@@ -195,52 +195,58 @@ export function DownloadsPanel(props: DownloadsPanelProps) {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search downloads"
-            className="h-8 w-full rounded-md border border-border bg-surface pl-9 pr-8 text-sm text-foreground outline-none focus:border-primary"
+            className="h-8 w-full rounded-md border border-border bg-surface pl-9 pr-8 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
           />
           {query && (
             <button
               type="button"
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               onClick={() => setQuery('')}
               aria-label="Clear search"
             >
-              <X className="size-3.5" />
+              <X className="size-4" />
             </button>
           )}
         </div>
       </div>
 
-      {/* Select visible control */}
+      {/* Master selection header bar */}
       {visibleJobs.length > 0 && (
-        <div className="flex justify-end">
-          <button
-            type="button"
-            className="text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => {
-              const visibleIds = visibleJobs.map((job) => job.id);
-              if (allVisibleSelected) {
-                if (props.onDeselectVisible) {
-                  props.onDeselectVisible(visibleIds);
+        <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 cursor-pointer select-none font-medium hover:text-foreground">
+            <input
+              type="checkbox"
+              checked={allVisibleSelected}
+              onChange={() => {
+                const visibleIds = visibleJobs.map((job) => job.id);
+                if (allVisibleSelected) {
+                  if (props.onDeselectVisible) {
+                    props.onDeselectVisible(visibleIds);
+                  } else {
+                    props.onSelectVisible([]);
+                  }
                 } else {
-                  props.onSelectVisible([]);
+                  props.onSelectVisible(visibleIds);
                 }
-              } else {
-                props.onSelectVisible(visibleIds);
-              }
-            }}
-          >
-            {allVisibleSelected ? 'Deselect visible' : 'Select visible'}
-          </button>
+              }}
+              className="size-4 rounded border-border text-primary focus:ring-primary/20"
+            />
+            <span>{allVisibleSelected ? 'Deselect visible' : 'Select visible'}</span>
+          </label>
+          <span>
+            Showing <span className="num text-foreground font-medium">{visibleJobs.length}</span> of{' '}
+            <span className="num text-foreground font-medium">{props.jobs.length}</span>
+          </span>
         </div>
       )}
 
       {/* Loading Skeletons */}
       {props.initialLoading ? (
-        <div className="space-y-1.5" data-testid="downloads-loading-skeleton">
+        <div className="space-y-2.5" data-testid="downloads-loading-skeleton">
           {[1, 2, 3, 4, 5].map((key) => (
             <div
               key={key}
-              className="h-20 animate-pulse rounded-lg border border-border bg-surface-2/40 p-3"
+              className="h-22 animate-pulse rounded-xl border border-border bg-surface-2/40 p-4"
             />
           ))}
         </div>

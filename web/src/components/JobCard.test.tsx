@@ -43,7 +43,7 @@ describe('JobCard Phase 2 convergence', () => {
     expect(screen.getByText('62.5%')).toBeInTheDocument();
   });
 
-  it('renders "Open downloads folder" action for completed downloads', () => {
+  it('renders completed card with status pill ONCE, no progress bar, and icon-only folder button', () => {
     const completedJob: Job = { ...sampleJob, status: 'completed', progress: 100 };
     const onOpenFolder = vi.fn();
 
@@ -55,10 +55,61 @@ describe('JobCard Phase 2 convergence', () => {
       />
     );
 
+    // Status pill "Completed" rendered ONCE in metadata line
+    const completedPills = screen.getAllByText('Completed');
+    expect(completedPills).toHaveLength(1);
+
+    // Progress bar percent text not rendered on completed card
+    expect(screen.queryByText('100.0%')).not.toBeInTheDocument();
+
+    // Icon-only button with aria-label/title "Open downloads folder"
     const btn = screen.getByRole('button', { name: /Open downloads folder/i });
     expect(btn).toBeInTheDocument();
+    expect(btn).toHaveAttribute('title', 'Open downloads folder');
     fireEvent.click(btn);
     expect(onOpenFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to media estimate or Size unavailable for zero-byte completed media jobs', () => {
+    const zeroByteMediaJob: Job = {
+      ...sampleJob,
+      type: 'media',
+      status: 'completed',
+      progress: 100,
+      totalBytes: 0,
+      completedBytes: 0,
+      mediaInfo: {
+        title: 'Sample Video',
+        duration: 120,
+        thumbnail: '',
+        url: 'https://example.com/video',
+        selectedFormat: '137',
+        formats: [
+          { formatId: '137', ext: 'mp4', resolution: '1080p', vcodec: 'h264', acodec: 'none', fileSize: 50000000, fps: 30, quality: '1080p', note: '' },
+        ],
+        bestAudioFormat: { formatId: '140', ext: 'm4a', resolution: '', vcodec: 'none', acodec: 'aac', fileSize: 5000000, fps: 0, quality: 'audio', note: '' },
+      },
+    };
+
+    render(<JobCard job={zeroByteMediaJob} selected={false} />);
+
+    // Never renders "0 B" for completed media file
+    expect(screen.queryByText('0 B')).not.toBeInTheDocument();
+    expect(screen.getByText('~52.5 MiB est.')).toBeInTheDocument();
+  });
+
+  it('renders Size unavailable when completed job has zero size and no media estimate', () => {
+    const zeroByteNoEstimateJob: Job = {
+      ...sampleJob,
+      status: 'completed',
+      progress: 100,
+      totalBytes: 0,
+      completedBytes: 0,
+    };
+
+    render(<JobCard job={zeroByteNoEstimateJob} selected={false} />);
+    expect(screen.queryByText('0 B')).not.toBeInTheDocument();
+    expect(screen.getByText('Size unavailable')).toBeInTheDocument();
   });
 
   it('toggles details panel when expand chevron is clicked', () => {

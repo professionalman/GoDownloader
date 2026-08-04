@@ -2,6 +2,8 @@ package ytdlp
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"downloader/internal/job"
@@ -47,6 +49,270 @@ func TestParseProgressLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStructuredProgressLine_Scenarios(t *testing.T) {
+	t.Run("1. Valid structured progress line with estimate", func(t *testing.T) {
+		line := "download:__GODOWNLOADER_PROGRESS__:42.7%|10485760|NA|24576000|1048576.5|14"
+		got := parseProgressLine(line)
+		if got == nil {
+			t.Fatalf("expected non-nil progress info")
+		}
+		if got.Percent != 42.7 {
+			t.Errorf("expected 42.7, got %f", got.Percent)
+		}
+		if got.DownloadedBytes != 10485760 {
+			t.Errorf("expected 10485760, got %d", got.DownloadedBytes)
+		}
+		if got.TotalBytes != 24576000 {
+			t.Errorf("expected 24576000 (estimated), got %d", got.TotalBytes)
+		}
+		if got.Speed != 1048576 {
+			t.Errorf("expected 1048576, got %d", got.Speed)
+		}
+		if got.ETASeconds != 14 {
+			t.Errorf("expected 14, got %d", got.ETASeconds)
+		}
+	})
+
+	t.Run("2. Leading spaces and percent symbol", func(t *testing.T) {
+		line := "__GODOWNLOADER_PROGRESS__:  15.0% | 1500 | 10000 | 10000 | 500 | 5"
+		got := parseProgressLine(line)
+		if got == nil {
+			t.Fatalf("expected non-nil progress info")
+		}
+		if got.Percent != 15.0 {
+			t.Errorf("expected 15.0, got %f", got.Percent)
+		}
+	})
+
+	t.Run("3. Both totals NA", func(t *testing.T) {
+		line := "__GODOWNLOADER_PROGRESS__:10.0%|1000|NA|NA|500|10"
+		got := parseProgressLine(line)
+		if got == nil {
+			t.Fatalf("expected non-nil progress info")
+		}
+		if got.TotalBytes != 0 {
+			t.Errorf("expected total bytes 0, got %d", got.TotalBytes)
+		}
+	})
+
+	t.Run("4. Clamping negative values", func(t *testing.T) {
+		line := "__GODOWNLOADER_PROGRESS__:-10.0%|-50|-100|-100|-50|-5"
+		got := parseProgressLine(line)
+		if got == nil {
+			t.Fatalf("expected non-nil progress info")
+		}
+		if got.Percent != 0 {
+			t.Errorf("expected percent clamped to 0, got %f", got.Percent)
+		}
+		if got.DownloadedBytes != 0 || got.TotalBytes != 0 || got.Speed != 0 || got.ETASeconds != 0 {
+			t.Errorf("expected negative values clamped to 0, got %+v", got)
+		}
+	})
+
+	t.Run("5. Final path marker not parsed as progress", func(t *testing.T) {
+		line := "__GODOWNLOADER_FINAL_PATH__:C:\\video.mp4"
+		got := parseProgressLine(line)
+		if got != nil {
+			t.Errorf("expected nil progress info for final path marker, got %+v", got)
+		}
+	})
+}
+
+func TestParseFinalPathLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		line     string
+		expected string
+	}{
+		{
+			name:     "1. Windows path",
+			line:     "__GODOWNLOADER_FINAL_PATH__:C:\\Temp\\video.mkv",
+			expected: "C:\\Temp\\video.mkv",
+		},
+		{
+			name:     "2. Spaces and commas",
+			line:     "__GODOWNLOADER_FINAL_PATH__:C:\\Temp\\My File, Final.mkv",
+			expected: "C:\\Temp\\My File, Final.mkv",
+		},
+		{
+			name:     "3. Brackets and parentheses",
+			line:     "__GODOWNLOADER_FINAL_PATH__:C:\\Temp\\Video [1080p] (Official).mp4",
+			expected: "C:\\Temp\\Video [1080p] (Official).mp4",
+		},
+		{
+			name:     "4. Unicode title",
+			line:     "__GODOWNLOADER_FINAL_PATH__:C:\\Temp\\Barbaadiyan (Full Video) Shiddat Sunny K.webm",
+			expected: "C:\\Temp\\Barbaadiyan (Full Video) Shiddat Sunny K.webm",
+		},
+		{
+			name:     "5. Apostrophe in title",
+			line:     "__GODOWNLOADER_FINAL_PATH__:C:\\Temp\\Song's Title.m4a",
+			expected: "C:\\Temp\\Song's Title.m4a",
+		},
+		{
+			name:     "6. Quoted path",
+			line:     "__GODOWNLOADER_FINAL_PATH__:\"C:\\Temp\\video.mkv\"",
+			expected: "C:\\Temp\\video.mkv",
+		},
+		{
+			name:     "7. Ordinary progress lines return empty",
+			line:     "download:45.5%|47710208|104857600|5505024|10",
+			expected: "",
+		},
+		{
+			name:     "8. [download] Destination is not final path marker",
+			line:     "[download] Destination: C:\\Temp\\video.f137.webm",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseFinalPathLine(tt.line)
+			if got != tt.expected {
+				t.Errorf("parseFinalPathLine(%q) = %q, expected %q", tt.line, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDualStream_LineHandling(t *testing.T) {
+	eng := NewEngine("ytdlp", "ffmpeg")
+	state := &downloadState{}
+
+	// Progress on stdout
+	eng.handleYTDLPLine("job1", state, "__GODOWNLOADER_PROGRESS__:25.0%|2500|10000|10000|1000|10", "stdout")
+	if state.progress.Percent != 25.0 {
+		t.Fatalf("expected stdout progress 25.0, got %f", state.progress.Percent)
+	}
+
+	// Progress on stderr
+	eng.handleYTDLPLine("job1", state, "__GODOWNLOADER_PROGRESS__:50.0%|5000|10000|10000|1000|5", "stderr")
+	if state.progress.Percent != 50.0 {
+		t.Fatalf("expected stderr progress 50.0, got %f", state.progress.Percent)
+	}
+}
+
+func TestPathPrecedence(t *testing.T) {
+	eng := NewEngine("ytdlp", "ffmpeg")
+	state := &downloadState{
+		candidateOutputPath: "C:\\Temp\\intermediate.webm",
+		finalOutputPath:     "C:\\Temp\\final_merged.mkv",
+		done:                true,
+		progress:            progressInfo{Percent: 100, TotalBytes: 50000},
+	}
+	eng.downloads["job-precedence-test"] = state
+
+	j := &job.Job{ID: "job-precedence-test"}
+	st, err := eng.Status(context.Background(), j)
+	if err != nil {
+		t.Fatalf("expected Status to succeed, got %v", err)
+	}
+	if st.OutputPath != "C:\\Temp\\final_merged.mkv" {
+		t.Errorf("expected OutputPath C:\\Temp\\final_merged.mkv, got %q", st.OutputPath)
+	}
+	if st.FileName != "final_merged.mkv" {
+		t.Errorf("expected FileName final_merged.mkv, got %q", st.FileName)
+	}
+}
+
+func TestValidateFinalPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	validFile := filepath.Join(tmpDir, "output.mkv")
+	if err := os.WriteFile(validFile, []byte("media content"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	subDir := filepath.Join(tmpDir, "subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatalf("failed to create subdir: %v", err)
+	}
+
+	t.Run("Valid file in workDir", func(t *testing.T) {
+		got, err := validateFinalPath(tmpDir, validFile)
+		if err != nil {
+			t.Fatalf("expected path to be valid, got %v", err)
+		}
+		if got != validFile {
+			t.Errorf("expected %q, got %q", validFile, got)
+		}
+	})
+
+	t.Run("Relative path resolves under workDir", func(t *testing.T) {
+		got, err := validateFinalPath(tmpDir, "output.mkv")
+		if err != nil {
+			t.Fatalf("expected relative path to validate, got %v", err)
+		}
+		if got != validFile {
+			t.Errorf("expected %q, got %q", validFile, got)
+		}
+	})
+
+	t.Run("Non-existent file rejected", func(t *testing.T) {
+		_, err := validateFinalPath(tmpDir, filepath.Join(tmpDir, "nonexistent.mkv"))
+		if err == nil {
+			t.Error("expected error for non-existent file")
+		}
+	})
+
+	t.Run("Directory path rejected", func(t *testing.T) {
+		_, err := validateFinalPath(tmpDir, subDir)
+		if err == nil {
+			t.Error("expected error for directory path")
+		}
+	})
+
+	t.Run("Path outside workDir rejected", func(t *testing.T) {
+		outsideFile := filepath.Join(filepath.Dir(tmpDir), "outside.mp4")
+		_, err := validateFinalPath(tmpDir, outsideFile)
+		if err == nil {
+			t.Error("expected error for path escaping work directory")
+		}
+	})
+}
+
+func TestDiscoverFinalMediaFile(t *testing.T) {
+	t.Run("Single valid media file returned", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mediaFile := filepath.Join(tmpDir, "video.mp4")
+		_ = os.WriteFile(mediaFile, []byte("data"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, ".godownloader-workdir"), []byte("marker"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "video.f137.part"), []byte("part"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "thumb.jpg"), []byte("img"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "info.info.json"), []byte("{}"), 0644)
+
+		got, err := discoverFinalMediaFile(tmpDir)
+		if err != nil {
+			t.Fatalf("expected discovery to succeed, got %v", err)
+		}
+		if got != mediaFile {
+			t.Errorf("expected %q, got %q", mediaFile, got)
+		}
+	})
+
+	t.Run("Zero plausible files returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tmpDir, ".godownloader-workdir"), []byte("marker"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "video.part"), []byte("part"), 0644)
+
+		_, err := discoverFinalMediaFile(tmpDir)
+		if err == nil {
+			t.Error("expected error when zero plausible files exist")
+		}
+	})
+
+	t.Run("Multiple plausible files returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tmpDir, "video1.mp4"), []byte("data1"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "video2.mkv"), []byte("data2"), 0644)
+
+		_, err := discoverFinalMediaFile(tmpDir)
+		if err == nil {
+			t.Error("expected error when multiple plausible media files exist")
+		}
+	})
 }
 
 func TestDownloadState_CancelledStatus(t *testing.T) {
@@ -229,7 +495,6 @@ func TestBuildFormatSelector(t *testing.T) {
 }
 
 func TestStart_AppendsCorrectFormatSelector(t *testing.T) {
-	// 1. Video-only selection produces -f "<selectedID>+bestaudio/best"
 	videoOnlyJob := &job.Job{
 		ID:     "job-video-only",
 		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -246,12 +511,10 @@ func TestStart_AppendsCorrectFormatSelector(t *testing.T) {
 		t.Fatalf("expected 137+bestaudio/best, got %q", sel)
 	}
 
-	// Verify that it is NOT just "137"
 	if sel == "137" {
 		t.Fatalf("expected format selector to pair audio, got plain video ID %q", sel)
 	}
 
-	// 2. Combined selection produces -f "18"
 	combinedJob := &job.Job{
 		ID:     "job-combined",
 		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -268,7 +531,6 @@ func TestStart_AppendsCorrectFormatSelector(t *testing.T) {
 		t.Fatalf("expected 18, got %q", selCombined)
 	}
 
-	// 3. No selection produces -f "bestvideo+bestaudio/best"
 	noSelJob := &job.Job{
 		ID:     "job-nosel",
 		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

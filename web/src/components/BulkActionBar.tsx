@@ -33,8 +33,8 @@ export function BulkActionBar({
     .map((job) => job.id);
 
   return (
-    <div className="sticky bottom-3 z-30 mt-3">
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-primary/35 bg-surface-2/95 p-3 shadow-lg backdrop-blur sm:flex sm:flex-wrap sm:justify-between">
+    <div className="sticky bottom-4 z-30 mt-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/35 bg-surface-2/95 p-4 shadow-xl backdrop-blur">
         <div className="min-w-0">
           <p className="num text-sm font-medium">
             {selectedIds.size} selected

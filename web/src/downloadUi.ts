@@ -253,6 +253,16 @@ export function getMediaSizeEstimate(mediaInfo?: MediaInfo): MediaSizeEstimate {
   };
 }
 
+export function getCompletedDisplaySize(job: Job): string {
+  if (job.totalBytes && job.totalBytes > 0) return formatBytes(job.totalBytes);
+  if (job.completedBytes && job.completedBytes > 0) return formatBytes(job.completedBytes);
+  const mediaEstimate = getMediaSizeEstimate(job.mediaInfo);
+  if (mediaEstimate.totalBytes && mediaEstimate.totalBytes > 0) {
+    return `~${formatBytes(mediaEstimate.totalBytes)} est.`;
+  }
+  return 'Size unavailable';
+}
+
 export function queueEntryMap(items: readonly QueuedJob[]): Map<string, QueuedJob> {
   return new Map(items.map((item) => [item.jobId, item]));
 }

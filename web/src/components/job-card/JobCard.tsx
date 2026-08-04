@@ -60,11 +60,11 @@ export function JobCard({
   return (
     <li
       className={cx(
-        'rounded-lg border bg-surface p-3 transition-colors',
-        selected ? 'border-primary/45 bg-primary/[0.06]' : 'border-border'
+        'rounded-lg border bg-surface p-3 transition-colors hover:border-border-strong',
+        selected ? 'border-primary/45 bg-primary/[0.04]' : 'border-border'
       )}
     >
-      <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2.5">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-2.5">
         <JobCardHeader
           job={job}
           selected={selected}
@@ -75,7 +75,7 @@ export function JobCard({
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2.5">
             <JobCardMeta job={job} />
 
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 items-center gap-1.5">
               <JobPrimaryAction
                 job={job}
                 capabilities={capabilities}
@@ -99,20 +99,6 @@ export function JobCard({
                 onOpenFolder={onOpenFolder}
                 onAction={handleAction}
               />
-
-              <button
-                type="button"
-                className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                onClick={() => setDetailsOpen((prev) => !prev)}
-                aria-expanded={detailsOpen}
-                aria-label={detailsOpen ? 'Hide details' : 'Show details'}
-              >
-                {detailsOpen ? (
-                  <ChevronUp className="size-4" aria-hidden="true" />
-                ) : (
-                  <ChevronDown className="size-4" aria-hidden="true" />
-                )}
-              </button>
             </div>
           </div>
 
@@ -127,6 +113,22 @@ export function JobCard({
               onJobUpdated={onJobUpdated}
             />
           )}
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              onClick={() => setDetailsOpen((prev) => !prev)}
+              aria-expanded={detailsOpen}
+              aria-label={detailsOpen ? 'Hide details' : 'Show details'}
+            >
+              {detailsOpen ? (
+                <ChevronUp className="size-3.5" aria-hidden="true" />
+              ) : (
+                <ChevronDown className="size-3.5" aria-hidden="true" />
+              )}
+              <span className="hidden sm:inline">{detailsOpen ? 'Hide details' : 'Details'}</span>
+            </button>
+          </div>
         </div>
       </div>
     </li>

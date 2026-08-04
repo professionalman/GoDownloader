@@ -27,14 +27,14 @@ export function JobCardHeader({ job, selected, onToggleSelect }: JobCardHeaderPr
   const EngineIcon = isMediaJob ? Film : isTorrentJob ? Magnet : Download;
 
   return (
-    <div className="flex flex-col items-center gap-2 pt-0.5">
+    <div className="flex items-center gap-2">
       {onToggleSelect && (
         <input
           type="checkbox"
           checked={selected}
           onChange={() => onToggleSelect(job.id)}
           aria-label={`Select ${job.name || 'Untitled'}`}
-          className="size-4 accent-[var(--primary)]"
+          className="size-4.5 rounded border-border text-primary focus:ring-primary/20"
         />
       )}
 
@@ -43,11 +43,11 @@ export function JobCardHeader({ job, selected, onToggleSelect }: JobCardHeaderPr
           src={mediaInfo.thumbnail}
           alt=""
           loading="lazy"
-          className="size-8 shrink-0 rounded-md border border-border object-cover"
+        className="size-10 shrink-0 rounded-md border border-border object-cover"
           onError={() => setThumbnailFailed(true)}
         />
       ) : (
-        <span className="grid size-8 shrink-0 place-items-center rounded-md border border-border bg-surface-2 text-muted-foreground">
+        <span className="grid size-10 shrink-0 place-items-center rounded-md border border-border bg-surface-2 text-muted-foreground">
           <EngineIcon className="size-4" aria-hidden="true" />
         </span>
       )}
@@ -58,14 +58,14 @@ export function JobCardHeader({ job, selected, onToggleSelect }: JobCardHeaderPr
 export function JobCardMeta({ job }: { job: Job }) {
   return (
     <div className="min-w-0">
-      <p className="truncate text-sm font-medium" title={job.source}>
+      <p className="truncate text-sm font-semibold leading-5 text-foreground" title={job.name || job.source}>
         {job.name || 'Untitled'}
       </p>
 
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span
           className={cx(
-            'inline-flex items-center rounded border px-1.5 py-0.5 font-medium',
+            'inline-flex items-center rounded-md border px-2 py-0.5 font-medium',
             statusToneClass(job.status)
           )}
         >
@@ -77,7 +77,7 @@ export function JobCardMeta({ job }: { job: Job }) {
         <span aria-hidden="true">·</span>
         <span
           className={cx(
-            'inline-flex items-center rounded border px-1.5 py-0.5 font-medium',
+            'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-medium',
             priorityToneClass(job.priority)
           )}
         >

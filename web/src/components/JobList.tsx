@@ -19,7 +19,7 @@ interface JobListProps {
 
 export function JobList(props: JobListProps) {
   return (
-    <ul className="space-y-1.5">
+    <ul className="space-y-2.5">
       {props.jobs.map((job) => (
         <JobCard
           key={job.id}

@@ -1,5 +1,4 @@
-@import "tailwindcss" source(none);
-@source "../src";
+@import "tailwindcss";
 
 @theme inline {
   --radius-sm: calc(var(--radius) - 3px);

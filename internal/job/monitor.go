@@ -18,6 +18,7 @@ type Monitor struct {
 	// Track last DB persist time per job for tiered persistence
 	mu                  sync.Mutex
 	lastPersisted       map[string]time.Time
+	lastPolled          map[string]time.Time
 	consecutiveFailures map[string]int
 
 	lastCleanupSweep     time.Time
@@ -37,6 +38,7 @@ func NewMonitor(manager *Manager, interval time.Duration) *Monitor {
 		interval:             interval,
 		stopCh:               make(chan struct{}),
 		lastPersisted:        make(map[string]time.Time),
+		lastPolled:           make(map[string]time.Time),
 		consecutiveFailures:  make(map[string]int),
 		cleanupSweepInterval: 15 * time.Second,
 	}
@@ -64,7 +66,12 @@ func (m *Monitor) Stop() {
 func (m *Monitor) run(ctx context.Context) {
 	defer m.wg.Done()
 
-	ticker := time.NewTicker(m.interval)
+	baseInterval := 250 * time.Millisecond
+	if m.interval > 0 && m.interval < baseInterval {
+		baseInterval = m.interval
+	}
+
+	ticker := time.NewTicker(baseInterval)
 	defer ticker.Stop()
 
 	for {
@@ -107,6 +114,24 @@ func (m *Monitor) tick(ctx context.Context) {
 		}
 
 		if j.EngineID == "" {
+			continue
+		}
+
+		m.mu.Lock()
+		lastPoll := m.lastPolled[j.ID]
+		now := time.Now()
+		var due bool
+		if j.Type == TypeMedia || j.Engine == "ytdlp" {
+			due = lastPoll.IsZero() || now.Sub(lastPoll) >= 250*time.Millisecond
+		} else {
+			due = lastPoll.IsZero() || now.Sub(lastPoll) >= 1*time.Second
+		}
+		if due {
+			m.lastPolled[j.ID] = now
+		}
+		m.mu.Unlock()
+
+		if !due {
 			continue
 		}
 
@@ -194,6 +219,7 @@ func (m *Monitor) shouldPersist(jobID string, status interface{}) bool {
 func (m *Monitor) CleanupJob(jobID string) {
 	m.mu.Lock()
 	delete(m.lastPersisted, jobID)
+	delete(m.lastPolled, jobID)
 	delete(m.consecutiveFailures, jobID)
 	m.mu.Unlock()
 }

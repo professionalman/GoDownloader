@@ -6,6 +6,7 @@ import {
   formatSpeed,
   formatEta,
   getMediaSizeEstimate,
+  getCompletedDisplaySize,
 } from '../../downloadUi';
 
 interface JobProgressProps {
@@ -27,13 +28,20 @@ export function JobProgress({ job }: JobProgressProps) {
   const totalBytesDisplay = mediaEstimate.combinesSeparateAudio
     ? mediaEstimate.totalBytes
       ? `~${formatBytes(mediaEstimate.totalBytes)} est.`
-      : 'Unknown size'
+      : 'Size unavailable'
     : job.totalBytes > 0
     ? formatBytes(job.totalBytes)
-    : 'Unknown size';
+    : 'Size unavailable';
+
+  const formattedTimestamp = new Date(job.updatedAt || job.createdAt).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const isIndeterminateDownloading = isDownloading && job.progress <= 0 && job.completedBytes <= 0;
 
   return (
-    <div className="mt-2.5">
+    <div className="mt-2">
       {isAnalyzing && (
         <div className="flex items-center gap-2 text-xs text-info">
           <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
@@ -50,14 +58,25 @@ export function JobProgress({ job }: JobProgressProps) {
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
             <div className="h-full w-full animate-pulse bg-info" />
           </div>
-          <div className="flex justify-between text-xs text-info">
-            <span>Download finished — merging video and audio with FFmpeg</span>
+          <div className="flex justify-between text-xs text-info font-medium">
+            <span>Merging video and audio with FFmpeg…</span>
             <span>Processing</span>
           </div>
         </div>
       )}
 
-      {(isDownloading || isPaused) && (
+      {isIndeterminateDownloading && (
+        <div className="space-y-1.5">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+            <div className="h-full w-full animate-pulse bg-primary" />
+          </div>
+          <div className="flex justify-between text-xs font-medium text-primary">
+            <span>Starting media download…</span>
+          </div>
+        </div>
+      )}
+
+      {((isDownloading && !isIndeterminateDownloading) || isPaused) && (
         <div className="space-y-1.5">
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
             <div
@@ -97,16 +116,14 @@ export function JobProgress({ job }: JobProgressProps) {
       )}
 
       {isCompleted && (
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span className="font-medium text-success">Completed</span>
-          <span className="num">
-            {formatBytes(job.totalBytes > 0 ? job.totalBytes : job.completedBytes)}
-          </span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span className="num font-medium text-foreground">{getCompletedDisplaySize(job)}</span>
+          <span>Finished at {formattedTimestamp}</span>
         </div>
       )}
 
       {isFailed && job.error && (
-        <div className="mt-1 text-xs text-destructive" role="alert">
+        <div className="mt-1 text-xs font-medium text-destructive" role="alert">
           <span>{job.error}</span>
         </div>
       )}

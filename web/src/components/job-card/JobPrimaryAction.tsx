@@ -141,11 +141,12 @@ export function JobPrimaryAction({
     return (
       <button
         type="button"
-        className="flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 text-xs font-medium text-foreground hover:bg-surface-2"
+        className="grid size-9 place-items-center rounded-lg border border-border bg-surface-2 text-muted-foreground transition hover:border-border-strong hover:text-foreground"
+        aria-label="Open downloads folder"
+        title="Open downloads folder"
         onClick={onOpenFolder}
       >
-        <FolderOpen className="size-3.5" aria-hidden="true" />
-        Open downloads folder
+        <FolderOpen className="size-4" aria-hidden="true" />
       </button>
     );
   }

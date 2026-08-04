@@ -17,11 +17,11 @@ interface AppShellProps {
 const viewCopy: Record<ViewMode, { title: string; description: string }> = {
   downloads: {
     title: 'Downloads',
-    description: 'Create downloads and monitor live progress.',
+    description: 'Add sources, monitor transfers and manage active jobs.',
   },
   queue: {
-    title: 'Smart Queue',
-    description: 'Review queued jobs and manage their priority.',
+    title: 'Queue',
+    description: 'Scheduler slots, priority lanes and waiting reasons.',
   },
 };
 
@@ -148,8 +148,8 @@ export function AppShell({
           />
         </header>
 
-        <main className="shell-main">
-          <div className="shell-content">{children}</div>
+        <main className="min-w-0 flex-1 px-4 py-5 lg:px-6">
+          <div className="mx-auto w-full max-w-[1360px]">{children}</div>
         </main>
       </div>
     </div>

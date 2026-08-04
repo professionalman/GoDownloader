@@ -2142,6 +2142,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			}
 			j.FinalPath = finalPath
 			j.Name = filepath.Base(finalPath)
+			if fi, statErr := os.Stat(finalPath); statErr == nil && fi.Size() > 0 {
+				j.TotalBytes = fi.Size()
+				j.CompletedBytes = fi.Size()
+			}
 			m.updateActiveJobFinalization(j.ID, finalPath, j.Name)
 		}
 
@@ -2154,6 +2158,12 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		// Normal completion
 		j.Status = StatusCompleted
 		j.Progress = 100
+		if (j.TotalBytes <= 0 || j.CompletedBytes <= 0) && j.FinalPath != "" {
+			if fi, statErr := os.Stat(j.FinalPath); statErr == nil && fi.Size() > 0 {
+				j.TotalBytes = fi.Size()
+				j.CompletedBytes = fi.Size()
+			}
+		}
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()

@@ -5,6 +5,7 @@ import { createTrackerSource, deleteTrackerSource, getTrackerSources, refreshAll
 interface Props {
   settings: AppSettings | null;
   onSave: (payload: UpdateSettingsPayload) => Promise<void>;
+  activeSection?: 'all' | 'network' | 'direct' | 'torrents' | 'trackers';
 }
 
 interface TrackerSourceRowProps {
@@ -56,7 +57,7 @@ const TrackerSourceRow: React.FC<TrackerSourceRowProps> = ({ source, onChanged, 
   );
 };
 
-export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
+export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave, activeSection = 'all' }) => {
   const network = settings?.network;
   const torrent = settings?.torrent;
   const [globalLimit, setGlobalLimit] = useState(network?.globalDownloadLimitBytesPerSecond ?? 0);
@@ -147,7 +148,7 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
 
   return (
     <>
-      <section className="setting-section" style={{ marginTop: '1.5rem' }}>
+      <section className="setting-section" hidden={activeSection !== 'all' && activeSection !== 'network'}>
         <h4>Network</h4>
         <div className="power-grid">
           <label>Global download limit (bytes/s)<input type="number" min="0" value={globalLimit} onChange={(e) => setGlobalLimit(Number(e.target.value))} disabled={settings?.overrides?.['network.globalDownloadLimitBytesPerSecond']} /></label>
@@ -168,7 +169,7 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
           <label>Request timeout (seconds)<input type="number" min="0" max="86400" value={requestTimeout} onChange={(e) => setRequestTimeout(Number(e.target.value))} /></label>
         </div>
       </section>
-      <section className="setting-section" style={{ marginTop: '1.5rem' }}>
+      <section className="setting-section" hidden={activeSection !== 'all' && activeSection !== 'direct'}>
         <h4>Direct Downloads</h4>
         <div className="power-grid">
           <label>Splits<input type="number" min="1" max="16" value={split} onChange={(e) => setSplit(Number(e.target.value))} /></label>
@@ -176,7 +177,7 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
           <label>Minimum split (MiB)<input type="number" min="1" max="1024" value={minSplitMiB} onChange={(e) => setMinSplitMiB(Number(e.target.value))} /></label>
         </div>
       </section>
-      <section className="setting-section" style={{ marginTop: '1.5rem' }}>
+      <section className="setting-section" hidden={activeSection !== 'all' && activeSection !== 'torrents'}>
         <h4>Torrents</h4>
         <div className="power-grid">
           <label>Download limit (bytes/s)<input type="number" min="0" value={torrentDownload} onChange={(e) => setTorrentDownload(Number(e.target.value))} /></label>
@@ -190,7 +191,7 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave }) => {
         <button type="button" className="btn btn-primary" onClick={() => savePower().catch((error) => setStatus(error.message))}>Save network controls</button>
         {status && <div className="setting-notice">{status}</div>}
       </section>
-      <section className="setting-section" style={{ marginTop: '1.5rem' }}>
+      <section className="setting-section" hidden={activeSection !== 'all' && activeSection !== 'trackers'}>
         <h4>Tracker Sources</h4>
         {sources.map((source) => <TrackerSourceRow
           key={source.id}

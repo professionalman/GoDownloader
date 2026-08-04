@@ -45,6 +45,18 @@ describe('DownloadForm Refactored Suite', () => {
     });
   });
 
+  it('top row has exactly input, attachment, start, and single chevron toggle', () => {
+    render(<DownloadForm onSubmit={vi.fn()} />);
+
+    expect(screen.getByPlaceholderText(/Paste a URL or magnet link/i)).toBeInTheDocument();
+    expect(screen.getByTitle('Add .torrent file')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Start/i })).toBeInTheDocument();
+    expect(screen.getByTitle('Toggle download options')).toBeInTheDocument();
+
+    // Verify top row does not contain separate layers or settings icons
+    expect(screen.queryByTitle('Switch to batch mode')).not.toBeInTheDocument();
+  });
+
   it('preserves source text and options when submission fails', async () => {
     const onSubmit = vi.fn().mockRejectedValue(new Error('Network error starting download'));
     render(<DownloadForm onSubmit={onSubmit} />);
@@ -96,7 +108,7 @@ describe('DownloadForm Refactored Suite', () => {
     await waitFor(() => expect(input).toHaveValue(''));
   });
 
-  it('allows batch mode and basic options to be configured independently', async () => {
+  it('allows batch mode and basic options to be configured inside expanded panel', async () => {
     render(<DownloadForm onSubmit={vi.fn()} />);
 
     // Toggle basic options
@@ -104,10 +116,7 @@ describe('DownloadForm Refactored Suite', () => {
     fireEvent.click(optionsBtn);
     expect(screen.getByLabelText('Priority')).toBeInTheDocument();
 
-    // Input remains single line input
-    expect(screen.getByPlaceholderText(/Paste a URL or magnet link/i)).toBeInTheDocument();
-
-    // Toggle batch mode
+    // Toggle batch mode inside expanded panel
     const batchBtn = screen.getByTitle('Switch to batch mode');
     fireEvent.click(batchBtn);
     expect(screen.getByPlaceholderText(/Paste download URLs or magnet links — one per line/i)).toBeInTheDocument();

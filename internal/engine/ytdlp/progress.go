@@ -6,6 +6,24 @@ import (
 	"strings"
 )
 
+const finalPathPrefix = "__GODOWNLOADER_FINAL_PATH__:"
+
+// parseFinalPathLine extracts the authoritative final output filepath from --print after_move lines.
+func parseFinalPathLine(line string) string {
+	line = strings.TrimSpace(line)
+	if idx := strings.Index(line, finalPathPrefix); idx != -1 {
+		raw := line[idx+len(finalPathPrefix):]
+		raw = strings.TrimSpace(raw)
+		if len(raw) >= 2 {
+			if (raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'') {
+				raw = raw[1 : len(raw)-1]
+			}
+		}
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
+
 // progressInfo holds parsed progress data from yt-dlp output.
 type progressInfo struct {
 	Percent         float64
@@ -29,17 +47,109 @@ var (
 	mergerRe = regexp.MustCompile(`\[Merger\]|\[ffmpeg\]|\[ExtractAudio\]`)
 )
 
+const progressPrefix = "__GODOWNLOADER_PROGRESS__:"
+
 // parseProgressLine parses structured or standard yt-dlp progress lines into progressInfo.
 func parseProgressLine(line string) *progressInfo {
 	line = strings.TrimSpace(line)
 
-	// Check for structured --progress-template output: download:percent|downloaded|total|speed|eta
+	if idx := strings.Index(line, progressPrefix); idx != -1 {
+		content := line[idx+len(progressPrefix):]
+		parts := strings.Split(content, "|")
+		if len(parts) >= 5 {
+			percentStr := strings.TrimSuffix(strings.TrimSpace(parts[0]), "%")
+			percent, err := strconv.ParseFloat(percentStr, 64)
+			if err != nil {
+				percent = 0
+			}
+			if percent < 0 {
+				percent = 0
+			}
+			if percent > 100 {
+				percent = 100
+			}
+
+			dlBytes := parseNumberOrNA(parts[1])
+			totalBytes := parseNumberOrNA(parts[2])
+			estTotalBytes := int64(0)
+			if len(parts) >= 6 {
+				estTotalBytes = parseNumberOrNA(parts[3])
+				speed := parseNumberOrNA(parts[4])
+				eta := parseNumberOrNA(parts[5])
+
+				effectiveTotal := totalBytes
+				if effectiveTotal <= 0 {
+					effectiveTotal = estTotalBytes
+				}
+
+				if effectiveTotal > 0 && dlBytes <= 0 && percent > 0 {
+					dlBytes = int64(float64(effectiveTotal) * percent / 100.0)
+				}
+
+				if dlBytes < 0 {
+					dlBytes = 0
+				}
+				if effectiveTotal < 0 {
+					effectiveTotal = 0
+				}
+				if speed < 0 {
+					speed = 0
+				}
+				if eta < 0 {
+					eta = 0
+				}
+
+				return &progressInfo{
+					Percent:         percent,
+					TotalBytes:      effectiveTotal,
+					DownloadedBytes: dlBytes,
+					Speed:           speed,
+					ETASeconds:      eta,
+				}
+			}
+
+			speed := parseNumberOrNA(parts[3])
+			eta := parseNumberOrNA(parts[4])
+
+			if totalBytes > 0 && dlBytes <= 0 && percent > 0 {
+				dlBytes = int64(float64(totalBytes) * percent / 100.0)
+			}
+
+			if dlBytes < 0 {
+				dlBytes = 0
+			}
+			if totalBytes < 0 {
+				totalBytes = 0
+			}
+			if speed < 0 {
+				speed = 0
+			}
+			if eta < 0 {
+				eta = 0
+			}
+
+			return &progressInfo{
+				Percent:         percent,
+				TotalBytes:      totalBytes,
+				DownloadedBytes: dlBytes,
+				Speed:           speed,
+				ETASeconds:      eta,
+			}
+		}
+	}
+
 	if strings.HasPrefix(line, "download:") {
 		content := strings.TrimPrefix(line, "download:")
 		parts := strings.Split(content, "|")
 		if len(parts) >= 5 {
 			percentStr := strings.TrimSuffix(strings.TrimSpace(parts[0]), "%")
 			percent, _ := strconv.ParseFloat(percentStr, 64)
+			if percent < 0 {
+				percent = 0
+			}
+			if percent > 100 {
+				percent = 100
+			}
 
 			dlBytes := parseNumberOrNA(parts[1])
 			totalBytes := parseNumberOrNA(parts[2])
@@ -48,6 +158,19 @@ func parseProgressLine(line string) *progressInfo {
 
 			if totalBytes > 0 && dlBytes == 0 && percent > 0 {
 				dlBytes = int64(float64(totalBytes) * percent / 100.0)
+			}
+
+			if dlBytes < 0 {
+				dlBytes = 0
+			}
+			if totalBytes < 0 {
+				totalBytes = 0
+			}
+			if speed < 0 {
+				speed = 0
+			}
+			if eta < 0 {
+				eta = 0
 			}
 
 			return &progressInfo{

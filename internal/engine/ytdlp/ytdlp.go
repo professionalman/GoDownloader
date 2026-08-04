@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -17,14 +18,15 @@ import (
 
 // downloadState tracks an active yt-dlp download process.
 type downloadState struct {
-	cancel     context.CancelFunc
-	progress   progressInfo
-	mu         sync.Mutex
-	done       bool
-	cancelled  bool
-	err        string
-	postProc   bool // true when FFmpeg is post-processing
-	outputPath string
+	cancel              context.CancelFunc
+	progress            progressInfo
+	mu                  sync.Mutex
+	done                bool
+	cancelled           bool
+	err                 string
+	postProc            bool // true when FFmpeg is post-processing
+	candidateOutputPath string
+	finalOutputPath     string
 }
 
 var (
@@ -83,10 +85,13 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	// Build command arguments
 	args := []string{
 		"--newline", // Force progress on new lines
-		"--progress-template", "download:%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s|%(progress.eta)s",
+		"--progress",
+		"--progress-delta", "0.25",
+		"--progress-template", "download:__GODOWNLOADER_PROGRESS__:%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
+		"--print", "after_move:" + finalPathPrefix + "%(filepath)s",
 		"--no-playlist", // Single video only
 		"--no-overwrites",
-		"-o", downloadDir + "/%(title)s.%(ext)s",
+		"-o", filepath.Join(downloadDir, "%(title)s.%(ext)s"),
 	}
 
 	if e.ffmpegPath != "" {
@@ -111,7 +116,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	e.mu.Unlock()
 
 	// Launch download in background goroutine
-	go e.runDownload(dlCtx, j.ID, state, args)
+	go e.runDownload(dlCtx, j.ID, state, downloadDir, args)
 
 	return j.ID, nil
 }
@@ -200,9 +205,16 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	var outputPath string
+	if state.finalOutputPath != "" {
+		outputPath = state.finalOutputPath
+	} else if state.candidateOutputPath != "" {
+		outputPath = state.candidateOutputPath
+	}
+
 	var fileName string
-	if state.outputPath != "" {
-		fileName = filepath.Base(state.outputPath)
+	if outputPath != "" {
+		fileName = filepath.Base(outputPath)
 	}
 
 	if state.done {
@@ -211,7 +223,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 				Status:     job.StatusCancelled,
 				Progress:   state.progress.Percent,
 				FileName:   fileName,
-				OutputPath: state.outputPath,
+				OutputPath: outputPath,
 			}, nil
 		}
 		if state.err != "" {
@@ -220,7 +232,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 				Error:      state.err,
 				Progress:   state.progress.Percent,
 				FileName:   fileName,
-				OutputPath: state.outputPath,
+				OutputPath: outputPath,
 			}, nil
 		}
 		return &job.EngineStatus{
@@ -229,7 +241,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 			TotalBytes:     state.progress.TotalBytes,
 			CompletedBytes: state.progress.TotalBytes,
 			FileName:       fileName,
-			OutputPath:     state.outputPath,
+			OutputPath:     outputPath,
 		}, nil
 	}
 
@@ -240,7 +252,7 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 			TotalBytes:     state.progress.TotalBytes,
 			CompletedBytes: state.progress.DownloadedBytes,
 			FileName:       fileName,
-			OutputPath:     state.outputPath,
+			OutputPath:     outputPath,
 		}, nil
 	}
 
@@ -252,22 +264,173 @@ func (e *Engine) Status(ctx context.Context, j *job.Job) (*job.EngineStatus, err
 		SpeedBytesPerSecond: state.progress.Speed,
 		ETASeconds:          state.progress.ETASeconds,
 		FileName:            fileName,
-		OutputPath:          state.outputPath,
+		OutputPath:          outputPath,
 	}, nil
 }
 
+// validateFinalPath validates that path is non-empty, exists, is a regular file, and resides inside workDir.
+func validateFinalPath(workDir, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if len(path) >= 2 {
+		if (path[0] == '"' && path[len(path)-1] == '"') || (path[0] == '\'' && path[len(path)-1] == '\'') {
+			path = path[1 : len(path)-1]
+		}
+	}
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) && workDir != "" {
+		path = filepath.Join(workDir, path)
+	}
+
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to get abs workDir: %v", err)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to get abs path: %v", err)
+	}
+
+	rel, err := filepath.Rel(absWorkDir, absPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path %s escapes work directory %s", absPath, absWorkDir)
+	}
+
+	fi, err := os.Stat(absPath)
+	if err != nil {
+		return "", fmt.Errorf("file does not exist: %v", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("path %s is not a regular file", absPath)
+	}
+
+	base := strings.ToLower(filepath.Base(absPath))
+	if base == ".godownloader-workdir" ||
+		strings.HasSuffix(base, ".part") ||
+		strings.HasSuffix(base, ".ytdl") ||
+		strings.HasSuffix(base, ".tmp") ||
+		strings.HasSuffix(base, ".temp") {
+		return "", fmt.Errorf("path %s is a temporary or partial file", absPath)
+	}
+
+	return absPath, nil
+}
+
+// discoverFinalMediaFile scans workDir for plausible media files when no authoritative after_move path was captured.
+func discoverFinalMediaFile(workDir string) (string, error) {
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read workDir %s: %v", workDir, err)
+	}
+
+	var candidates []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		lowerName := strings.ToLower(name)
+
+		if lowerName == ".godownloader-workdir" ||
+			strings.HasSuffix(lowerName, ".part") ||
+			strings.HasSuffix(lowerName, ".ytdl") ||
+			strings.HasSuffix(lowerName, ".tmp") ||
+			strings.HasSuffix(lowerName, ".temp") ||
+			strings.HasSuffix(lowerName, ".jpg") ||
+			strings.HasSuffix(lowerName, ".jpeg") ||
+			strings.HasSuffix(lowerName, ".png") ||
+			strings.HasSuffix(lowerName, ".webp") ||
+			strings.HasSuffix(lowerName, ".vtt") ||
+			strings.HasSuffix(lowerName, ".srt") ||
+			strings.HasSuffix(lowerName, ".ass") ||
+			strings.HasSuffix(lowerName, ".info.json") ||
+			strings.HasSuffix(lowerName, ".description") ||
+			strings.HasSuffix(lowerName, ".txt") ||
+			strings.HasSuffix(lowerName, ".lock") {
+			continue
+		}
+
+		fullPath := filepath.Join(workDir, name)
+		if fi, err := os.Stat(fullPath); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+			candidates = append(candidates, fullPath)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no plausible media output files found in %s", workDir)
+	}
+	if len(candidates) > 1 {
+		return "", fmt.Errorf("multiple plausible media output files found in %s: %v", workDir, candidates)
+	}
+
+	return candidates[0], nil
+}
+
+func (e *Engine) handleYTDLPLine(jobID string, state *downloadState, line string, source string) {
+	if os.Getenv("GODOWNLOADER_DEBUG_YTDLP_PROGRESS") == "1" {
+		log.Printf("[ytdlp debug %s job=%s] %s", source, jobID, line)
+	}
+
+	if finalPath := parseFinalPathLine(line); finalPath != "" {
+		state.mu.Lock()
+		if state.finalOutputPath == "" {
+			state.finalOutputPath = finalPath
+			log.Printf("ytdlp: captured final output path for job %s: %s", jobID, finalPath)
+		}
+		state.mu.Unlock()
+	}
+
+	if outPath := parseOutputPathLine(line); outPath != "" {
+		state.mu.Lock()
+		state.candidateOutputPath = outPath
+		state.mu.Unlock()
+	}
+
+	if isPostProcessingLine(line) {
+		state.mu.Lock()
+		state.postProc = true
+		state.mu.Unlock()
+		log.Printf("ytdlp: job %s entered post-processing", jobID)
+		return
+	}
+
+	if prog := parseProgressLine(line); prog != nil {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+
+		if state.postProc {
+			return
+		}
+
+		if prog.Percent >= state.progress.Percent || state.progress.Percent >= 100 {
+			state.progress = *prog
+		} else {
+			state.progress.Speed = prog.Speed
+			state.progress.ETASeconds = prog.ETASeconds
+			if prog.DownloadedBytes > 0 {
+				state.progress.DownloadedBytes = prog.DownloadedBytes
+			}
+		}
+
+		if os.Getenv("GODOWNLOADER_DEBUG_YTDLP_PROGRESS") == "1" {
+			log.Printf("[ytdlp debug parsed job=%s] percent=%.1f%% dl=%d total=%d speed=%d eta=%d",
+				jobID, state.progress.Percent, state.progress.DownloadedBytes, state.progress.TotalBytes, state.progress.Speed, state.progress.ETASeconds)
+		}
+	}
+}
+
 // runDownload executes yt-dlp and parses its output in real-time.
-func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, args []string) {
+func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, downloadDir string, args []string) {
 	cmd := exec.CommandContext(ctx, e.ytdlpPath, args...)
 
-	// Capture stdout for progress
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		e.markFailed(state, fmt.Sprintf("failed to create stdout pipe: %v", err))
 		return
 	}
 
-	// Capture stderr for errors
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		e.markFailed(state, fmt.Sprintf("failed to create stderr pipe: %v", err))
@@ -279,60 +442,48 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 		return
 	}
 
-	log.Printf("ytdlp: started download for job %s (pid=%d)", jobID, cmd.Process.Pid)
+	log.Printf("ytdlp: started download for job %s (pid=%d, workDir=%s)", jobID, cmd.Process.Pid, downloadDir)
 
-	// Read stderr in a separate goroutine to collect error messages
 	var stderrLines []string
 	var stderrMu sync.Mutex
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.handleYTDLPLine(jobID, state, line, "stdout")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			stderrMu.Lock()
 			stderrLines = append(stderrLines, line)
 			stderrMu.Unlock()
+			e.handleYTDLPLine(jobID, state, line, "stderr")
 		}
 	}()
 
-	// Parse stdout progress in real time
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if outPath := parseOutputPathLine(line); outPath != "" {
-			state.mu.Lock()
-			state.outputPath = outPath
-			state.mu.Unlock()
-		}
-
-		// Check for post-processing markers
-		if isPostProcessingLine(line) {
-			state.mu.Lock()
-			state.postProc = true
-			state.mu.Unlock()
-			log.Printf("ytdlp: job %s entered post-processing", jobID)
-			continue
-		}
-
-		// Parse progress
-		if prog := parseProgressLine(line); prog != nil {
-			state.mu.Lock()
-			state.progress = *prog
-			state.mu.Unlock()
-		}
-	}
+	wg.Wait()
 
 	// Wait for process to exit
 	err = cmd.Wait()
 
 	state.mu.Lock()
-	state.done = true
+	defer state.mu.Unlock()
+
 	if err != nil {
+		state.done = true
 		if ctx.Err() != nil {
-			// Cancelled via context
 			state.cancelled = true
 			state.err = ""
-			state.mu.Unlock()
 			log.Printf("ytdlp: job %s was cancelled", jobID)
 			return
 		}
@@ -347,13 +498,40 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 		}
 		stderrMu.Unlock()
 		state.err = errMsg
-		state.mu.Unlock()
 		log.Printf("ytdlp: job %s failed: %s", jobID, errMsg)
 		return
 	}
-	state.mu.Unlock()
 
-	log.Printf("ytdlp: job %s completed successfully", jobID)
+	// Process exited cleanly (exit code 0): resolve final output path
+	var resolvedPath string
+	var resolveErr error
+
+	if state.finalOutputPath != "" {
+		resolvedPath, resolveErr = validateFinalPath(downloadDir, state.finalOutputPath)
+	}
+	if resolvedPath == "" && state.candidateOutputPath != "" {
+		resolvedPath, resolveErr = validateFinalPath(downloadDir, state.candidateOutputPath)
+	}
+	if resolvedPath == "" {
+		resolvedPath, resolveErr = discoverFinalMediaFile(downloadDir)
+	}
+
+	if resolveErr != nil || resolvedPath == "" {
+		state.done = true
+		state.err = fmt.Sprintf("yt-dlp exited successfully, but the final media output could not be found in %s: %v", downloadDir, resolveErr)
+		log.Printf("ytdlp: job %s finalization error: %s", jobID, state.err)
+		return
+	}
+
+	if fi, statErr := os.Stat(resolvedPath); statErr == nil && fi.Size() > 0 {
+		state.progress.TotalBytes = fi.Size()
+		state.progress.DownloadedBytes = fi.Size()
+		state.progress.Percent = 100.0
+	}
+
+	state.finalOutputPath = resolvedPath
+	state.done = true
+	log.Printf("ytdlp: job %s completed successfully with final output path %s (%d bytes)", jobID, resolvedPath, state.progress.TotalBytes)
 }
 
 // markFailed sets the download state to failed.
