@@ -61,6 +61,7 @@ func setupReconciliationTestEnv(t *testing.T, initialStatus JobStatus, policy ne
 		DestinationDir:    downloadDir,
 		SeedAfterComplete: seedAfter,
 		SeedingPolicy:     policy,
+		TotalBytes:        1000,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
 		EngineID:          "rec1111222233334444555566667777",
@@ -74,6 +75,9 @@ func setupReconciliationTestEnv(t *testing.T, initialStatus JobStatus, policy ne
 		SeedingPolicy:     policy,
 	}
 	_ = torrentRepo.CreateTorrentJob(context.Background(), rec)
+	_ = torrentRepo.SaveTorrentFiles(context.Background(), j.ID, []TorrentFileRecord{
+		{JobID: j.ID, FileIndex: 0, Selected: true, Priority: "normal", Size: 1000},
+	})
 
 	fakeEng := &fakeTorrentEngine{
 		fakeEngine: &fakeEngine{},

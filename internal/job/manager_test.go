@@ -490,8 +490,6 @@ func (f *fakeTorrentRepository) PersistTorrentSelectionAndEnqueue(ctx context.Co
 	return nil
 }
 
-
-
 var _ ITorrentRepository = (*fakeTorrentRepository)(nil)
 
 func setupManagerTest(t *testing.T) (*Manager, *fakeEngine, *fakeEventBus, func(), *fakeTorrentEngine) {
@@ -2120,8 +2118,9 @@ func TestManager_SetPriority_QueueReadFailure(t *testing.T) {
 }
 
 type fakeQueueRepo struct {
-	entries map[string]*QueueEntry
-	getErr  error
+	entries    map[string]*QueueEntry
+	getErr     error
+	nextPosErr error
 }
 
 func (f *fakeQueueRepo) Enqueue(ctx context.Context, entry *QueueEntry) error {
@@ -2160,6 +2159,9 @@ func (f *fakeQueueRepo) List(ctx context.Context) ([]QueuedJob, error) {
 	return nil, nil
 }
 func (f *fakeQueueRepo) NextPosition(ctx context.Context, priority JobPriority) (int64, error) {
+	if f.nextPosErr != nil {
+		return 0, f.nextPosErr
+	}
 	return 10, nil
 }
 func (f *fakeQueueRepo) Reorder(ctx context.Context, priority JobPriority, orderedJobIDs []string) error {

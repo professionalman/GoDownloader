@@ -1432,11 +1432,55 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 		}
 	}
 
-	// 5. Apply seeding policy to engine before persistence
+	// 5. Apply file priorities to qBittorrent engine while torrent remains stopped
+	if err := torrentEng.SetFilePriorities(ctx, j.EngineID, selections); err != nil {
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
+	}
+
+	// 6. Apply seeding policy to engine while torrent remains stopped
 	if controller, ok := eng.(ISeedingPolicyController); ok {
 		if err := controller.ApplySeedingPolicy(ctx, j, policy); err != nil {
 			return nil, &AppError{Code: ErrNetworkSettingApplicationFailed, Message: fmt.Sprintf("failed to apply seeding policy: %v", err)}
 		}
+	}
+
+	// 7. Retrieve torrent job record (stop immediately on real error)
+	var rec *TorrentJobRecord
+	if m.torrentRepo != nil {
+		var getErr error
+		rec, getErr = m.torrentRepo.GetTorrentJob(ctx, id)
+		if getErr != nil && getErr.Error() != "not found" {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to get torrent job record: %v", getErr)}
+		}
+		if rec != nil {
+			rec = cloneTorrentRecord(rec)
+			rec.SeedAfterComplete = policy.Mode != networkpolicy.SeedingModeNone
+			rec.SeedingPolicy = policy
+		}
+	}
+
+	// 8. Retrieve next queue position (stop immediately on error)
+	var pos int64
+	if m.queueRepo != nil {
+		prio := j.Priority
+		if prio == "" {
+			prio = JobPriorityNormal
+		}
+		var posErr error
+		pos, posErr = m.queueRepo.NextPosition(ctx, prio)
+		if posErr != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to calculate next queue position: %v", posErr)}
+		}
+	} else {
+		pos = time.Now().UnixNano()
+	}
+
+	qe := &QueueEntry{
+		JobID:      j.ID,
+		Position:   pos,
+		Action:     QueueActionStart,
+		EnqueuedAt: time.Now(),
+		UpdatedAt:  time.Now(),
 	}
 
 	j.TotalBytes = selectedBytes
@@ -1446,7 +1490,7 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 	j.Error = ""
 	j.UpdatedAt = time.Now()
 
-	// 6. Transactionally persist selection, seeding policy, job state, and queue entry
+	// 9. Transactionally persist selection, seeding policy, job state, and queue entry
 	var records []TorrentFileRecord
 	for _, s := range selections {
 		records = append(records, TorrentFileRecord{
@@ -1455,34 +1499,6 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 			Selected:  s.Priority != PrioritySkip,
 			Priority:  string(s.Priority),
 		})
-	}
-
-	var rec *TorrentJobRecord
-	if m.torrentRepo != nil {
-		var getErr error
-		rec, getErr = m.torrentRepo.GetTorrentJob(ctx, id)
-		if getErr == nil && rec != nil {
-			rec = cloneTorrentRecord(rec)
-			rec.SeedAfterComplete = j.SeedAfterComplete
-			rec.SeedingPolicy = policy
-		}
-	}
-
-	qe := &QueueEntry{
-		JobID:      j.ID,
-		Position:   time.Now().UnixNano(),
-		Action:     QueueActionStart,
-		EnqueuedAt: time.Now(),
-		UpdatedAt:  time.Now(),
-	}
-	if m.queueRepo != nil {
-		prio := j.Priority
-		if prio == "" {
-			prio = JobPriorityNormal
-		}
-		if pos, posErr := m.queueRepo.NextPosition(ctx, prio); posErr == nil {
-			qe.Position = pos
-		}
 	}
 
 	if m.torrentRepo != nil {
@@ -1499,11 +1515,6 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 			}
 			return nil, fmt.Errorf("update job status: %w", err)
 		}
-	}
-
-	// 7. Apply file priorities to qBittorrent engine after durable persistence
-	if err := torrentEng.SetFilePriorities(ctx, j.EngineID, selections); err != nil {
-		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
 	}
 
 	// Fallback for test doubles created without scheduler
@@ -2564,7 +2575,7 @@ func (m *Manager) GetScheduler() *Scheduler {
 
 func (m *Manager) calculatePersistedSelectedTorrentBytes(ctx context.Context, jobID string) (int64, error) {
 	if m.torrentRepo == nil {
-		return 0, nil
+		return 0, fmt.Errorf("torrent repository not available")
 	}
 	files, err := m.torrentRepo.GetTorrentFiles(ctx, jobID)
 	if err != nil {
@@ -2576,7 +2587,14 @@ func (m *Manager) calculatePersistedSelectedTorrentBytes(ctx context.Context, jo
 	var selectedBytes int64
 	hasSelected := false
 	for _, f := range files {
-		if f.Selected || (f.Priority != "" && f.Priority != string(PrioritySkip)) {
+		isSkipPriority := (f.Priority == string(PrioritySkip) || f.Priority == "skip")
+		if !f.Selected && !isSkipPriority {
+			return 0, fmt.Errorf("inconsistent selection record for job %s file index %d: Selected=false but Priority=%s", jobID, f.FileIndex, f.Priority)
+		}
+		if f.Selected && isSkipPriority {
+			return 0, fmt.Errorf("inconsistent selection record for job %s file index %d: Selected=true but Priority=skip", jobID, f.FileIndex)
+		}
+		if f.Selected && !isSkipPriority {
 			selectedBytes += f.Size
 			hasSelected = true
 		}
@@ -2584,32 +2602,47 @@ func (m *Manager) calculatePersistedSelectedTorrentBytes(ctx context.Context, jo
 	if !hasSelected {
 		return 0, fmt.Errorf("no files selected in torrent selection record for job %s", jobID)
 	}
+	if selectedBytes <= 0 {
+		return 0, fmt.Errorf("invalid total selected bytes %d for job %s", selectedBytes, jobID)
+	}
 	return selectedBytes, nil
 }
 
 func (m *Manager) persistDispatchFailure(ctx context.Context, j *Job, qj *QueuedJob, targetStatus JobStatus, dispatchErr error) error {
 	// 1. Explicitly stop/pause external torrent engine to ensure no background downloading continues
+	reconcileNeeded := false
 	if j.EngineID != "" {
 		if eng, ok := m.engines.Get(j.Engine); ok {
-			_ = eng.Pause(ctx, j)
+			if pauseErr := eng.Pause(ctx, j); pauseErr != nil {
+				log.Printf("persistDispatchFailure: Pause returned error for job %s: %v", j.ID, pauseErr)
+				reconcileNeeded = true
+			}
 			if torrentEng, ok := eng.(ITorrentEngine); ok {
-				_ = torrentEng.StopDownload(ctx, j.EngineID)
-				rawState, err := torrentEng.GetRawState(ctx, j.EngineID)
-				if err == nil && rawState != "" {
+				if stopErr := torrentEng.StopDownload(ctx, j.EngineID); stopErr != nil {
+					log.Printf("persistDispatchFailure: StopDownload returned error for job %s: %v", j.ID, stopErr)
+					reconcileNeeded = true
+				}
+				rawState, rawErr := torrentEng.GetRawState(ctx, j.EngineID)
+				if rawErr != nil {
+					log.Printf("persistDispatchFailure: GetRawState returned error for job %s: %v", j.ID, rawErr)
+					reconcileNeeded = true
+				} else if rawState == "" {
+					log.Printf("persistDispatchFailure: GetRawState returned empty string for job %s", j.ID)
+					reconcileNeeded = true
+				} else {
 					switch rawState {
 					case "stoppedDL", "pausedDL", "stoppedUP", "pausedUP", "paused", "stopped":
 						// Confirmed stopped/paused raw state
 					default:
 						log.Printf("persistDispatchFailure: torrent %s raw state %q after stop attempt", j.EngineID, rawState)
-						_ = eng.Pause(ctx, j)
-						rawState2, _ := torrentEng.GetRawState(ctx, j.EngineID)
-						if rawState2 != "stoppedDL" && rawState2 != "pausedDL" && rawState2 != "stoppedUP" && rawState2 != "pausedUP" && rawState2 != "paused" && rawState2 != "stopped" {
-							j.NetworkReconcilePending = true
-						}
+						reconcileNeeded = true
 					}
 				}
 			}
 		}
+	}
+	if reconcileNeeded {
+		j.NetworkReconcilePending = true
 	}
 
 	j.Status = targetStatus
@@ -2683,13 +2716,28 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 
 	if j.Type == TypeTorrent {
 		selBytes, selErr := m.calculatePersistedSelectedTorrentBytes(ctx, j.ID)
-		if selErr == nil && selBytes > 0 {
-			if j.TotalBytes != selBytes {
-				j.TotalBytes = selBytes
-				_ = m.repo.Update(ctx, j)
+		if selErr != nil {
+			log.Printf("dispatchQueuedJob: persisted selection validation failed for job %s: %v", j.ID, selErr)
+			targetStatus := StatusPaused
+			if qj.Action == QueueActionStart {
+				targetStatus = StatusFailed
 			}
-			preflightTotal = selBytes
+			return m.persistDispatchFailure(ctx, j, qj, targetStatus, fmt.Errorf("invalid or missing persisted file selections: %w", selErr))
 		}
+		if selBytes <= 0 {
+			log.Printf("dispatchQueuedJob: invalid selected bytes for job %s: %d", j.ID, selBytes)
+			targetStatus := StatusPaused
+			if qj.Action == QueueActionStart {
+				targetStatus = StatusFailed
+			}
+			return m.persistDispatchFailure(ctx, j, qj, targetStatus, fmt.Errorf("invalid total selected bytes %d", selBytes))
+		}
+		if j.TotalBytes != selBytes {
+			j.TotalBytes = selBytes
+			_ = m.repo.Update(ctx, j)
+		}
+		preflightTotal = selBytes
+
 		if qj.Action == QueueActionStart || preflightCompleted > preflightTotal {
 			preflightCompleted = 0
 		}

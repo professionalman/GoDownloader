@@ -311,20 +311,28 @@ func (r *SQLiteTorrentRepository) PersistTorrentSelectionAndEnqueue(ctx context.
 	}
 	defer tx.Rollback()
 
-	// 1. Update file selections
+	// 1. Update file selections (require exactly 1 row affected per selection)
 	for _, s := range selections {
 		selectedInt := 0
 		if s.Selected {
 			selectedInt = 1
 		}
-		if _, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`UPDATE torrent_files SET selected=?, priority=? WHERE job_id=? AND file_index=?`,
-			selectedInt, s.Priority, j.ID, s.FileIndex); err != nil {
+			selectedInt, s.Priority, j.ID, s.FileIndex)
+		if err != nil {
 			return fmt.Errorf("update torrent_files: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("torrent_files rows affected check: %w", err)
+		}
+		if rows != 1 {
+			return fmt.Errorf("torrent_files row missing for job_id=%s file_index=%d (affected %d rows)", j.ID, s.FileIndex, rows)
 		}
 	}
 
-	// 2. Update torrent job record if provided
+	// 2. Update torrent job record if provided (require exactly 1 row affected)
 	if rec != nil {
 		seedingMode := rec.SeedingPolicy.Mode
 		if seedingMode == "" {
@@ -351,33 +359,50 @@ func (r *SQLiteTorrentRepository) PersistTorrentSelectionAndEnqueue(ctx context.
 			return fmt.Errorf("marshal trackers: %w", marshalErr)
 		}
 
-		if _, err := tx.ExecContext(ctx, `UPDATE torrent_jobs SET info_hash=?, name=?, total_size=?, seed_after_complete=?, torrent_file_path=?,
+		res, err := tx.ExecContext(ctx, `UPDATE torrent_jobs SET info_hash=?, name=?, total_size=?, seed_after_complete=?, torrent_file_path=?,
 			seeding_mode=?, seed_ratio_limit=?, seed_time_limit_seconds=?, seeding_started_at=?,
 			seeding_stop_reason=?, seeding_reconcile_pending=?, custom_trackers_json=? WHERE job_id=?`,
 			rec.InfoHash, rec.Name, rec.TotalSize, rec.SeedAfterComplete, rec.TorrentFilePath,
-			seedingMode, ratio, duration, started, rec.SeedingStopReason, rec.SeedingReconcilePending, string(trackersJSON), j.ID); err != nil {
+			seedingMode, ratio, duration, started, rec.SeedingStopReason, rec.SeedingReconcilePending, string(trackersJSON), j.ID)
+		if err != nil {
 			return fmt.Errorf("update torrent_jobs: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("torrent_jobs rows affected check: %w", err)
+		}
+		if rows != 1 {
+			return fmt.Errorf("torrent_jobs row missing for job_id=%s (affected %d rows)", j.ID, rows)
 		}
 	}
 
-	// 3. Update main job table: total_bytes = selectedBytes, status = queued, error = '', updated_at
+	// 3. Update main job table: total_bytes = selectedBytes, status = queued, error = '', updated_at (require exactly 1 row affected)
 	networkJSON, err := json.Marshal(j.NetworkPolicy)
 	if err != nil {
 		return fmt.Errorf("marshal network policy: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET total_bytes=?, status=?, error='', updated_at=?,
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET total_bytes=?, status=?, error='', updated_at=?,
 		network_policy_json=?, effective_download_limit_bps=?, effective_upload_limit_bps=?, network_reconcile_pending=? WHERE id=?`,
 		j.TotalBytes, j.Status, j.UpdatedAt, string(networkJSON),
 		j.EffectiveDownloadLimitBytesPerSecond, j.EffectiveUploadLimitBytesPerSecond,
-		j.NetworkReconcilePending, j.ID); err != nil {
+		j.NetworkReconcilePending, j.ID)
+	if err != nil {
 		return fmt.Errorf("update jobs table: %w", err)
 	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("jobs rows affected check: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("jobs row missing for id=%s (affected %d rows)", j.ID, rows)
+	}
 
-	// 4. Insert or replace queue entry
+	// 4. Upsert queue entry
 	if qe != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO job_queue (job_id, position, action, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		if _, err := tx.ExecContext(ctx, `INSERT INTO job_queue (job_id, position, action, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(job_id) DO UPDATE SET position=excluded.position, action=excluded.action, enqueued_at=excluded.enqueued_at, updated_at=excluded.updated_at`,
 			qe.JobID, qe.Position, string(qe.Action), qe.EnqueuedAt, qe.UpdatedAt); err != nil {
-			return fmt.Errorf("insert job_queue: %w", err)
+			return fmt.Errorf("upsert job_queue: %w", err)
 		}
 	}
 
