@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,8 +42,8 @@ func (m *regressionMockStorage) Preflight(ctx context.Context, destinationDir, w
 	reserve := int64(104857600) // 100 MiB
 	req := rem + reserve
 	if m.freeBytes > 0 && m.freeBytes < req {
-		return fmt.Errorf("insufficient free space in %s (free: %d, required: %d, reserve: %d, remaining: %d)",
-			destinationDir, m.freeBytes, req, reserve, rem)
+		return fmt.Errorf("%w: insufficient free space in %s (free: %d, required: %d, reserve: %d, remaining: %d)",
+			storage.ErrInsufficientDiskSpace, destinationDir, m.freeBytes, req, reserve, rem)
 	}
 	return nil
 }
@@ -64,15 +65,16 @@ func (m *regressionMockStorage) CleanupStaleWorkDirs(ctx context.Context, active
 }
 
 type regressionMockEngine struct {
-	filesToReturn        []TorrentFile
-	startDownloadCall    int
-	stopDownloadCall     int
-	rawStateToReturn     string
-	prioritiesSet        []TorrentFileSelection
-	setFilePrioritiesErr error
-	stopDownloadErr      error
-	getRawStateErr       error
-	pauseErr             error
+	filesToReturn          []TorrentFile
+	startDownloadCall      int
+	stopDownloadCall       int
+	setFilePrioritiesCalls int
+	rawStateToReturn       string
+	prioritiesSet          []TorrentFileSelection
+	setFilePrioritiesErr   error
+	stopDownloadErr        error
+	getRawStateErr         error
+	pauseErr               error
 }
 
 func (m *regressionMockEngine) Capabilities() networkpolicy.EngineCapabilities {
@@ -106,6 +108,7 @@ func (m *regressionMockEngine) GetFiles(ctx context.Context, infoHash string) ([
 	return m.filesToReturn, nil
 }
 func (m *regressionMockEngine) SetFilePriorities(ctx context.Context, infoHash string, selections []TorrentFileSelection) error {
+	m.setFilePrioritiesCalls++
 	if m.setFilePrioritiesErr != nil {
 		return m.setFilePrioritiesErr
 	}
@@ -282,16 +285,39 @@ func TestDiskPreflightBeforeStart_FailureCausesZeroStartDownloadCalls(t *testing
 	_, err := mgr.StartTorrentWithPolicy(context.Background(), j.ID, selections, networkpolicy.SeedingPolicy{Mode: networkpolicy.SeedingModeNone})
 	if err == nil {
 		t.Fatal("expected StartTorrentWithPolicy to fail preflight due to insufficient space")
-	} else {
-		t.Logf("StartTorrentWithPolicy error: %v", err)
 	}
+
+	// Verify the returned error is a proper *AppError with INSUFFICIENT_DISK_SPACE code
+	var appErr *AppError
+	if !errors.As(err, &appErr) {
+		t.Fatalf("expected *AppError, got %T: %v", err, err)
+	}
+	if appErr.Code != ErrInsufficientDiskSpace {
+		t.Fatalf("expected error code %s, got %s", ErrInsufficientDiskSpace, appErr.Code)
+	}
+	// Verify the message contains detailed disk space info
+	if !strings.Contains(appErr.Message, "free:") || !strings.Contains(appErr.Message, "required:") || !strings.Contains(appErr.Message, "reserve:") || !strings.Contains(appErr.Message, "remaining:") {
+		t.Fatalf("expected detailed disk space message, got: %s", appErr.Message)
+	}
+	t.Logf("StartTorrentWithPolicy error: %v", err)
 
 	if eng.startDownloadCall != 0 {
 		t.Fatalf("expected 0 StartDownload calls on preflight failure, got %d", eng.startDownloadCall)
 	}
 
+	// Verify SetFilePriorities was NOT called (preflight is before priorities)
+	if eng.setFilePrioritiesCalls != 0 {
+		t.Fatalf("expected 0 SetFilePriorities calls on preflight failure, got %d", eng.setFilePrioritiesCalls)
+	}
+
 	if storageSvc.lastPreflightTotal != 1400*1024*1024 {
 		t.Fatalf("expected preflight to receive selected total (1.4 GB), got %d", storageSvc.lastPreflightTotal)
+	}
+
+	// Verify job remains in awaiting_selection
+	updatedJob, _ := jobRepo.GetByID(context.Background(), j.ID)
+	if updatedJob.Status != StatusAwaitingSelection {
+		t.Fatalf("expected job to remain in awaiting_selection, got %s", updatedJob.Status)
 	}
 }
 
@@ -689,5 +715,78 @@ func TestDispatchQueuedJob_SuccessfulSelectedSizeCondition(t *testing.T) {
 	}
 	if updatedJ.TotalBytes != 1468006400 {
 		t.Fatalf("expected TotalBytes = 1.4 GiB (%d), got %d", 1468006400, updatedJ.TotalBytes)
+	}
+}
+
+func TestMapStorageError_AllSentinels(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		expectedCode string
+	}{
+		{
+			name:         "ErrInsufficientDiskSpace",
+			err:          fmt.Errorf("%w: insufficient free space (free: 100, required: 200, reserve: 50, remaining: 150)", storage.ErrInsufficientDiskSpace),
+			expectedCode: ErrInsufficientDiskSpace,
+		},
+		{
+			name:         "ErrInvalidStorageSelection",
+			err:          fmt.Errorf("%w: bad selection", storage.ErrInvalidStorageSelection),
+			expectedCode: ErrInvalidStorageSelection,
+		},
+		{
+			name:         "ErrInvalidDestination",
+			err:          fmt.Errorf("%w: bad dest", storage.ErrInvalidDestination),
+			expectedCode: ErrInvalidDestination,
+		},
+		{
+			name:         "ErrCategoryNotFound",
+			err:          fmt.Errorf("%w: no such category", storage.ErrCategoryNotFound),
+			expectedCode: ErrCategoryNotFound,
+		},
+		{
+			name:         "ErrCategoryNameConflict",
+			err:          fmt.Errorf("%w: name conflict", storage.ErrCategoryNameConflict),
+			expectedCode: ErrCategoryNameConflict,
+		},
+		{
+			name:         "ErrFileConflict",
+			err:          fmt.Errorf("%w: file conflict", storage.ErrFileConflict),
+			expectedCode: ErrFileConflict,
+		},
+		{
+			name:         "ErrStorageError",
+			err:          fmt.Errorf("%w: storage failure", storage.ErrStorageError),
+			expectedCode: ErrStorageError,
+		},
+		{
+			name:         "unknown error falls back to INTERNAL_ERROR",
+			err:          fmt.Errorf("something completely unexpected"),
+			expectedCode: ErrInternalError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mapped := mapStorageError(tt.err)
+			appErr, ok := mapped.(*AppError)
+			if !ok {
+				t.Fatalf("expected *AppError, got %T", mapped)
+			}
+			if appErr.Code != tt.expectedCode {
+				t.Fatalf("expected code %s, got %s", tt.expectedCode, appErr.Code)
+			}
+			// Verify the original message is preserved
+			if appErr.Message != tt.err.Error() {
+				t.Fatalf("expected message %q, got %q", tt.err.Error(), appErr.Message)
+			}
+		})
+	}
+}
+
+func TestMapStorageError_Nil(t *testing.T) {
+	result := mapStorageError(nil)
+	if result != nil {
+		t.Fatalf("expected nil, got %v", result)
 	}
 }

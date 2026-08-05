@@ -3,6 +3,8 @@ package job
 import (
 	"errors"
 	"fmt"
+
+	"downloader/internal/storage"
 )
 
 // AppError represents an application-level error with a code.
@@ -137,4 +139,31 @@ func (e *DispatchPersistenceError) Unwrap() error {
 
 func (e *DispatchPersistenceError) Is(target error) bool {
 	return target == ErrDispatchPersistenceFailed
+}
+
+// mapStorageError translates a storage-package error into an *AppError.
+// It uses errors.Is to match sentinel errors and preserves the detailed
+// message (e.g. free bytes, required bytes, reserve) for the API response.
+func mapStorageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, storage.ErrInsufficientDiskSpace):
+		return &AppError{Code: ErrInsufficientDiskSpace, Message: err.Error()}
+	case errors.Is(err, storage.ErrInvalidStorageSelection):
+		return &AppError{Code: ErrInvalidStorageSelection, Message: err.Error()}
+	case errors.Is(err, storage.ErrInvalidDestination):
+		return &AppError{Code: ErrInvalidDestination, Message: err.Error()}
+	case errors.Is(err, storage.ErrCategoryNotFound):
+		return &AppError{Code: ErrCategoryNotFound, Message: err.Error()}
+	case errors.Is(err, storage.ErrCategoryNameConflict):
+		return &AppError{Code: ErrCategoryNameConflict, Message: err.Error()}
+	case errors.Is(err, storage.ErrFileConflict):
+		return &AppError{Code: ErrFileConflict, Message: err.Error()}
+	case errors.Is(err, storage.ErrStorageError):
+		return &AppError{Code: ErrStorageError, Message: err.Error()}
+	default:
+		return &AppError{Code: ErrInternalError, Message: err.Error()}
+	}
 }

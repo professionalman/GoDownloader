@@ -1428,7 +1428,7 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 	}
 	if m.storageService != nil {
 		if preflightErr := m.storageService.Preflight(ctx, targetDir, j.WorkDir, selectedBytes, 0); preflightErr != nil {
-			return nil, preflightErr
+			return nil, mapStorageError(preflightErr)
 		}
 	}
 

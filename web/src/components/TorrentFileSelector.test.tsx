@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Job, SeedingPolicy } from '../types';
-import { TorrentFileSelector, normalizeSeedingMode } from './TorrentFileSelector';
+import { TorrentFileSelector, normalizeSeedingMode, formatDiskSpaceError } from './TorrentFileSelector';
+import { ApiResponseError } from '../api';
 import * as api from '../api';
 
 vi.mock('../api', async () => {
@@ -163,5 +164,54 @@ describe('TorrentFileSelector seeding policy & submission', () => {
 
     resolvePromise();
     await waitFor(() => expect(pendingOnStart).toHaveBeenCalled());
+  });
+
+  it('displays human-readable disk space message for INSUFFICIENT_DISK_SPACE errors', async () => {
+    const diskSpaceError = new ApiResponseError(
+      'INSUFFICIENT_DISK_SPACE',
+      'INSUFFICIENT_DISK_SPACE: insufficient free space in /downloads (free: 16000000000, required: 23622320128, reserve: 1073741824, remaining: 22548578304)'
+    );
+    const failingOnStart = vi.fn().mockRejectedValue(diskSpaceError);
+    await renderSelector({ mode: 'none' }, failingOnStart);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start Download' }));
+
+    const errorEl = await screen.findByTestId('torrent-submit-error');
+    expect(errorEl.textContent).toContain('Insufficient disk space');
+    expect(errorEl.textContent).toContain('Available:');
+    expect(errorEl.textContent).toContain('Selected remaining:');
+    expect(errorEl.textContent).toContain('Reserved:');
+    expect(errorEl.textContent).toContain('Required:');
+    // Should NOT contain the raw "an internal error occurred" fallback
+    expect(errorEl.textContent).not.toContain('an internal error occurred');
+  });
+
+  it('shows raw error message for non-disk-space errors', async () => {
+    const otherError = new ApiResponseError('ENGINE_ERROR', 'qBittorrent daemon unreachable');
+    const failingOnStart = vi.fn().mockRejectedValue(otherError);
+    await renderSelector({ mode: 'none' }, failingOnStart);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start Download' }));
+
+    await screen.findByText('qBittorrent daemon unreachable');
+  });
+});
+
+describe('formatDiskSpaceError', () => {
+  it('parses backend message into human-readable format', () => {
+    const message = 'INSUFFICIENT_DISK_SPACE: insufficient free space in /downloads (free: 16000000000, required: 23622320128, reserve: 1073741824, remaining: 22548578304)';
+    const result = formatDiskSpaceError(message);
+    expect(result).toContain('Insufficient disk space');
+    expect(result).toContain('Available: 14.9 GiB');
+    expect(result).toContain('Selected remaining: 21.0 GiB');
+    expect(result).toContain('Reserved: 1.0 GiB');
+    expect(result).toContain('Required: 22.0 GiB');
+  });
+
+  it('falls back gracefully when message format is unexpected', () => {
+    const message = 'some unexpected disk space error';
+    const result = formatDiskSpaceError(message);
+    expect(result).toContain('Insufficient disk space');
+    expect(result).toContain(message);
   });
 });
