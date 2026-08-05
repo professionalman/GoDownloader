@@ -2061,6 +2061,9 @@ func (m *Manager) GetEngine(name string) (IEngine, bool) {
 
 // UpdateJobFromEngine updates a job with engine status and persists/publishes.
 func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *EngineStatus, persistNow bool) {
+	if j == nil || status == nil {
+		return
+	}
 	if j.Type == TypeTorrent && j.Status != StatusAwaitingSelection {
 		if j.TorrentInfo != nil && j.TorrentInfo.TotalSize > 0 && status.TotalBytes == j.TorrentInfo.TotalSize && j.TotalBytes > 0 && j.TotalBytes != j.TorrentInfo.TotalSize {
 			// Retain authoritative selected TotalBytes instead of reverting to full torrent size
@@ -2077,6 +2080,8 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 	if status.FileName != "" {
 		j.Name = status.FileName
 	}
+
+	updateTorrentRuntimeStats(j, status)
 
 	prevStatus := j.Status
 
@@ -3080,9 +3085,13 @@ func (m *Manager) processPendingEngineCleanups(ctx context.Context) {
 }
 
 func (m *Manager) publish(eventType string, j *Job) {
+	if j == nil {
+		return
+	}
+	jobCopy := cloneJobSeedingState(j)
 	m.bus.Publish(Event{
 		Type: eventType,
-		Job:  *j,
+		Job:  jobCopy,
 	})
 }
 

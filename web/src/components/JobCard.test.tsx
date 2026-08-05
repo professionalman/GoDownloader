@@ -176,4 +176,110 @@ describe('JobCard Phase 2 convergence', () => {
     fireEvent.mouseDown(document.body);
     expect(screen.queryByRole('menu', { name: 'Job options' })).not.toBeInTheDocument();
   });
+
+  describe('Live torrent statistics in JobDetails', () => {
+    const torrentJob: Job = {
+      ...sampleJob,
+      id: 'job-torrent-1',
+      name: 'Ubuntu 24.04 ISO',
+      type: 'torrent',
+      engine: 'qbittorrent',
+      status: 'downloading',
+      torrentInfo: {
+        name: 'Ubuntu 24.04 ISO',
+        infoHash: '1234567890123456789012345678901234567890',
+        totalSize: 2000000000,
+        uploaded: 104857600, // 100 MiB
+        uploadSpeed: 524288, // 512 KiB/s
+        ratio: 0.25,
+        seeders: 4,
+        leechers: 7,
+        seedingTimeSeconds: 0,
+      },
+    };
+
+    it('renders live torrent statistics with explicit connected seeds/leechers labels and upload speed', () => {
+      render(<JobCard job={torrentJob} selected={false} />);
+
+      const chevron = screen.getByRole('button', { name: /Show details/i });
+      fireEvent.click(chevron);
+
+      expect(screen.getByText('Uploaded: 100.0 MiB')).toBeInTheDocument();
+      expect(screen.getByText('Ratio: 0.25')).toBeInTheDocument();
+      expect(screen.getByText('Connected seeds: 4')).toBeInTheDocument();
+      expect(screen.getByText('Connected leechers: 7')).toBeInTheDocument();
+      expect(screen.getByText('Upload speed: 512.0 KiB/s')).toBeInTheDocument();
+    });
+
+    it('updates live statistics on rerender without collapsing details panel', () => {
+      const { rerender } = render(<JobCard job={torrentJob} selected={false} />);
+
+      const chevron = screen.getByRole('button', { name: /Show details/i });
+      fireEvent.click(chevron);
+
+      expect(screen.getByText('Connected seeds: 4')).toBeInTheDocument();
+
+      const updatedJob: Job = {
+        ...torrentJob,
+        torrentInfo: {
+          ...torrentJob.torrentInfo!,
+          uploaded: 209715200, // 200 MiB
+          uploadSpeed: 1048576, // 1.0 MiB/s
+          ratio: 0.50,
+          seeders: 12,
+          leechers: 3,
+        },
+      };
+
+      rerender(<JobCard job={updatedJob} selected={false} />);
+
+      // Details panel remains open and shows updated values
+      expect(screen.getByText('Uploaded: 200.0 MiB')).toBeInTheDocument();
+      expect(screen.getByText('Ratio: 0.50')).toBeInTheDocument();
+      expect(screen.getByText('Connected seeds: 12')).toBeInTheDocument();
+      expect(screen.getByText('Connected leechers: 3')).toBeInTheDocument();
+      expect(screen.getByText('Upload speed: 1.0 MiB/s')).toBeInTheDocument();
+    });
+
+    it('handles non-zero to zero statistic transitions correctly', () => {
+      const { rerender } = render(<JobCard job={torrentJob} selected={false} />);
+
+      const chevron = screen.getByRole('button', { name: /Show details/i });
+      fireEvent.click(chevron);
+
+      expect(screen.getByText('Connected seeds: 4')).toBeInTheDocument();
+
+      const zeroStatsJob: Job = {
+        ...torrentJob,
+        torrentInfo: {
+          ...torrentJob.torrentInfo!,
+          uploadSpeed: 0,
+          seeders: 0,
+          leechers: 0,
+        },
+      };
+
+      rerender(<JobCard job={zeroStatsJob} selected={false} />);
+
+      expect(screen.getByText('Connected seeds: 0')).toBeInTheDocument();
+      expect(screen.getByText('Connected leechers: 0')).toBeInTheDocument();
+      expect(screen.getByText('Upload speed: 0 B/s')).toBeInTheDocument();
+    });
+
+    it('does not render misleading torrent statistics when torrentInfo is missing', () => {
+      const noInfoJob: Job = {
+        ...torrentJob,
+        torrentInfo: undefined,
+      };
+
+      render(<JobCard job={noInfoJob} selected={false} />);
+
+      const chevron = screen.getByRole('button', { name: /Show details/i });
+      fireEvent.click(chevron);
+
+      expect(screen.queryByText(/Connected seeds:/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Connected leechers:/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Uploaded:/i)).not.toBeInTheDocument();
+    });
+  });
 });

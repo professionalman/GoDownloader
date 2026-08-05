@@ -218,15 +218,31 @@ func (m *Manager) enterSeeding(ctx context.Context, j *Job, status *EngineStatus
 	j.SpeedBytesPerSecond = status.UploadSpeed
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
-	if j.TorrentInfo != nil {
-		j.TorrentInfo.UploadSpeed = status.UploadSpeed
-		j.TorrentInfo.Uploaded = status.Uploaded
-		j.TorrentInfo.Ratio = status.Ratio
-		j.TorrentInfo.Seeders = status.Seeders
-		j.TorrentInfo.Leechers = status.Leechers
-		j.TorrentInfo.SeedingTimeSeconds = status.SeedingTimeSeconds
-	}
+	updateTorrentRuntimeStats(j, status)
 	return false
+}
+
+func updateTorrentRuntimeStats(j *Job, status *EngineStatus) {
+	if j == nil || status == nil || j.Type != TypeTorrent {
+		return
+	}
+	if j.TorrentInfo == nil {
+		j.TorrentInfo = &TorrentInfo{}
+	}
+	j.TorrentInfo.Uploaded = status.Uploaded
+	j.TorrentInfo.UploadSpeed = status.UploadSpeed
+	j.TorrentInfo.Ratio = status.Ratio
+	j.TorrentInfo.Seeders = status.Seeders
+	j.TorrentInfo.Leechers = status.Leechers
+	j.TorrentInfo.SeedingTimeSeconds = status.SeedingTimeSeconds
+}
+
+func cloneTorrentInfo(info *TorrentInfo) *TorrentInfo {
+	if info == nil {
+		return nil
+	}
+	copyInfo := *info
+	return &copyInfo
 }
 
 func cloneTorrentRecord(record *TorrentJobRecord) *TorrentJobRecord {
@@ -285,9 +301,16 @@ func synchronizeJobSeedingState(j *Job, record *TorrentJobRecord) {
 }
 
 func cloneJobSeedingState(j *Job) Job {
+	if j == nil {
+		return Job{}
+	}
 	copyJob := *j
 	copyJob.SeedingPolicy = cloneSeedingPolicy(j.SeedingPolicy)
 	copyJob.SeedingStartedAt = cloneTimePointer(j.SeedingStartedAt)
+	copyJob.TorrentInfo = cloneTorrentInfo(j.TorrentInfo)
+	if j.CustomTrackers != nil {
+		copyJob.CustomTrackers = append([]string(nil), j.CustomTrackers...)
+	}
 	return copyJob
 }
 
