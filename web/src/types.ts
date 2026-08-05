@@ -1,6 +1,7 @@
 export type JobStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'analyzing' | 'processing' | 'awaiting_selection' | 'seeding';
 
 export type JobPriority = 'low' | 'normal' | 'high';
+export type BulkAction = 'pause' | 'resume' | 'cancel' | 'retry';
 
 export type FilenameConflictPolicy = 'rename' | 'overwrite' | 'fail' | 'engine_managed';
 export type ProxyMode = 'disabled' | 'system' | 'custom';

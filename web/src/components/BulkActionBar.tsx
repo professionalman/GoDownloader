@@ -1,10 +1,10 @@
 import { Pause, Play, RotateCcw, X } from 'lucide-react';
-import type { Job } from '../types';
+import type { Job, BulkAction } from '../types';
 
 interface BulkActionBarProps {
   jobs: Job[];
   selectedIds: Set<string>;
-  onAction: (action: 'pause' | 'resume' | 'cancel' | 'retry', eligibleIds: string[]) => void;
+  onAction: (action: BulkAction, eligibleIds: string[]) => void;
   onClear: () => void;
 }
 

@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { Search, X } from 'lucide-react';
-import type { Job, QueueSnapshot } from '../types';
+import type { Job, QueueSnapshot, BulkAction } from '../types';
 import type { DownloadFilter } from '../downloadUi';
 import {
   DOWNLOAD_FILTERS,
@@ -22,7 +22,7 @@ interface DownloadsPanelProps {
   onToggleSelect: (id: string) => void;
   onSelectVisible: (ids: string[]) => void;
   onDeselectVisible?: (ids: string[]) => void;
-  onBulkAction: (action: 'pause' | 'resume' | 'cancel' | 'retry') => void;
+  onBulkAction: (action: BulkAction, eligibleIds: string[]) => void;
   onClearSelection: () => void;
   onCancel: (id: string) => void;
   onPause: (id: string) => void;

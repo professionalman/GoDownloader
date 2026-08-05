@@ -814,6 +814,9 @@ func (m *Manager) createTorrentJobWithID(ctx context.Context, jobID, source, tor
 }
 
 func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, source, torrentFilePath string, opts CreateOptions) (*Job, error) {
+	if _, ok := m.engines.Get("qbittorrent"); !ok {
+		return nil, &AppError{Code: ErrEngineError, Message: "engine not registered: qBittorrent"}
+	}
 	engineName := m.engines.Detect(source)
 	if engineName != "qbittorrent" {
 		return nil, &AppError{Code: ErrEngineError, Message: "qBittorrent engine not available for torrent downloads"}

@@ -170,11 +170,14 @@ Dev UI is at **http://localhost:5173**.
 ### Running Tests
 
 ```bash
-# All tests
+# All unit tests (isolated, fast, no live network calls)
 go test ./...
 
 # With race condition detection
 go test -race ./...
+
+# Live yt-dlp integration tests (isolated behind integration tag)
+YTDLP_PATH="yt-dlp" FFMPEG_PATH="ffmpeg" FFPROBE_PATH="ffprobe" YTDLP_TEST_URL="https://example.com/media" go test -tags=integration -count=1 -v ./internal/engine/ytdlp
 
 # Frontend verification
 cd web && npm run typecheck && npm test && npm run build && npm run lint
@@ -250,7 +253,7 @@ All settings are optional. Defaults work out of the box for a typical local setu
 | `QBIT_PASSWORD` | — | qBittorrent password |
 | `QBIT_TIMEOUT` | `30` | qBittorrent request timeout (seconds) |
 | `YTDLP_PATH` | `yt-dlp` | Path to yt-dlp binary |
-| `FFMPEG_PATH` | `ffmpeg` | Path to FFmpeg binary |
+| `FFMPEG_PATH` | `""` (empty string) | Path to FFmpeg binary; defaults to empty so yt-dlp searches PATH automatically |
 | `WEB_DIR` | `./web/dist` | Directory serving the built frontend |
 | `V0.7_SETTINGS_ENCRYPTION_KEY` | — | Base64 32-byte or 64-character hex AES key for persisted secrets |
 | `GLOBAL_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Engine-scoped global download limit |

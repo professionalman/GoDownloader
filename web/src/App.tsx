@@ -15,6 +15,7 @@ import type {
   TorrentFileSelection,
   JobNetworkPolicyOverride,
   SeedingPolicy,
+  BulkAction,
 } from './types';
 import { replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
 import { useJobSelection } from './hooks/useJobSelection';
@@ -23,21 +24,21 @@ import {
   createJob,
   createBatchJobs,
   bulkAction,
-  setJobPriority,
-  getQueueSnapshot,
-  reorderQueue,
-  getSettings,
-  updateSettings,
   cancelJob,
   pauseJob,
   resumeJob,
   retryJob,
-  connectSSE,
+  getSettings,
+  updateSettings,
+  getQueueSnapshot,
+  reorderQueue,
+  startTorrent,
+  stopSeeding,
   openFolder,
   selectFormat,
   uploadTorrent,
-  startTorrent,
-  stopSeeding,
+  setJobPriority,
+  connectSSE,
 } from './api';
 import './App.css';
 
@@ -172,7 +173,9 @@ function App() {
         }
         fetchQueue();
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Failed to start download');
+        const errorObj = err instanceof Error ? err : new Error('Failed to start download');
+        setError(errorObj.message);
+        throw errorObj;
       } finally {
         setSubmitting(false);
       }
@@ -205,7 +208,9 @@ function App() {
         setJobs((currentJobs) => upsertJob(currentJobs, job));
         fetchQueue();
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Failed to upload torrent');
+        const errorObj = err instanceof Error ? err : new Error('Failed to upload torrent');
+        setError(errorObj.message);
+        throw errorObj;
       } finally {
         setSubmitting(false);
       }
@@ -213,19 +218,16 @@ function App() {
     [fetchQueue]
   );
 
-
-
   const handleJobUpdated = useCallback((updated: Job) => {
     setJobs((currentJobs) => upsertJob(currentJobs, updated));
   }, []);
 
   const handleBulkAction = useCallback(
-    async (action: 'pause' | 'resume' | 'cancel' | 'retry') => {
-      const ids = Array.from(selectedIds);
-      if (ids.length === 0) return;
+    async (action: BulkAction, eligibleIds: string[]) => {
+      if (eligibleIds.length === 0) return;
 
       try {
-        const response = await bulkAction(action, ids);
+        const response = await bulkAction(action, eligibleIds);
 
         const updatedJobs = response.results
           .map((result) => result.job)
@@ -233,13 +235,13 @@ function App() {
 
         setJobs((currentJobs) => upsertJobs(currentJobs, updatedJobs));
 
-        const failedIds = new Set(
+        const succeededIds = new Set(
           response.results
-            .filter((result) => !result.success)
+            .filter((result) => result.success)
             .map((result) => result.jobId)
         );
 
-        setSelectedIds(failedIds);
+        setSelectedIds((current) => new Set([...current].filter((id) => !succeededIds.has(id))));
 
         if (response.failed > 0) {
           const details = response.results
@@ -268,7 +270,7 @@ function App() {
         );
       }
     },
-    [selectedIds, jobs, fetchQueue]
+    [jobs, fetchQueue, setSelectedIds]
   );
 
   const handleSetPriority = useCallback(
