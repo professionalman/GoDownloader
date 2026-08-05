@@ -302,3 +302,84 @@ func (r *SQLiteTorrentRepository) UpdateTorrentFileSelections(ctx context.Contex
 	}
 	return nil
 }
+
+// PersistTorrentSelectionAndEnqueue atomically updates file selections, torrent policy, main job record, and enqueues a queue item in a single transaction.
+func (r *SQLiteTorrentRepository) PersistTorrentSelectionAndEnqueue(ctx context.Context, j *job.Job, selections []job.TorrentFileRecord, rec *job.TorrentJobRecord, qe *job.QueueEntry) error {
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Update file selections
+	for _, s := range selections {
+		selectedInt := 0
+		if s.Selected {
+			selectedInt = 1
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE torrent_files SET selected=?, priority=? WHERE job_id=? AND file_index=?`,
+			selectedInt, s.Priority, j.ID, s.FileIndex); err != nil {
+			return fmt.Errorf("update torrent_files: %w", err)
+		}
+	}
+
+	// 2. Update torrent job record if provided
+	if rec != nil {
+		seedingMode := rec.SeedingPolicy.Mode
+		if seedingMode == "" {
+			if rec.SeedAfterComplete {
+				seedingMode = networkpolicy.SeedingModeUnlimited
+			} else {
+				seedingMode = networkpolicy.SeedingModeNone
+			}
+		}
+		var ratio any
+		if rec.SeedingPolicy.RatioLimit != nil {
+			ratio = *rec.SeedingPolicy.RatioLimit
+		}
+		var duration any
+		if rec.SeedingPolicy.TimeLimitSeconds != nil {
+			duration = *rec.SeedingPolicy.TimeLimitSeconds
+		}
+		var started any
+		if rec.SeedingStartedAt != nil {
+			started = *rec.SeedingStartedAt
+		}
+		trackersJSON, marshalErr := json.Marshal(rec.CustomTrackers)
+		if marshalErr != nil {
+			return fmt.Errorf("marshal trackers: %w", marshalErr)
+		}
+
+		if _, err := tx.ExecContext(ctx, `UPDATE torrent_jobs SET info_hash=?, name=?, total_size=?, seed_after_complete=?, torrent_file_path=?,
+			seeding_mode=?, seed_ratio_limit=?, seed_time_limit_seconds=?, seeding_started_at=?,
+			seeding_stop_reason=?, seeding_reconcile_pending=?, custom_trackers_json=? WHERE job_id=?`,
+			rec.InfoHash, rec.Name, rec.TotalSize, rec.SeedAfterComplete, rec.TorrentFilePath,
+			seedingMode, ratio, duration, started, rec.SeedingStopReason, rec.SeedingReconcilePending, string(trackersJSON), j.ID); err != nil {
+			return fmt.Errorf("update torrent_jobs: %w", err)
+		}
+	}
+
+	// 3. Update main job table: total_bytes = selectedBytes, status = queued, error = '', updated_at
+	networkJSON, err := json.Marshal(j.NetworkPolicy)
+	if err != nil {
+		return fmt.Errorf("marshal network policy: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET total_bytes=?, status=?, error='', updated_at=?,
+		network_policy_json=?, effective_download_limit_bps=?, effective_upload_limit_bps=?, network_reconcile_pending=? WHERE id=?`,
+		j.TotalBytes, j.Status, j.UpdatedAt, string(networkJSON),
+		j.EffectiveDownloadLimitBytesPerSecond, j.EffectiveUploadLimitBytesPerSecond,
+		j.NetworkReconcilePending, j.ID); err != nil {
+		return fmt.Errorf("update jobs table: %w", err)
+	}
+
+	// 4. Insert or replace queue entry
+	if qe != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO job_queue (job_id, position, action, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+			qe.JobID, qe.Position, string(qe.Action), qe.EnqueuedAt, qe.UpdatedAt); err != nil {
+			return fmt.Errorf("insert job_queue: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}

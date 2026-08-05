@@ -58,6 +58,7 @@ type ITorrentRepository interface {
 	GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error)
 	UpdateTorrentFileSelections(ctx context.Context, jobID string, selections []TorrentFileRecord) error
 	FinalizeTorrent(ctx context.Context, j *Job, stopReason string) error
+	PersistTorrentSelectionAndEnqueue(ctx context.Context, job *Job, selections []TorrentFileRecord, rec *TorrentJobRecord, queueEntry *QueueEntry) error
 }
 
 // TorrentJobRecord holds torrent-specific persistence data.

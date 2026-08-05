@@ -138,6 +138,9 @@ type ITorrentEngine interface {
 	// GetTorrentInfo returns normalized torrent metadata.
 	GetTorrentInfo(ctx context.Context, infoHash string) (*TorrentInfo, error)
 
+	// GetRawState returns the raw engine state string.
+	GetRawState(ctx context.Context, infoHash string) (string, error)
+
 	// HealthCheck verifies the engine is reachable and operational.
 	HealthCheck(ctx context.Context) error
 }

@@ -329,6 +329,7 @@ func (f *fakeEventBus) Unsubscribe(ch <-chan Event) {
 type fakeTorrentRepository struct {
 	mu           sync.Mutex
 	jobRepo      IJobRepository
+	queueRepo    IQueueRepository
 	torrentJobs  map[string]*TorrentJobRecord
 	torrentFiles map[string][]TorrentFileRecord
 	getActiveErr error
@@ -338,9 +339,14 @@ type fakeTorrentRepository struct {
 	finalizeErr  error
 }
 
-func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
+func newFakeTorrentRepository(jobRepo IJobRepository, qRepo ...IQueueRepository) *fakeTorrentRepository {
+	var q IQueueRepository
+	if len(qRepo) > 0 {
+		q = qRepo[0]
+	}
 	return &fakeTorrentRepository{
 		jobRepo:      jobRepo,
+		queueRepo:    q,
 		torrentJobs:  make(map[string]*TorrentJobRecord),
 		torrentFiles: make(map[string][]TorrentFileRecord),
 	}
@@ -457,6 +463,34 @@ func (f *fakeTorrentRepository) UpdateTorrentFileSelections(ctx context.Context,
 	f.torrentFiles[jobID] = selections
 	return nil
 }
+
+func (f *fakeTorrentRepository) PersistTorrentSelectionAndEnqueue(ctx context.Context, j *Job, selections []TorrentFileRecord, rec *TorrentJobRecord, qe *QueueEntry) error {
+	f.mu.Lock()
+	if f.updateErr != nil {
+		f.mu.Unlock()
+		return f.updateErr
+	}
+	f.torrentFiles[j.ID] = selections
+	if rec != nil {
+		f.torrentJobs[j.ID] = cloneTorrentRecord(rec)
+	}
+	qRepo := f.queueRepo
+	f.mu.Unlock()
+
+	if f.jobRepo != nil {
+		if err := f.jobRepo.Update(ctx, j); err != nil {
+			return err
+		}
+	}
+	if qe != nil && qRepo != nil {
+		if err := qRepo.Enqueue(ctx, qe); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+
 
 var _ ITorrentRepository = (*fakeTorrentRepository)(nil)
 
