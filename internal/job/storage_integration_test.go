@@ -96,7 +96,7 @@ func TestMediaCompletion_MissingFinalArtifactFails(t *testing.T) {
 	if updated.Status != StatusFailed {
 		t.Errorf("expected StatusFailed when output file missing, got %s", updated.Status)
 	}
-	if updated.Error != "media completed but final output file was not found" {
+	if updated.Error != "media completed but engine output path was not provided" {
 		t.Errorf("unexpected error message: %s", updated.Error)
 	}
 	if updated.FinalPath != "" {

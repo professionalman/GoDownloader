@@ -1487,7 +1487,15 @@ func TestManager_DuplicateTorrentCanBeRetried(t *testing.T) {
 		t.Errorf("expected Job B status to transition to StatusAnalyzing on Retry, got %s", retriedJB.Status)
 	}
 
-	time.Sleep(1500 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	var gotJBFinal *Job
+	for time.Now().Before(deadline) {
+		gotJBFinal, _ = m.repo.GetByID(ctx, jB.ID)
+		if gotJBFinal != nil && gotJBFinal.Status == StatusAwaitingSelection {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// 6. Verify AddTorrentFile received preserved path, AddMagnet was NOT called, Job B reaches StatusAwaitingSelection
 	testMu.Lock()
@@ -1502,9 +1510,12 @@ func TestManager_DuplicateTorrentCanBeRetried(t *testing.T) {
 		t.Errorf("expected AddTorrentFile to receive preserved path %s, got %s", recB.TorrentFilePath, gotPath)
 	}
 
-	gotJBFinal, _ := m.repo.GetByID(ctx, jB.ID)
-	if gotJBFinal.Status != StatusAwaitingSelection {
-		t.Errorf("expected retried Job B to reach StatusAwaitingSelection, got %s", gotJBFinal.Status)
+	if gotJBFinal == nil || gotJBFinal.Status != StatusAwaitingSelection {
+		statusStr := ""
+		if gotJBFinal != nil {
+			statusStr = string(gotJBFinal.Status)
+		}
+		t.Errorf("expected retried Job B to reach StatusAwaitingSelection, got %s", statusStr)
 	}
 }
 
@@ -2157,4 +2168,132 @@ func (f *failingUpdateJobRepo) CountDownloading(ctx context.Context) (int, error
 }
 func (f *failingUpdateJobRepo) ListPendingEngineCleanups(ctx context.Context) ([]Job, error) {
 	return nil, nil
+}
+
+func TestEndToEnd_UploadedTorrent(t *testing.T) {
+	m, _, _, cleanup, fakeTorrentEng := setupManagerTest(t)
+	defer cleanup()
+
+	addTorrentFileCalled := false
+	fakeTorrentEng.addTorrentFileFunc = func(filePath string) (string, error) {
+		addTorrentFileCalled = true
+		return "hash999", nil
+	}
+
+	tempTorrent := filepath.Join(t.TempDir(), "input.torrent")
+	if err := os.WriteFile(tempTorrent, []byte("d8:announce3:url7:filesizede"), 0644); err != nil {
+		t.Fatalf("failed to create temp torrent file: %v", err)
+	}
+
+	j, err := m.CreateTorrentFromFileWithOptions(context.Background(), tempTorrent, CreateOptions{Priority: JobPriorityNormal})
+	if err != nil {
+		t.Fatalf("expected CreateTorrentFromFileWithOptions to succeed, got %v", err)
+	}
+
+	if j.Engine != "qbittorrent" {
+		t.Errorf("expected engine qbittorrent, got %s", j.Engine)
+	}
+	if j.Type != TypeTorrent {
+		t.Errorf("expected type torrent, got %s", j.Type)
+	}
+	if !strings.HasPrefix(j.Source, "torrent://") {
+		t.Errorf("expected source starting with torrent://, got %s", j.Source)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var updatedJob *Job
+	for time.Now().Before(deadline) {
+		updatedJob, err = m.repo.GetByID(context.Background(), j.ID)
+		if updatedJob != nil && updatedJob.EngineID == "hash999" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !addTorrentFileCalled {
+		t.Errorf("expected AddTorrentFile to be invoked on fake qBittorrent engine")
+	}
+	if updatedJob == nil || updatedJob.EngineID != "hash999" {
+		gotEngineID := ""
+		if updatedJob != nil {
+			gotEngineID = updatedJob.EngineID
+		}
+		t.Errorf("expected infoHash hash999 persisted on job, got %s", gotEngineID)
+	}
+}
+
+func TestCreateTorrentFromFile_CleanupOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	repo := newFakeJobRepository()
+	bus := newFakeEventBus()
+	registry := &fakeEngineRegistry{
+		engines: map[string]IEngine{
+			"aria2": &fakeEngine{},
+		},
+	}
+	m := NewManager(repo, registry, bus, tmpDir, newFakeTorrentRepository(repo), tmpDir)
+
+	tempTorrent := filepath.Join(tmpDir, "input.torrent")
+	if err := os.WriteFile(tempTorrent, []byte("d8:announce3:url7:filesizede"), 0644); err != nil {
+		t.Fatalf("failed to create temp torrent file: %v", err)
+	}
+
+	_, err := m.CreateTorrentFromFileWithOptions(context.Background(), tempTorrent, CreateOptions{Priority: JobPriorityNormal})
+	if err == nil {
+		t.Fatalf("expected CreateTorrentFromFileWithOptions to fail when qbittorrent engine is missing")
+	}
+
+	torrentsDir := filepath.Join(m.dataDir, "torrents")
+	entries, _ := os.ReadDir(torrentsDir)
+	if len(entries) > 0 {
+		t.Errorf("expected 0 leaked torrent files in %s, found %d", torrentsDir, len(entries))
+	}
+}
+
+func TestManager_MediaFinalization_NeverPicksUnrelatedLargerFile(t *testing.T) {
+	m, _, _, cleanup, _ := setupManagerTest(t)
+	defer cleanup()
+
+	workDir := filepath.Join(t.TempDir(), "work_job123")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("failed to create workdir: %v", err)
+	}
+
+	unrelatedFile := filepath.Join(workDir, "huge_unrelated_video.mp4")
+	if err := os.WriteFile(unrelatedFile, make([]byte, 100*1024), 0644); err != nil {
+		t.Fatalf("failed to write dummy large file: %v", err)
+	}
+
+	j := &Job{
+		ID:        "job123",
+		Engine:    "ytdlp",
+		Type:      TypeMedia,
+		Status:    StatusDownloading,
+		WorkDir:   workDir,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(context.Background(), j)
+
+	status := &EngineStatus{
+		Status:     StatusCompleted,
+		OutputPath: "",
+	}
+
+	m.UpdateJobFromEngine(context.Background(), j, status, true)
+
+	updatedJob, err := m.repo.GetByID(context.Background(), "job123")
+	if err != nil {
+		t.Fatalf("failed to fetch job: %v", err)
+	}
+
+	if updatedJob.Status != StatusFailed {
+		t.Errorf("expected job to fail when OutputPath is missing, got %s", updatedJob.Status)
+	}
+	if updatedJob.FinalPath != "" {
+		t.Errorf("expected empty FinalPath, got %s (unrelated file was wrongly finalized)", updatedJob.FinalPath)
+	}
+	if !strings.Contains(updatedJob.Error, "engine output path was not provided") {
+		t.Errorf("expected diagnostic error message, got %s", updatedJob.Error)
+	}
 }

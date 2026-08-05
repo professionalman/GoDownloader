@@ -911,7 +911,12 @@ func (m *Manager) CreateTorrentFromFileWithOptions(ctx context.Context, torrentF
 
 	os.Remove(torrentFilePath)
 
-	return m.createTorrentJobWithIDAndOptions(ctx, jobID, "torrent://"+persistedPath, persistedPath, opts)
+	j, err := m.createTorrentJobWithIDAndOptions(ctx, jobID, "torrent://"+persistedPath, persistedPath, opts)
+	if err != nil {
+		os.Remove(persistedPath)
+		return nil, err
+	}
+	return j, nil
 }
 
 func sanitizeTrackerURL(rawURL string) string {
@@ -947,7 +952,7 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 	eng, ok := m.engines.Get("qbittorrent")
 	if !ok {
 		j.Status = StatusFailed
-		j.Error = "qBittorrent engine not available"
+		j.Error = "engine not registered: qBittorrent"
 		j.UpdatedAt = time.Now()
 		m.repo.Update(ctx, j)
 		m.publish(EventJobFailed, j)
@@ -2046,20 +2051,73 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			return
 		}
 		// Handle media finalization before marking StatusCompleted
-		if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" && j.FinalPath == "" {
+		if j.Type == TypeMedia && j.WorkDir != "" && j.FinalPath == "" {
 			srcFile := status.OutputPath
-			if srcFile == "" && status.FileName != "" {
-				cand := filepath.Join(j.WorkDir, status.FileName)
-				if _, err := os.Stat(cand); err == nil {
-					srcFile = cand
-				}
-			}
 			if srcFile == "" {
-				entries, err := os.ReadDir(j.WorkDir)
+				log.Printf("UpdateJobFromEngine: media completed but engine output path was not provided for job %s", j.ID)
+				j.Status = StatusFailed
+				j.Error = "media completed but engine output path was not provided"
+				j.UpdatedAt = time.Now()
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+					return
+				}
+				m.removeActive(j.ID)
+				m.publish(EventJobFailed, j)
+				m.cleanupTerminalEngineState(j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
+				}
+				return
+			}
+
+			// Validate containment inside WorkDir and regular file status
+			cleanWorkDir := filepath.Clean(j.WorkDir)
+			cleanSrc := filepath.Clean(srcFile)
+			rel, relErr := filepath.Rel(cleanWorkDir, cleanSrc)
+			if relErr != nil || strings.HasPrefix(rel, "..") {
+				log.Printf("UpdateJobFromEngine: media output path %s is outside workdir %s for job %s", srcFile, j.WorkDir, j.ID)
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("media output path %s is outside work directory", srcFile)
+				j.UpdatedAt = time.Now()
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+					return
+				}
+				m.removeActive(j.ID)
+				m.publish(EventJobFailed, j)
+				m.cleanupTerminalEngineState(j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
+				}
+				return
+			}
+
+			fi, statErr := os.Stat(srcFile)
+			if statErr != nil || fi.IsDir() {
+				log.Printf("UpdateJobFromEngine: media output path %s is invalid or non-regular for job %s: %v", srcFile, j.ID, statErr)
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("media output path %s does not exist or is a directory", srcFile)
+				j.UpdatedAt = time.Now()
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+					return
+				}
+				m.removeActive(j.ID)
+				m.publish(EventJobFailed, j)
+				m.cleanupTerminalEngineState(j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
+				}
+				return
+			}
+
+			if m.storageService != nil {
+				finalPath, err := m.storageService.FinalizeFile(ctx, srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
 				if err != nil {
-					log.Printf("UpdateJobFromEngine: failed to read workdir %s for job %s: %v", j.WorkDir, j.ID, err)
+					log.Printf("UpdateJobFromEngine: media finalization failed for job %s: %v", j.ID, err)
 					j.Status = StatusFailed
-					j.Error = fmt.Sprintf("failed to read media work directory: %v", err)
+					j.Error = fmt.Sprintf("file finalization failed: %v", err)
 					j.UpdatedAt = time.Now()
 					if updateErr := m.repo.Update(ctx, j); updateErr != nil {
 						log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
@@ -2073,83 +2131,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 					}
 					return
 				}
-
-				var bestFile string
-				var bestSize int64
-				for _, entry := range entries {
-					if entry.IsDir() || entry.Name() == storage.WorkDirMarkerFilename {
-						continue
-					}
-					name := entry.Name()
-					lowerName := strings.ToLower(name)
-
-					if strings.HasSuffix(lowerName, ".part") ||
-						strings.HasSuffix(lowerName, ".ytdl") ||
-						strings.HasSuffix(lowerName, ".vtt") ||
-						strings.HasSuffix(lowerName, ".srt") ||
-						strings.HasSuffix(lowerName, ".jpg") ||
-						strings.HasSuffix(lowerName, ".jpeg") ||
-						strings.HasSuffix(lowerName, ".png") ||
-						strings.HasSuffix(lowerName, ".webp") ||
-						strings.HasSuffix(lowerName, ".json") {
-						continue
-					}
-
-					info, err := entry.Info()
-					if err != nil {
-						continue
-					}
-					if info.Size() > bestSize {
-						bestSize = info.Size()
-						bestFile = filepath.Join(j.WorkDir, name)
-					}
-				}
-				srcFile = bestFile
+				j.FinalPath = finalPath
+			} else {
+				j.FinalPath = srcFile
 			}
-
-			if srcFile == "" {
-				log.Printf("UpdateJobFromEngine: media completed but final output file was not found for job %s", j.ID)
-				j.Status = StatusFailed
-				j.Error = "media completed but final output file was not found"
-				j.UpdatedAt = time.Now()
-				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
-					return
-				}
-				m.removeActive(j.ID)
-				m.publish(EventJobFailed, j)
-				m.cleanupTerminalEngineState(j)
-				if m.scheduler != nil {
-					m.scheduler.Kick()
-				}
-				return
-			}
-
-			finalPath, err := m.storageService.FinalizeFile(ctx, srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
-			if err != nil {
-				log.Printf("UpdateJobFromEngine: media finalization failed for job %s: %v", j.ID, err)
-				j.Status = StatusFailed
-				j.Error = fmt.Sprintf("file finalization failed: %v", err)
-				j.UpdatedAt = time.Now()
-				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
-					return
-				}
-				m.removeActive(j.ID)
-				m.publish(EventJobFailed, j)
-				m.cleanupTerminalEngineState(j)
-				if m.scheduler != nil {
-					m.scheduler.Kick()
-				}
-				return
-			}
-			j.FinalPath = finalPath
-			j.Name = filepath.Base(finalPath)
-			if fi, statErr := os.Stat(finalPath); statErr == nil && fi.Size() > 0 {
+			j.Name = filepath.Base(j.FinalPath)
+			if fi, statErr := os.Stat(j.FinalPath); statErr == nil && fi.Size() > 0 {
 				j.TotalBytes = fi.Size()
 				j.CompletedBytes = fi.Size()
 			}
-			m.updateActiveJobFinalization(j.ID, finalPath, j.Name)
+			m.updateActiveJobFinalization(j.ID, j.FinalPath, j.Name)
 		}
 
 		if j.Type == TypeDownload && status.FileName != "" {

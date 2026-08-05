@@ -404,12 +404,13 @@ func (e *Engine) handleYTDLPLine(jobID string, state *downloadState, line string
 			return
 		}
 
-		if prog.Percent >= state.progress.Percent || state.progress.Percent >= 100 {
+		if prog.Percent >= state.progress.Percent {
 			state.progress = *prog
 		} else {
+			// Secondary stream starting at lower percentage: preserve higher percent and total size, update speed and ETA
 			state.progress.Speed = prog.Speed
 			state.progress.ETASeconds = prog.ETASeconds
-			if prog.DownloadedBytes > 0 {
+			if prog.DownloadedBytes > state.progress.DownloadedBytes {
 				state.progress.DownloadedBytes = prog.DownloadedBytes
 			}
 		}

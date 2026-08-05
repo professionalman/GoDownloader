@@ -17,6 +17,11 @@ func TestRegistry_Detect(t *testing.T) {
 	}{
 		{"Magnet URI", "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678", "qbittorrent"},
 		{"Magnet URI uppercase", "MAGNET:?XT=URN:BTIH:1234567890ABCDEF1234567890ABCDEF12345678", "qbittorrent"},
+		{"Torrent URI Windows", `torrent://C:\path\file.torrent`, "qbittorrent"},
+		{"Torrent URI POSIX", "torrent:///tmp/file.torrent", "qbittorrent"},
+		{"Local Path Windows", `C:\path\file.torrent`, "qbittorrent"},
+		{"Local Path POSIX", "/tmp/file.torrent", "qbittorrent"},
+		{"Uppercase TORRENT Extension", "C:\\PATH\\FILE.TORRENT", "qbittorrent"},
 		{"Direct ZIP", "https://example.com/files/archive.zip", "aria2"},
 		{"Direct ISO", "https://releases.ubuntu.com/22.04/ubuntu-22.04-desktop-amd64.iso", "aria2"},
 		{"Direct PDF", "https://example.com/docs/paper.pdf", "aria2"},
@@ -38,4 +43,20 @@ func TestRegistry_Detect(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("Fallback to aria2 when qbittorrent is unregistered", func(t *testing.T) {
+		rNoQbit := NewRegistry()
+		rNoQbit.engines["aria2"] = nil
+		rNoQbit.engines["ytdlp"] = nil
+
+		if got := rNoQbit.Detect("magnet:?xt=urn:btih:1234"); got != "aria2" {
+			t.Errorf("expected aria2 fallback for magnet, got %q", got)
+		}
+		if got := rNoQbit.Detect("torrent://C:\\file.torrent"); got != "aria2" {
+			t.Errorf("expected aria2 fallback for torrent URI, got %q", got)
+		}
+		if got := rNoQbit.Detect("/tmp/file.torrent"); got != "aria2" {
+			t.Errorf("expected aria2 fallback for .torrent path, got %q", got)
+		}
+	})
 }
