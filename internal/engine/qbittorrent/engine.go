@@ -258,15 +258,14 @@ func (e *Engine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error
 	if infoHash == "" {
 		return errors.New("info hash is required to adopt torrent")
 	}
-	// 1. Stop torrent to ensure no background downloading occurs before file selection
-	if err := e.client.StopTorrents(ctx, []string{infoHash}); err != nil {
-		return fmt.Errorf("failed to stop torrent during adoption: %w", err)
-	}
+	// Do NOT stop the torrent here — metadata acquisition may still be in progress
+	// for orphaned magnets. The manager-level verifyTorrentStopped safety gate
+	// handles stopping after metadata/files become available.
 
-	// Verify stopped state using existing raw-state/status mechanism where practical
+	// 1. Set category to godownloader
 	info, err := e.client.GetTorrentInfo(ctx, infoHash)
 	if err != nil {
-		return fmt.Errorf("failed to verify torrent state after adoption: %w", err)
+		return fmt.Errorf("failed to query torrent state during adoption: %w", err)
 	}
 	if info != nil && strings.TrimSpace(info.Category) != CategoryName {
 		if catErr := e.client.SetCategory(ctx, []string{infoHash}, CategoryName); catErr != nil {

@@ -1040,9 +1040,10 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		}
 
 		// 3. Same-job existing torrent (e.g. Retry or restart recovery) -> idempotent success
+		// Do NOT StopDownload here: metadata acquisition may still be in progress for magnets.
+		// The final verifyTorrentStopped safety gate runs after metadata/files become available.
 		if isSameJob {
 			log.Printf("acquireTorrentMetadata: torrent %s already owned by current job %s, reusing existing torrent", expectedHash, jobID)
-			_ = torrentEng.StopDownload(ctx, expectedHash)
 			return true, nil
 		}
 
