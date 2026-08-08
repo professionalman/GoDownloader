@@ -383,13 +383,18 @@ func (e *Engine) AddMagnet(ctx context.Context, magnet, savePath string, jobID s
 	if err != nil {
 		return "", fmt.Errorf("failed to extract info hash from magnet: %w", err)
 	}
+	expectedHash := strings.ToLower(hash)
 
 	err = e.client.AddMagnet(ctx, magnet, savePath, CategoryName, []string{jobID}, false)
 	if err != nil {
 		return "", err
 	}
 
-	return strings.ToLower(hash), nil
+	if err := e.waitForTorrentVisible(ctx, expectedHash, 3*time.Second); err != nil {
+		return "", err
+	}
+
+	return expectedHash, nil
 }
 
 func (e *Engine) AddTorrentFile(ctx context.Context, filePath, savePath string, jobID string) (string, error) {
@@ -397,27 +402,62 @@ func (e *Engine) AddTorrentFile(ctx context.Context, filePath, savePath string, 
 		// ignore
 	}
 
-	err := e.client.AddTorrentFile(ctx, filePath, savePath, CategoryName, []string{jobID}, true)
+	identity, err := job.ExtractTorrentIdentityFromFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to extract torrent info hash from file: %w", err)
+	}
+	expectedHash := identity.QBitTorrentID
+	if expectedHash == "" {
+		return "", errors.New("failed to derive canonical qBittorrent info hash from file")
+	}
+
+	err = e.client.AddTorrentFile(ctx, filePath, savePath, CategoryName, []string{jobID}, true)
 	if err != nil {
 		return "", err
 	}
 
-	// List torrents to find the new one by tag (jobID)
-	infos, err := e.client.GetTorrents(ctx, CategoryName)
-	if err != nil {
+	if err := e.waitForTorrentVisible(ctx, expectedHash, 3*time.Second); err != nil {
 		return "", err
 	}
 
-	for _, info := range infos {
-		tags := strings.Split(info.Tags, ",")
-		for _, tag := range tags {
-			if strings.TrimSpace(tag) == jobID {
-				return strings.ToLower(info.Hash), nil
+	return expectedHash, nil
+}
+
+func (e *Engine) waitForTorrentVisible(ctx context.Context, expectedHash string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	pollInterval := 50 * time.Millisecond
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		info, err := e.client.GetTorrentInfo(ctx, expectedHash)
+		if err == nil && info != nil {
+			if strings.EqualFold(info.Hash, expectedHash) {
+				return nil
 			}
+		}
+
+		if err != nil && !errors.Is(err, ErrTorrentNotFound) && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			log.Printf("waitForTorrentVisible: non-404 status query for %s: %v", expectedHash, err)
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
 		}
 	}
 
-	return "", errors.New("torrent added but info hash not found")
+	return fmt.Errorf("torrent was accepted by qBittorrent but visibility could not be confirmed within %v (hash: %s)", timeout, expectedHash)
 }
 
 func (e *Engine) GetFiles(ctx context.Context, infoHash string) ([]job.TorrentFile, error) {
