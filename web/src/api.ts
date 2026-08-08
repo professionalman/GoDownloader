@@ -24,10 +24,22 @@ import type {
 
 const API_BASE = '/api/v1';
 
+/** Error class that carries the backend error code alongside the message. */
+export class ApiResponseError extends Error {
+  public readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'ApiResponseError';
+    this.code = code;
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => null) as ApiError | null;
-    throw new Error(body?.error?.message || `Request failed with status ${res.status}`);
+    const code = body?.error?.code ?? 'UNKNOWN';
+    const message = body?.error?.message || `Request failed with status ${res.status}`;
+    throw new ApiResponseError(code, message);
   }
   return res.json();
 }

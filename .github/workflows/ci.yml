@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/v0.7-lovable-integration
+  pull_request:
+    branches:
+      - main
+      - feat/v0.7-lovable-integration
+
+jobs:
+  backend:
+    name: Go Backend Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Verify gofmt formatting
+        run: |
+          files=$(gofmt -l ./cmd ./internal)
+          if [ -n "$files" ]; then
+            echo "The following files require gofmt formatting:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit tests
+        run: go test -count=1 ./...
+
+      - name: Run unit tests with race detector
+        run: go test -count=1 -race ./...
+
+  frontend:
+    name: Web Frontend Verification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Run Vitest unit tests
+        run: npm test -- --run
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run production build
+        run: npm run build

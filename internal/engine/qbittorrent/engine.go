@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -224,6 +225,82 @@ func (e *Engine) ApplySeedingPolicy(ctx context.Context, j *job.Job, policy netw
 	return e.client.SetShareLimits(ctx, j.EngineID, ratio, minutes)
 }
 
+func (e *Engine) GetTorrentOwnership(ctx context.Context, infoHash string) (*job.TorrentOwnership, error) {
+	if infoHash == "" {
+		return nil, nil
+	}
+	info, err := e.client.GetTorrentInfo(ctx, infoHash)
+	if err != nil {
+		if errors.Is(err, ErrTorrentNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	rawTags := strings.Split(info.Tags, ",")
+	tags := make([]string, 0, len(rawTags))
+	for _, t := range rawTags {
+		trimmed := strings.TrimSpace(t)
+		if trimmed != "" {
+			tags = append(tags, trimmed)
+		}
+	}
+	return &job.TorrentOwnership{
+		Hash:     strings.ToLower(info.Hash),
+		Category: strings.TrimSpace(info.Category),
+		Tags:     tags,
+	}, nil
+}
+
+func (e *Engine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error {
+	if infoHash == "" {
+		return errors.New("info hash is required to adopt torrent")
+	}
+	// Do NOT stop the torrent here — metadata acquisition may still be in progress
+	// for orphaned magnets. The manager-level verifyTorrentStopped safety gate
+	// handles stopping after metadata/files become available.
+
+	// 1. Set category to godownloader
+	info, err := e.client.GetTorrentInfo(ctx, infoHash)
+	if err != nil {
+		return fmt.Errorf("failed to query torrent state during adoption: %w", err)
+	}
+	if info != nil && strings.TrimSpace(info.Category) != CategoryName {
+		if catErr := e.client.SetCategory(ctx, []string{infoHash}, CategoryName); catErr != nil {
+			return fmt.Errorf("failed to set category during adoption: %w", catErr)
+		}
+	}
+
+	// 2. Associate current job tag (fatal if fails)
+	if jobID != "" {
+		if err := e.client.AddTags(ctx, []string{infoHash}, []string{jobID}); err != nil {
+			return fmt.Errorf("failed to tag adopted torrent: %w", err)
+		}
+	}
+
+	// 3. Remove stale GoDownloader job tags if present (surface failure)
+	if info != nil {
+		rawTags := strings.Split(info.Tags, ",")
+		var staleTags []string
+		for _, t := range rawTags {
+			trimmed := strings.TrimSpace(t)
+			if trimmed != "" && trimmed != jobID && strings.HasPrefix(trimmed, "job_") {
+				staleTags = append(staleTags, trimmed)
+			}
+		}
+		if len(staleTags) > 0 {
+			if rmErr := e.client.RemoveTags(ctx, []string{infoHash}, staleTags); rmErr != nil {
+				log.Printf("AdoptTorrent: warning: failed to remove stale tags %v from %s: %v", staleTags, infoHash, rmErr)
+				return fmt.Errorf("failed to cleanup stale job tags during adoption: %w", rmErr)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (e *Engine) ListTorrentOwnership(ctx context.Context) ([]job.TorrentOwnership, error) {
 	torrents, err := e.client.GetTorrents(ctx, "")
 	if err != nil {
@@ -305,13 +382,18 @@ func (e *Engine) AddMagnet(ctx context.Context, magnet, savePath string, jobID s
 	if err != nil {
 		return "", fmt.Errorf("failed to extract info hash from magnet: %w", err)
 	}
+	expectedHash := strings.ToLower(hash)
 
 	err = e.client.AddMagnet(ctx, magnet, savePath, CategoryName, []string{jobID}, false)
 	if err != nil {
 		return "", err
 	}
 
-	return strings.ToLower(hash), nil
+	if err := e.waitForTorrentVisible(ctx, expectedHash, 3*time.Second); err != nil {
+		return "", err
+	}
+
+	return expectedHash, nil
 }
 
 func (e *Engine) AddTorrentFile(ctx context.Context, filePath, savePath string, jobID string) (string, error) {
@@ -319,27 +401,62 @@ func (e *Engine) AddTorrentFile(ctx context.Context, filePath, savePath string, 
 		// ignore
 	}
 
-	err := e.client.AddTorrentFile(ctx, filePath, savePath, CategoryName, []string{jobID}, true)
+	identity, err := job.ExtractTorrentIdentityFromFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to extract torrent info hash from file: %w", err)
+	}
+	expectedHash := identity.QBitTorrentID
+	if expectedHash == "" {
+		return "", errors.New("failed to derive canonical qBittorrent info hash from file")
+	}
+
+	err = e.client.AddTorrentFile(ctx, filePath, savePath, CategoryName, []string{jobID}, true)
 	if err != nil {
 		return "", err
 	}
 
-	// List torrents to find the new one by tag (jobID)
-	infos, err := e.client.GetTorrents(ctx, CategoryName)
-	if err != nil {
+	if err := e.waitForTorrentVisible(ctx, expectedHash, 3*time.Second); err != nil {
 		return "", err
 	}
 
-	for _, info := range infos {
-		tags := strings.Split(info.Tags, ",")
-		for _, tag := range tags {
-			if strings.TrimSpace(tag) == jobID {
-				return strings.ToLower(info.Hash), nil
+	return expectedHash, nil
+}
+
+func (e *Engine) waitForTorrentVisible(ctx context.Context, expectedHash string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	pollInterval := 50 * time.Millisecond
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		info, err := e.client.GetTorrentInfo(ctx, expectedHash)
+		if err == nil && info != nil {
+			if strings.EqualFold(info.Hash, expectedHash) {
+				return nil
 			}
+		}
+
+		if err != nil && !errors.Is(err, ErrTorrentNotFound) && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			log.Printf("waitForTorrentVisible: non-404 status query for %s: %v", expectedHash, err)
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
 		}
 	}
 
-	return "", errors.New("torrent added but info hash not found")
+	return fmt.Errorf("torrent was accepted by qBittorrent but visibility could not be confirmed within %v (hash: %s)", timeout, expectedHash)
 }
 
 func (e *Engine) GetFiles(ctx context.Context, infoHash string) ([]job.TorrentFile, error) {

@@ -87,6 +87,55 @@ describe('DownloadForm Refactored Suite', () => {
     expect(input).toHaveValue('');
   });
 
+  it('11. Failed single URL creation preserves source', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('Invalid URL format'));
+    render(<DownloadForm onSubmit={onSubmit} />);
+
+    const input = screen.getByPlaceholderText(/Paste a URL or magnet link/i);
+    fireEvent.change(input, { target: { value: 'https://example.com/file.zip' } });
+
+    const startBtn = screen.getByRole('button', { name: /Start/i });
+    fireEvent.click(startBtn);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Invalid URL format')).toBeInTheDocument();
+    expect(input).toHaveValue('https://example.com/file.zip');
+  });
+
+  it('12. Failed batch creation preserves all sources', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('Batch processing failed'));
+    render(<DownloadForm onSubmit={onSubmit} />);
+
+    fireEvent.click(screen.getByTitle('Toggle download options'));
+    fireEvent.click(screen.getByTitle('Switch to batch mode'));
+
+    const batchInput = screen.getByPlaceholderText(/Paste download URLs or magnet links — one per line/i);
+    const text = 'https://example.com/file1.iso\nhttps://example.com/file2.zip';
+    fireEvent.change(batchInput, { target: { value: text } });
+
+    const startBtn = screen.getByRole('button', { name: /Start/i });
+    fireEvent.click(startBtn);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Batch processing failed')).toBeInTheDocument();
+    expect(batchInput).toHaveValue(text);
+  });
+
+  it('13. Failed .torrent upload does not falsely indicate success', async () => {
+    const onUploadTorrent = vi.fn().mockRejectedValue(new Error('qBittorrent daemon unreachable'));
+    render(<DownloadForm onSubmit={vi.fn()} onUploadTorrent={onUploadTorrent} />);
+
+    const torrentFile = new File(['d8:announce...e'], 'test.torrent', { type: 'application/x-bittorrent' });
+    const torrentInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+
+    act(() => {
+      fireEvent.change(torrentInput, { target: { files: [torrentFile] } });
+    });
+
+    await waitFor(() => expect(onUploadTorrent).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('qBittorrent daemon unreachable')).toBeInTheDocument();
+  });
+
   it('prevents duplicate submissions while awaiting', async () => {
     let resolveSubmit!: () => void;
     const onSubmit = vi.fn().mockImplementation(

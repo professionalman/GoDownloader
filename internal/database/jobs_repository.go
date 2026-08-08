@@ -67,33 +67,38 @@ func scanJob(scanner interface{ Scan(...interface{}) error }) (job.Job, error) {
 	return j, nil
 }
 
-// Create inserts a new job into the database.
-func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func insertJobExec(ctx context.Context, execer sqlExecer, j *job.Job) error {
 	mediaInfoJSON := ""
 	if j.MediaInfo != nil {
 		if data, err := json.Marshal(j.MediaInfo); err == nil {
 			mediaInfoJSON = string(data)
 		}
 	}
-	if j.Priority == "" {
-		j.Priority = job.JobPriorityNormal
+	priority := j.Priority
+	if priority == "" {
+		priority = job.JobPriorityNormal
 	}
-	if j.ConflictPolicy == "" {
-		j.ConflictPolicy = job.ConflictPolicyRename
+	conflictPolicy := j.ConflictPolicy
+	if conflictPolicy == "" {
+		conflictPolicy = job.ConflictPolicyRename
 	}
 	networkPolicyJSON, err := json.Marshal(j.NetworkPolicy)
 	if err != nil {
 		return fmt.Errorf("marshal network policy: %w", err)
 	}
 	query := fmt.Sprintf(`INSERT INTO jobs (%s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobColumns)
-	_, err = r.db.conn.ExecContext(ctx, query,
+	_, err = execer.ExecContext(ctx, query,
 		j.ID, j.Source, j.Name, j.Status,
 		j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds,
 		j.Error, j.Engine, j.EngineID,
 		j.Type, mediaInfoJSON,
-		j.Priority, j.BatchID,
-		j.CategoryID, j.DestinationDir, j.WorkDir, j.ConflictPolicy, j.FinalPath,
+		priority, j.BatchID,
+		j.CategoryID, j.DestinationDir, j.WorkDir, conflictPolicy, j.FinalPath,
 		j.CreatedAt, j.UpdatedAt, j.EngineCleanupPending,
 		string(networkPolicyJSON), j.EffectiveDownloadLimitBytesPerSecond,
 		j.EffectiveUploadLimitBytesPerSecond, j.NetworkReconcilePending,
@@ -102,6 +107,11 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 		return fmt.Errorf("insert job: %w", err)
 	}
 	return nil
+}
+
+// Create inserts a new job into the database.
+func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
+	return insertJobExec(ctx, r.db.conn, j)
 }
 
 // Update updates an existing job in the database.

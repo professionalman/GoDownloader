@@ -120,6 +120,12 @@ type ITorrentEngine interface {
 	// AddTorrentFile adds a .torrent file and returns the info hash.
 	AddTorrentFile(ctx context.Context, filePath, savePath, jobID string) (infoHash string, err error)
 
+	// GetTorrentOwnership queries the engine for ownership metadata of an info hash.
+	GetTorrentOwnership(ctx context.Context, infoHash string) (*TorrentOwnership, error)
+
+	// AdoptTorrent safely adopts an existing torrent into a job without starting download.
+	AdoptTorrent(ctx context.Context, infoHash, jobID string) error
+
 	// GetFiles returns the normalized file list for a torrent.
 	GetFiles(ctx context.Context, infoHash string) ([]TorrentFile, error)
 
@@ -137,6 +143,9 @@ type ITorrentEngine interface {
 
 	// GetTorrentInfo returns normalized torrent metadata.
 	GetTorrentInfo(ctx context.Context, infoHash string) (*TorrentInfo, error)
+
+	// GetRawState returns the raw engine state string.
+	GetRawState(ctx context.Context, infoHash string) (string, error)
 
 	// HealthCheck verifies the engine is reachable and operational.
 	HealthCheck(ctx context.Context) error

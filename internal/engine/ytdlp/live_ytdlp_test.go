@@ -1,3 +1,5 @@
+//go:build integration
+
 package ytdlp
 
 import (
@@ -11,20 +13,38 @@ import (
 	"downloader/internal/job"
 )
 
-func TestLiveYTDLP_VideoOnlyMerge(t *testing.T) {
-	ytdlpPath := `C:\Users\bkkav\Downloads\GoDownloaderTools\yt-dlp\yt-dlp.exe`
-	ffmpegPath := `C:\Users\bkkav\Downloads\GoDownloaderTools\ffmpeg\bin\ffmpeg.exe`
+func getLiveTestEnv(t *testing.T) (string, string, string, string) {
+	ytdlpPath := os.Getenv("YTDLP_PATH")
+	ffmpegPath := os.Getenv("FFMPEG_PATH")
+	ffprobePath := os.Getenv("FFPROBE_PATH")
+	testURL := os.Getenv("YTDLP_TEST_URL")
+
+	if ytdlpPath == "" || ffmpegPath == "" || ffprobePath == "" || testURL == "" {
+		t.Skip("skipping integration test: YTDLP_PATH, FFMPEG_PATH, FFPROBE_PATH, and YTDLP_TEST_URL must all be set")
+	}
 
 	if _, err := os.Stat(ytdlpPath); err != nil {
-		t.Skip("yt-dlp binary not found")
+		t.Skipf("skipping integration test: ytdlp binary not found at %s", ytdlpPath)
 	}
+	if _, err := os.Stat(ffmpegPath); err != nil {
+		t.Skipf("skipping integration test: ffmpeg binary not found at %s", ffmpegPath)
+	}
+	if _, err := os.Stat(ffprobePath); err != nil {
+		t.Skipf("skipping integration test: ffprobe binary not found at %s", ffprobePath)
+	}
+
+	return ytdlpPath, ffmpegPath, ffprobePath, testURL
+}
+
+func TestLiveYTDLP_VideoOnlyMerge(t *testing.T) {
+	ytdlpPath, ffmpegPath, ffprobePath, testURL := getLiveTestEnv(t)
 
 	eng := NewEngine(ytdlpPath, ffmpegPath)
 	tmpDir := t.TempDir()
 
 	j := &job.Job{
 		ID:     "live_test_job_video_only",
-		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		Source: testURL,
 		Type:   job.TypeMedia,
 		MediaInfo: &job.MediaInfo{
 			SelectedFmt: "18",
@@ -68,7 +88,7 @@ func TestLiveYTDLP_VideoOnlyMerge(t *testing.T) {
 		t.Fatalf("final output path %s does not exist or is empty: %v", finalStatus.OutputPath, err)
 	}
 
-	cmd := exec.Command(`C:\Users\bkkav\Downloads\GoDownloaderTools\ffmpeg\bin\ffprobe.exe`,
+	cmd := exec.Command(ffprobePath,
 		"-v", "error",
 		"-show_entries", "stream=index,codec_type,codec_name",
 		"-of", "default=noprint_wrappers=1",
@@ -86,19 +106,14 @@ func TestLiveYTDLP_VideoOnlyMerge(t *testing.T) {
 }
 
 func TestLiveYTDLP_AudioOnly(t *testing.T) {
-	ytdlpPath := `C:\Users\bkkav\Downloads\GoDownloaderTools\yt-dlp\yt-dlp.exe`
-	ffmpegPath := `C:\Users\bkkav\Downloads\GoDownloaderTools\ffmpeg\bin\ffmpeg.exe`
-
-	if _, err := os.Stat(ytdlpPath); err != nil {
-		t.Skip("yt-dlp binary not found")
-	}
+	ytdlpPath, ffmpegPath, _, testURL := getLiveTestEnv(t)
 
 	eng := NewEngine(ytdlpPath, ffmpegPath)
 	tmpDir := t.TempDir()
 
 	j := &job.Job{
 		ID:     "live_test_job_audio_only",
-		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		Source: testURL,
 		Type:   job.TypeMedia,
 		MediaInfo: &job.MediaInfo{
 			SelectedFmt: "140",
@@ -143,19 +158,14 @@ func TestLiveYTDLP_AudioOnly(t *testing.T) {
 }
 
 func TestLiveYTDLP_ThrottledProgress(t *testing.T) {
-	ytdlpPath := `C:\Users\bkkav\Downloads\GoDownloaderTools\yt-dlp\yt-dlp.exe`
-	ffmpegPath := `C:\Users\bkkav\Downloads\GoDownloaderTools\ffmpeg\bin\ffmpeg.exe`
-
-	if _, err := os.Stat(ytdlpPath); err != nil {
-		t.Skip("yt-dlp binary not found")
-	}
+	ytdlpPath, ffmpegPath, _, testURL := getLiveTestEnv(t)
 
 	eng := NewEngine(ytdlpPath, ffmpegPath)
 	tmpDir := t.TempDir()
 
 	j := &job.Job{
 		ID:     "live_test_job_throttled",
-		Source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		Source: testURL,
 		Type:   job.TypeMedia,
 		MediaInfo: &job.MediaInfo{
 			SelectedFmt: "18",

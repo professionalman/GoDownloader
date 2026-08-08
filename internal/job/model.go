@@ -1,10 +1,6 @@
 package job
 
 import (
-	"encoding/base32"
-	"encoding/hex"
-	"fmt"
-	"strings"
 	"time"
 
 	"downloader/internal/networkpolicy"
@@ -104,44 +100,6 @@ type TorrentFile struct {
 type TorrentFileSelection struct {
 	Index    int                 `json:"index"`
 	Priority TorrentFilePriority `json:"priority"`
-}
-
-// ExtractMagnetHash extracts and normalizes the 40-character lowercase hex info hash from a magnet URI string.
-func ExtractMagnetHash(magnet string) (string, error) {
-	lower := strings.ToLower(magnet)
-	const prefix = "urn:btih:"
-	idx := strings.Index(lower, prefix)
-	if idx == -1 {
-		return "", fmt.Errorf("invalid magnet link: missing btih")
-	}
-
-	hashPart := magnet[idx+len(prefix):]
-	ampIdx := strings.Index(hashPart, "&")
-	if ampIdx != -1 {
-		hashPart = hashPart[:ampIdx]
-	}
-
-	// 40-character hex BTIH
-	if len(hashPart) == 40 {
-		for _, c := range hashPart {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-				return "", fmt.Errorf("invalid 40-character info hash in magnet link: not valid hex")
-			}
-		}
-		return strings.ToLower(hashPart), nil
-	}
-
-	// 32-character Base32 BTIH
-	if len(hashPart) == 32 {
-		upperHash := strings.ToUpper(hashPart)
-		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(upperHash)
-		if err != nil || len(decoded) != 20 {
-			return "", fmt.Errorf("invalid 32-character base32 info hash in magnet link: %v", err)
-		}
-		return hex.EncodeToString(decoded), nil
-	}
-
-	return "", fmt.Errorf("invalid info hash length in magnet link")
 }
 
 // Job represents a single download task.

@@ -76,8 +76,11 @@ func (f *fakeEngine) Detect(url string) string {
 type fakeTorrentEngine struct {
 	*fakeEngine
 	isStopped          bool
+	files              map[string][]TorrentFile
 	addMagnetFunc      func(magnet string) (string, error)
 	addTorrentFileFunc func(path string) (string, error)
+	getOwnershipFunc   func(hash string) (*TorrentOwnership, error)
+	adoptTorrentFunc   func(hash, jobID string) error
 	getFilesFunc       func(hash string) ([]TorrentFile, error)
 	setPrioritiesFunc  func(hash string) error
 	startDownloadFunc  func(hash string) error
@@ -85,6 +88,20 @@ type fakeTorrentEngine struct {
 	removeTorrentFunc  func(hash string, deleteFiles bool) error
 	getTorrentInfoFunc func(hash string) (*TorrentInfo, error)
 	statusFunc         func(ctx context.Context, j *Job) (*EngineStatus, error)
+}
+
+func (f *fakeTorrentEngine) GetTorrentOwnership(ctx context.Context, infoHash string) (*TorrentOwnership, error) {
+	if f.getOwnershipFunc != nil {
+		return f.getOwnershipFunc(infoHash)
+	}
+	return nil, nil
+}
+
+func (f *fakeTorrentEngine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error {
+	if f.adoptTorrentFunc != nil {
+		return f.adoptTorrentFunc(infoHash, jobID)
+	}
+	return nil
 }
 
 func (f *fakeTorrentEngine) GetRawState(ctx context.Context, infoHash string) (string, error) {
@@ -134,6 +151,9 @@ func (f *fakeTorrentEngine) GetFiles(ctx context.Context, infoHash string) ([]To
 	if f.getFilesFunc != nil {
 		return f.getFilesFunc(infoHash)
 	}
+	if f.files != nil && len(f.files[infoHash]) > 0 {
+		return f.files[infoHash], nil
+	}
 	return []TorrentFile{
 		{Index: 0, Path: "file1.bin", Size: 1024, Priority: PriorityNormal, Selected: true},
 	}, nil
@@ -142,6 +162,30 @@ func (f *fakeTorrentEngine) SetFilePriorities(ctx context.Context, infoHash stri
 	if f.setPrioritiesFunc != nil {
 		return f.setPrioritiesFunc(infoHash)
 	}
+	if f.files == nil {
+		f.files = make(map[string][]TorrentFile)
+	}
+	currentList := f.files[infoHash]
+	fileMap := make(map[int]*TorrentFile, len(currentList))
+	for i := range currentList {
+		fileMap[currentList[i].Index] = &currentList[i]
+	}
+	for _, s := range selections {
+		if file, exists := fileMap[s.Index]; exists {
+			file.Priority = s.Priority
+			file.Selected = (s.Priority != PrioritySkip)
+		} else {
+			currentList = append(currentList, TorrentFile{
+				Index:    s.Index,
+				Path:     fmt.Sprintf("file_%d.bin", s.Index),
+				Size:     1024,
+				Priority: s.Priority,
+				Selected: (s.Priority != PrioritySkip),
+			})
+			fileMap[s.Index] = &currentList[len(currentList)-1]
+		}
+	}
+	f.files[infoHash] = currentList
 	return nil
 }
 func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) error {
@@ -152,10 +196,14 @@ func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) 
 	return nil
 }
 func (f *fakeTorrentEngine) StopDownload(ctx context.Context, infoHash string) error {
-	f.isStopped = true
 	if f.stopDownloadFunc != nil {
-		return f.stopDownloadFunc(infoHash)
+		err := f.stopDownloadFunc(infoHash)
+		if err == nil {
+			f.isStopped = true
+		}
+		return err
 	}
+	f.isStopped = true
 	return nil
 }
 func (f *fakeTorrentEngine) RemoveTorrent(ctx context.Context, infoHash string, deleteFiles bool) error {
@@ -329,6 +377,7 @@ func (f *fakeEventBus) Unsubscribe(ch <-chan Event) {
 type fakeTorrentRepository struct {
 	mu           sync.Mutex
 	jobRepo      IJobRepository
+	queueRepo    IQueueRepository
 	torrentJobs  map[string]*TorrentJobRecord
 	torrentFiles map[string][]TorrentFileRecord
 	getActiveErr error
@@ -338,9 +387,14 @@ type fakeTorrentRepository struct {
 	finalizeErr  error
 }
 
-func newFakeTorrentRepository(jobRepo IJobRepository) *fakeTorrentRepository {
+func newFakeTorrentRepository(jobRepo IJobRepository, qRepo ...IQueueRepository) *fakeTorrentRepository {
+	var q IQueueRepository
+	if len(qRepo) > 0 {
+		q = qRepo[0]
+	}
 	return &fakeTorrentRepository{
 		jobRepo:      jobRepo,
+		queueRepo:    q,
 		torrentJobs:  make(map[string]*TorrentJobRecord),
 		torrentFiles: make(map[string][]TorrentFileRecord),
 	}
@@ -351,6 +405,37 @@ func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *Torre
 	defer f.mu.Unlock()
 	if f.createErr != nil {
 		return f.createErr
+	}
+	f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
+	return nil
+}
+
+func (f *fakeTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j *Job, rec *TorrentJobRecord) error {
+	if j == nil {
+		return fmt.Errorf("job is required")
+	}
+	if rec == nil {
+		return fmt.Errorf("torrent record is required")
+	}
+	if j.ID == "" {
+		return fmt.Errorf("job ID is required")
+	}
+	if rec.JobID == "" {
+		return fmt.Errorf("torrent record job ID is required")
+	}
+	if rec.JobID != j.ID {
+		return fmt.Errorf("torrent record job ID (%s) does not match job ID (%s)", rec.JobID, j.ID)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if f.jobRepo != nil {
+		if err := f.jobRepo.Create(ctx, j); err != nil {
+			return err
+		}
 	}
 	f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
 	return nil
@@ -455,6 +540,32 @@ func (f *fakeTorrentRepository) UpdateTorrentFileSelections(ctx context.Context,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.torrentFiles[jobID] = selections
+	return nil
+}
+
+func (f *fakeTorrentRepository) PersistTorrentSelectionAndEnqueue(ctx context.Context, j *Job, selections []TorrentFileRecord, rec *TorrentJobRecord, qe *QueueEntry) error {
+	f.mu.Lock()
+	if f.updateErr != nil {
+		f.mu.Unlock()
+		return f.updateErr
+	}
+	f.torrentFiles[j.ID] = selections
+	if rec != nil {
+		f.torrentJobs[j.ID] = cloneTorrentRecord(rec)
+	}
+	qRepo := f.queueRepo
+	f.mu.Unlock()
+
+	if f.jobRepo != nil {
+		if err := f.jobRepo.Update(ctx, j); err != nil {
+			return err
+		}
+	}
+	if qe != nil && qRepo != nil {
+		if err := qRepo.Enqueue(ctx, qe); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1487,7 +1598,15 @@ func TestManager_DuplicateTorrentCanBeRetried(t *testing.T) {
 		t.Errorf("expected Job B status to transition to StatusAnalyzing on Retry, got %s", retriedJB.Status)
 	}
 
-	time.Sleep(1500 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	var gotJBFinal *Job
+	for time.Now().Before(deadline) {
+		gotJBFinal, _ = m.repo.GetByID(ctx, jB.ID)
+		if gotJBFinal != nil && gotJBFinal.Status == StatusAwaitingSelection {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// 6. Verify AddTorrentFile received preserved path, AddMagnet was NOT called, Job B reaches StatusAwaitingSelection
 	testMu.Lock()
@@ -1502,9 +1621,12 @@ func TestManager_DuplicateTorrentCanBeRetried(t *testing.T) {
 		t.Errorf("expected AddTorrentFile to receive preserved path %s, got %s", recB.TorrentFilePath, gotPath)
 	}
 
-	gotJBFinal, _ := m.repo.GetByID(ctx, jB.ID)
-	if gotJBFinal.Status != StatusAwaitingSelection {
-		t.Errorf("expected retried Job B to reach StatusAwaitingSelection, got %s", gotJBFinal.Status)
+	if gotJBFinal == nil || gotJBFinal.Status != StatusAwaitingSelection {
+		statusStr := ""
+		if gotJBFinal != nil {
+			statusStr = string(gotJBFinal.Status)
+		}
+		t.Errorf("expected retried Job B to reach StatusAwaitingSelection, got %s", statusStr)
 	}
 }
 
@@ -2075,8 +2197,9 @@ func TestManager_SetPriority_QueueReadFailure(t *testing.T) {
 }
 
 type fakeQueueRepo struct {
-	entries map[string]*QueueEntry
-	getErr  error
+	entries    map[string]*QueueEntry
+	getErr     error
+	nextPosErr error
 }
 
 func (f *fakeQueueRepo) Enqueue(ctx context.Context, entry *QueueEntry) error {
@@ -2115,6 +2238,9 @@ func (f *fakeQueueRepo) List(ctx context.Context) ([]QueuedJob, error) {
 	return nil, nil
 }
 func (f *fakeQueueRepo) NextPosition(ctx context.Context, priority JobPriority) (int64, error) {
+	if f.nextPosErr != nil {
+		return 0, f.nextPosErr
+	}
 	return 10, nil
 }
 func (f *fakeQueueRepo) Reorder(ctx context.Context, priority JobPriority, orderedJobIDs []string) error {
@@ -2157,4 +2283,132 @@ func (f *failingUpdateJobRepo) CountDownloading(ctx context.Context) (int, error
 }
 func (f *failingUpdateJobRepo) ListPendingEngineCleanups(ctx context.Context) ([]Job, error) {
 	return nil, nil
+}
+
+func TestEndToEnd_UploadedTorrent(t *testing.T) {
+	m, _, _, cleanup, fakeTorrentEng := setupManagerTest(t)
+	defer cleanup()
+
+	addTorrentFileCalled := false
+	fakeTorrentEng.addTorrentFileFunc = func(filePath string) (string, error) {
+		addTorrentFileCalled = true
+		return "hash999", nil
+	}
+
+	tempTorrent := filepath.Join(t.TempDir(), "input.torrent")
+	if err := os.WriteFile(tempTorrent, []byte("d8:announce3:url7:filesizede"), 0644); err != nil {
+		t.Fatalf("failed to create temp torrent file: %v", err)
+	}
+
+	j, err := m.CreateTorrentFromFileWithOptions(context.Background(), tempTorrent, CreateOptions{Priority: JobPriorityNormal})
+	if err != nil {
+		t.Fatalf("expected CreateTorrentFromFileWithOptions to succeed, got %v", err)
+	}
+
+	if j.Engine != "qbittorrent" {
+		t.Errorf("expected engine qbittorrent, got %s", j.Engine)
+	}
+	if j.Type != TypeTorrent {
+		t.Errorf("expected type torrent, got %s", j.Type)
+	}
+	if !strings.HasPrefix(j.Source, "torrent://") {
+		t.Errorf("expected source starting with torrent://, got %s", j.Source)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var updatedJob *Job
+	for time.Now().Before(deadline) {
+		updatedJob, err = m.repo.GetByID(context.Background(), j.ID)
+		if updatedJob != nil && updatedJob.EngineID == "hash999" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !addTorrentFileCalled {
+		t.Errorf("expected AddTorrentFile to be invoked on fake qBittorrent engine")
+	}
+	if updatedJob == nil || updatedJob.EngineID != "hash999" {
+		gotEngineID := ""
+		if updatedJob != nil {
+			gotEngineID = updatedJob.EngineID
+		}
+		t.Errorf("expected infoHash hash999 persisted on job, got %s", gotEngineID)
+	}
+}
+
+func TestCreateTorrentFromFile_CleanupOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	repo := newFakeJobRepository()
+	bus := newFakeEventBus()
+	registry := &fakeEngineRegistry{
+		engines: map[string]IEngine{
+			"aria2": &fakeEngine{},
+		},
+	}
+	m := NewManager(repo, registry, bus, tmpDir, newFakeTorrentRepository(repo), tmpDir)
+
+	tempTorrent := filepath.Join(tmpDir, "input.torrent")
+	if err := os.WriteFile(tempTorrent, []byte("d8:announce3:url7:filesizede"), 0644); err != nil {
+		t.Fatalf("failed to create temp torrent file: %v", err)
+	}
+
+	_, err := m.CreateTorrentFromFileWithOptions(context.Background(), tempTorrent, CreateOptions{Priority: JobPriorityNormal})
+	if err == nil {
+		t.Fatalf("expected CreateTorrentFromFileWithOptions to fail when qbittorrent engine is missing")
+	}
+
+	torrentsDir := filepath.Join(m.dataDir, "torrents")
+	entries, _ := os.ReadDir(torrentsDir)
+	if len(entries) > 0 {
+		t.Errorf("expected 0 leaked torrent files in %s, found %d", torrentsDir, len(entries))
+	}
+}
+
+func TestManager_MediaFinalization_NeverPicksUnrelatedLargerFile(t *testing.T) {
+	m, _, _, cleanup, _ := setupManagerTest(t)
+	defer cleanup()
+
+	workDir := filepath.Join(t.TempDir(), "work_job123")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("failed to create workdir: %v", err)
+	}
+
+	unrelatedFile := filepath.Join(workDir, "huge_unrelated_video.mp4")
+	if err := os.WriteFile(unrelatedFile, make([]byte, 100*1024), 0644); err != nil {
+		t.Fatalf("failed to write dummy large file: %v", err)
+	}
+
+	j := &Job{
+		ID:        "job123",
+		Engine:    "ytdlp",
+		Type:      TypeMedia,
+		Status:    StatusDownloading,
+		WorkDir:   workDir,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.repo.Create(context.Background(), j)
+
+	status := &EngineStatus{
+		Status:     StatusCompleted,
+		OutputPath: "",
+	}
+
+	m.UpdateJobFromEngine(context.Background(), j, status, true)
+
+	updatedJob, err := m.repo.GetByID(context.Background(), "job123")
+	if err != nil {
+		t.Fatalf("failed to fetch job: %v", err)
+	}
+
+	if updatedJob.Status != StatusFailed {
+		t.Errorf("expected job to fail when OutputPath is missing, got %s", updatedJob.Status)
+	}
+	if updatedJob.FinalPath != "" {
+		t.Errorf("expected empty FinalPath, got %s (unrelated file was wrongly finalized)", updatedJob.FinalPath)
+	}
+	if !strings.Contains(updatedJob.Error, "engine output path was not provided") {
+		t.Errorf("expected diagnostic error message, got %s", updatedJob.Error)
+	}
 }

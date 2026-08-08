@@ -49,6 +49,7 @@ const (
 // ITorrentRepository defines the persistence interface for torrent-specific data.
 type ITorrentRepository interface {
 	CreateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error
+	CreateTorrentJobAtomic(ctx context.Context, j *Job, rec *TorrentJobRecord) error
 	GetTorrentJob(ctx context.Context, jobID string) (*TorrentJobRecord, error)
 	UpdateTorrentJob(ctx context.Context, rec *TorrentJobRecord) error
 	DeleteTorrentJob(ctx context.Context, jobID string) error
@@ -58,6 +59,7 @@ type ITorrentRepository interface {
 	GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error)
 	UpdateTorrentFileSelections(ctx context.Context, jobID string, selections []TorrentFileRecord) error
 	FinalizeTorrent(ctx context.Context, j *Job, stopReason string) error
+	PersistTorrentSelectionAndEnqueue(ctx context.Context, job *Job, selections []TorrentFileRecord, rec *TorrentJobRecord, queueEntry *QueueEntry) error
 }
 
 // TorrentJobRecord holds torrent-specific persistence data.

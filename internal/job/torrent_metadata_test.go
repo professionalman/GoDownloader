@@ -63,6 +63,12 @@ func (m *mockTorrentEngine) AddTorrentFile(ctx context.Context, filePath, savePa
 	m.addFileCalls = append(m.addFileCalls, filePath)
 	return "0123456789abcdef0123456789abcdef01234567", nil
 }
+func (m *mockTorrentEngine) GetTorrentOwnership(ctx context.Context, infoHash string) (*TorrentOwnership, error) {
+	return nil, nil
+}
+func (m *mockTorrentEngine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error {
+	return nil
+}
 func (m *mockTorrentEngine) GetFiles(ctx context.Context, infoHash string) ([]TorrentFile, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

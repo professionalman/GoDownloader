@@ -195,11 +195,48 @@ func TestDualStream_LineHandling(t *testing.T) {
 	}
 }
 
+func TestMonotonicProgress(t *testing.T) {
+	eng := NewEngine("ytdlp", "ffmpeg")
+	state := &downloadState{}
+
+	// 1. Initial 80% progress
+	eng.handleYTDLPLine("job1", state, "__GODOWNLOADER_PROGRESS__:80.0%|8000|10000|10000|1000|10", "stdout")
+	if state.progress.Percent != 80.0 {
+		t.Fatalf("expected 80.0, got %f", state.progress.Percent)
+	}
+
+	// 2. Secondary stream at 20% must not lower percent (80 -> 20 remains 80)
+	eng.handleYTDLPLine("job1", state, "__GODOWNLOADER_PROGRESS__:20.0%|2000|10000|10000|500|15", "stdout")
+	if state.progress.Percent != 80.0 {
+		t.Fatalf("80 -> 20 failed: expected 80.0, got %f", state.progress.Percent)
+	}
+	if state.progress.Speed != 500 || state.progress.ETASeconds != 15 {
+		t.Fatalf("expected updated speed 500 and ETA 15, got speed %d, eta %d", state.progress.Speed, state.progress.ETASeconds)
+	}
+
+	// 3. Complete first stream to 100%
+	eng.handleYTDLPLine("job1", state, "__GODOWNLOADER_PROGRESS__:100.0%|10000|10000|10000|2000|0", "stdout")
+	if state.progress.Percent != 100.0 {
+		t.Fatalf("expected 100.0, got %f", state.progress.Percent)
+	}
+
+	// 4. Second stream starting at 0% must not reset 100% (100 -> 0 remains 100)
+	eng.handleYTDLPLine("job1", state, "__GODOWNLOADER_PROGRESS__:0.0%|0|1000|1000|300|5", "stdout")
+	if state.progress.Percent != 100.0 {
+		t.Fatalf("100 -> 0 failed: expected 100.0, got %f", state.progress.Percent)
+	}
+	if state.progress.Speed != 300 || state.progress.ETASeconds != 5 {
+		t.Fatalf("expected updated speed 300 and ETA 5, got speed %d, eta %d", state.progress.Speed, state.progress.ETASeconds)
+	}
+}
+
 func TestPathPrecedence(t *testing.T) {
 	eng := NewEngine("ytdlp", "ffmpeg")
+	finalPath := filepath.Join("tmp", "final_merged.mkv")
+	candPath := filepath.Join("tmp", "intermediate.webm")
 	state := &downloadState{
-		candidateOutputPath: "C:\\Temp\\intermediate.webm",
-		finalOutputPath:     "C:\\Temp\\final_merged.mkv",
+		candidateOutputPath: candPath,
+		finalOutputPath:     finalPath,
 		done:                true,
 		progress:            progressInfo{Percent: 100, TotalBytes: 50000},
 	}
@@ -210,8 +247,8 @@ func TestPathPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected Status to succeed, got %v", err)
 	}
-	if st.OutputPath != "C:\\Temp\\final_merged.mkv" {
-		t.Errorf("expected OutputPath C:\\Temp\\final_merged.mkv, got %q", st.OutputPath)
+	if st.OutputPath != finalPath {
+		t.Errorf("expected OutputPath %q, got %q", finalPath, st.OutputPath)
 	}
 	if st.FileName != "final_merged.mkv" {
 		t.Errorf("expected FileName final_merged.mkv, got %q", st.FileName)

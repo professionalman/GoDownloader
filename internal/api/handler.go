@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -427,16 +428,23 @@ func writeAppError(w http.ResponseWriter, err error) {
 			httpStatus = http.StatusServiceUnavailable
 		case job.ErrCapabilityNotSupported, job.ErrPrivateTorrentTrackerRejected:
 			httpStatus = http.StatusUnprocessableEntity
-		case job.ErrInvalidJobState, job.ErrNetworkSettingStateAmbiguous, job.ErrSeedingPolicyStateAmbiguous:
+		case job.ErrInvalidJobState, job.ErrNetworkSettingStateAmbiguous, job.ErrSeedingPolicyStateAmbiguous,
+			job.ErrTorrentAlreadyManaged, job.ErrTorrentAlreadyExistsExternally:
 			httpStatus = http.StatusConflict
 		case job.ErrNetworkSettingApplicationFailed, job.ErrSeedingPolicyApplicationFailed:
 			httpStatus = http.StatusServiceUnavailable
 		case job.ErrSecretStorageUnavailable:
 			httpStatus = http.StatusServiceUnavailable
+		case job.ErrInsufficientDiskSpace:
+			httpStatus = http.StatusInsufficientStorage
+		case job.ErrStorageError:
+			httpStatus = http.StatusInternalServerError
 		}
+		log.Printf("api: %s: %s", appErr.Code, appErr.Message)
 		writeError(w, httpStatus, appErr.Code, appErr.Message)
 		return
 	}
+	log.Printf("api: unhandled error: type=%T err=%v", err, err)
 	writeError(w, http.StatusInternalServerError, job.ErrInternalError, "an internal error occurred")
 }
 

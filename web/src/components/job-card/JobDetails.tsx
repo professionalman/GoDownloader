@@ -79,11 +79,16 @@ export function JobDetails({ job, capabilities, onJobUpdated }: JobDetailsProps)
 
         {/* Torrent details */}
         {isTorrentJob && job.torrentInfo && (
-          <div className="sm:col-span-2 rounded border border-border/60 bg-surface-2/40 p-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-muted-foreground">
+          <div className="sm:col-span-2 rounded border border-border/60 bg-surface-2/40 p-2 grid grid-cols-2 sm:grid-cols-5 gap-2 text-muted-foreground">
             <div>Uploaded: {formatBytes(job.torrentInfo.uploaded)}</div>
             <div>Ratio: {job.torrentInfo.ratio.toFixed(2)}</div>
-            <div>Seeders: {job.torrentInfo.seeders}</div>
-            <div>Leechers: {job.torrentInfo.leechers}</div>
+            <div title="Current peers connected by qBittorrent. These are not total swarm counts.">
+              Connected seeds: {job.torrentInfo.seeders}
+            </div>
+            <div title="Current peers connected by qBittorrent. These are not total swarm counts.">
+              Connected leechers: {job.torrentInfo.leechers}
+            </div>
+            <div>Upload speed: {formatBytes(job.torrentInfo.uploadSpeed)}/s</div>
           </div>
         )}
       </div>

@@ -51,6 +51,12 @@ func setupSeedingPolicyJob(t *testing.T, status JobStatus) (*Manager, *fakeJobRe
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := torrentRepo.SaveTorrentFiles(context.Background(), j.ID, []TorrentFileRecord{
+		{JobID: j.ID, FileIndex: 0, Selected: true, Priority: "normal", Size: 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	j.TotalBytes = 1000
 	return manager, repo, torrentRepo, bus, engine, j
 }
 

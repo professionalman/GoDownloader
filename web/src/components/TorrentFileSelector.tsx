@@ -1,6 +1,6 @@
 import { File, Folder, LoaderCircle, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { getTorrentFiles } from '../api';
+import { getTorrentFiles, ApiResponseError } from '../api';
 import type {
   Job,
   SeedingMode,
@@ -9,6 +9,34 @@ import type {
   TorrentFilePriority,
   TorrentFileSelection,
 } from '../types';
+
+function formatBytesHuman(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+/**
+ * Parse the backend INSUFFICIENT_DISK_SPACE message and return a user-friendly
+ * multi-line description. The backend message format is:
+ *   "INSUFFICIENT_DISK_SPACE: insufficient free space in <dir> (free: <n>, required: <n>, reserve: <n>, remaining: <n>)"
+ */
+export function formatDiskSpaceError(message: string): string {
+  const match = message.match(/free:\s*(\d+),\s*required:\s*(\d+),\s*reserve:\s*(\d+),\s*remaining:\s*(\d+)/);
+  if (!match) return `Insufficient disk space\n${message}`;
+  const free = Number(match[1]);
+  const required = Number(match[2]);
+  const reserve = Number(match[3]);
+  const remaining = Number(match[4]);
+  return [
+    'Insufficient disk space',
+    `Available: ${formatBytesHuman(free)}`,
+    `Selected remaining: ${formatBytesHuman(remaining)}`,
+    `Reserved: ${formatBytesHuman(reserve)}`,
+    `Required: ${formatBytesHuman(required)}`,
+  ].join('\n');
+}
 
 interface TorrentFileSelectorProps {
   job: Job;
@@ -86,7 +114,11 @@ export function TorrentFileSelector({ job, onStart, onClose }: TorrentFileSelect
     try {
       await onStart(job.id, selection, seedingPolicy);
     } catch (reason: unknown) {
-      setSubmitError(reason instanceof Error ? reason.message : String(reason));
+      if (reason instanceof ApiResponseError && reason.code === 'INSUFFICIENT_DISK_SPACE') {
+        setSubmitError(formatDiskSpaceError(reason.message));
+      } else {
+        setSubmitError(reason instanceof Error ? reason.message : String(reason));
+      }
       setIsSubmitting(false);
     }
   };
@@ -112,7 +144,7 @@ export function TorrentFileSelector({ job, onStart, onClose }: TorrentFileSelect
         </header>
 
         {(error || submitError) && (
-          <div className="mx-4 mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">
+          <div className="mx-4 mt-3 whitespace-pre-line rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert" data-testid="torrent-submit-error">
             {submitError || error}
           </div>
         )}

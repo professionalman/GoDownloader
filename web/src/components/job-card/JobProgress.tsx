@@ -30,7 +30,7 @@ export function JobProgress({ job }: JobProgressProps) {
       ? `~${formatBytes(mediaEstimate.totalBytes)} est.`
       : 'Size unavailable'
     : job.totalBytes > 0
-    ? formatBytes(job.totalBytes)
+    ? `${formatBytes(job.totalBytes)}${isTorrentJob && job.status !== 'awaiting_selection' ? ' selected' : ''}`
     : 'Size unavailable';
 
   const formattedTimestamp = new Date(job.updatedAt || job.createdAt).toLocaleTimeString([], {
