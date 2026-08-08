@@ -285,7 +285,7 @@ func TestTorrentSelection_UpdatesSelectedTotalBytes(t *testing.T) {
 	fakeT := &fakeTorrentEngine{
 		getFilesFunc: func(hash string) ([]TorrentFile, error) {
 			return []TorrentFile{
-				{Index: 0, Path: "file1.iso", Size: 5 * 1024 * 1024 * 1024, Priority: PriorityNormal, Selected: true},  // 5 GB
+				{Index: 0, Path: "file1.iso", Size: 5 * 1024 * 1024 * 1024, Priority: PriorityNormal, Selected: true}, // 5 GB
 				{Index: 1, Path: "file2.iso", Size: 10 * 1024 * 1024 * 1024, Priority: PrioritySkip, Selected: false}, // 10 GB
 			}, nil
 		},
