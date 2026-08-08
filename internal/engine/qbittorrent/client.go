@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"downloader/internal/job"
 )
 
 type Client struct {
@@ -271,6 +274,9 @@ func (c *Client) ValidateCompatibility(ctx context.Context) error {
 
 var ErrTorrentNotFound = errors.New("torrent not found")
 
+// APIError is an alias to job.EngineAPIError for qBittorrent Web API responses.
+type APIError = job.EngineAPIError
+
 func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category string, tags []string, stopped bool) error {
 	data := url.Values{}
 	data.Set("urls", magnet)
@@ -298,10 +304,12 @@ func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category strin
 		lr := io.LimitReader(resp.Body, 4096)
 		bodyBytes, _ := io.ReadAll(lr)
 		bodyStr := strings.TrimSpace(string(bodyBytes))
-		if bodyStr != "" {
-			return fmt.Errorf("failed to add magnet, status: %d (%s)", resp.StatusCode, bodyStr)
+		log.Printf("qbittorrent AddMagnet non-200 response (status %d): %s", resp.StatusCode, bodyStr)
+		return &APIError{
+			Operation:  "AddMagnet",
+			StatusCode: resp.StatusCode,
+			Detail:     bodyStr,
 		}
-		return fmt.Errorf("failed to add magnet, status: %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -348,10 +356,12 @@ func (c *Client) AddTorrentFile(ctx context.Context, filePath, savePath, categor
 		lr := io.LimitReader(resp.Body, 4096)
 		bodyBytes, _ := io.ReadAll(lr)
 		bodyStr := strings.TrimSpace(string(bodyBytes))
-		if bodyStr != "" {
-			return fmt.Errorf("failed to add torrent file, status: %d (%s)", resp.StatusCode, bodyStr)
+		log.Printf("qbittorrent AddTorrentFile non-200 response (status %d): %s", resp.StatusCode, bodyStr)
+		return &APIError{
+			Operation:  "AddTorrentFile",
+			StatusCode: resp.StatusCode,
+			Detail:     bodyStr,
 		}
-		return fmt.Errorf("failed to add torrent file, status: %d", resp.StatusCode)
 	}
 	return nil
 }

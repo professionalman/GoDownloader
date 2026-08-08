@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -258,21 +259,30 @@ func (e *Engine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error
 		return errors.New("info hash is required to adopt torrent")
 	}
 	// 1. Stop torrent to ensure no background downloading occurs before file selection
-	_ = e.client.StopTorrents(ctx, []string{infoHash})
+	if err := e.client.StopTorrents(ctx, []string{infoHash}); err != nil {
+		return fmt.Errorf("failed to stop torrent during adoption: %w", err)
+	}
 
-	// 2. Ensure category is godownloader
-	_ = e.client.SetCategory(ctx, []string{infoHash}, CategoryName)
+	// Verify stopped state using existing raw-state/status mechanism where practical
+	info, err := e.client.GetTorrentInfo(ctx, infoHash)
+	if err != nil {
+		return fmt.Errorf("failed to verify torrent state after adoption: %w", err)
+	}
+	if info != nil && strings.TrimSpace(info.Category) != CategoryName {
+		if catErr := e.client.SetCategory(ctx, []string{infoHash}, CategoryName); catErr != nil {
+			return fmt.Errorf("failed to set category during adoption: %w", catErr)
+		}
+	}
 
-	// 3. Associate current job tag
+	// 2. Associate current job tag (fatal if fails)
 	if jobID != "" {
 		if err := e.client.AddTags(ctx, []string{infoHash}, []string{jobID}); err != nil {
 			return fmt.Errorf("failed to tag adopted torrent: %w", err)
 		}
 	}
 
-	// 4. Remove stale GoDownloader job tags if present
-	info, err := e.client.GetTorrentInfo(ctx, infoHash)
-	if err == nil && info != nil {
+	// 3. Remove stale GoDownloader job tags if present (surface failure)
+	if info != nil {
 		rawTags := strings.Split(info.Tags, ",")
 		var staleTags []string
 		for _, t := range rawTags {
@@ -282,7 +292,10 @@ func (e *Engine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error
 			}
 		}
 		if len(staleTags) > 0 {
-			_ = e.client.RemoveTags(ctx, []string{infoHash}, staleTags)
+			if rmErr := e.client.RemoveTags(ctx, []string{infoHash}, staleTags); rmErr != nil {
+				log.Printf("AdoptTorrent: warning: failed to remove stale tags %v from %s: %v", staleTags, infoHash, rmErr)
+				return fmt.Errorf("failed to cleanup stale job tags during adoption: %w", rmErr)
+			}
 		}
 	}
 

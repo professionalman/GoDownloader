@@ -70,6 +70,17 @@ const (
 	ErrTorrentAlreadyExistsExternally  = "TORRENT_ALREADY_EXISTS_EXTERNALLY"
 )
 
+// EngineAPIError represents a non-200 HTTP response from an engine API.
+type EngineAPIError struct {
+	Operation  string
+	StatusCode int
+	Detail     string
+}
+
+func (e *EngineAPIError) Error() string {
+	return fmt.Sprintf("engine %s failed with status: %d", e.Operation, e.StatusCode)
+}
+
 type TorrentFinalizeFailureKind string
 
 const (

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -1118,8 +1119,10 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			}
 
 			// 7. Handle race-time 409: re-query qBittorrent once and classify ownership
-			if strings.Contains(addErr.Error(), "409") && expectedHash != "" {
-				log.Printf("acquireTorrentMetadata: add returned 409 for %s, re-querying qBittorrent ownership", expectedHash)
+			var apiErr *EngineAPIError
+			isConflict := errors.As(addErr, &apiErr) && apiErr.StatusCode == http.StatusConflict
+			if isConflict && expectedHash != "" {
+				log.Printf("acquireTorrentMetadata: add returned HTTP 409 for %s, re-querying qBittorrent ownership", expectedHash)
 				postOwnership, queryErr := torrentEng.GetTorrentOwnership(ctx, expectedHash)
 				if queryErr == nil && postOwnership != nil {
 					reconciled, recErr := reconcileOwnership(postOwnership)

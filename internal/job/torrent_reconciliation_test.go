@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +17,8 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 )
 
-// Helper to create a bencoded torrent file buffer
-func makeTestTorrentV1(name string, length int64) ([]byte, string, error) {
+// Helper to create a bencoded v1 torrent file buffer
+func makeTestTorrentV1(name string, length int64) ([]byte, TorrentHashIdentity, error) {
 	infoMap := map[string]interface{}{
 		"name":         name,
 		"piece length": int64(262144),
@@ -26,10 +27,10 @@ func makeTestTorrentV1(name string, length int64) ([]byte, string, error) {
 	}
 	infoBytes, err := bencode.Marshal(infoMap)
 	if err != nil {
-		return nil, "", err
+		return nil, TorrentHashIdentity{}, err
 	}
 	h1 := sha1.Sum(infoBytes)
-	infoHash := hex.EncodeToString(h1[:])
+	v1Hex := strings.ToLower(hex.EncodeToString(h1[:]))
 
 	torrentMap := map[string]interface{}{
 		"announce": "http://tracker.example.com/announce",
@@ -37,12 +38,17 @@ func makeTestTorrentV1(name string, length int64) ([]byte, string, error) {
 	}
 	torrentBytes, err := bencode.Marshal(torrentMap)
 	if err != nil {
-		return nil, "", err
+		return nil, TorrentHashIdentity{}, err
 	}
-	return torrentBytes, strings.ToLower(infoHash), nil
+	ident := TorrentHashIdentity{
+		V1Hash:        v1Hex,
+		QBitTorrentID: v1Hex,
+	}
+	return torrentBytes, ident, nil
 }
 
-func makeTestTorrentV2(name string, length int64) ([]byte, string, error) {
+// Helper to create a bencoded pure v2 torrent file buffer
+func makeTestTorrentV2(name string, length int64) ([]byte, TorrentHashIdentity, error) {
 	infoMap := map[string]interface{}{
 		"name":         name,
 		"piece length": int64(262144),
@@ -58,10 +64,11 @@ func makeTestTorrentV2(name string, length int64) ([]byte, string, error) {
 	}
 	infoBytes, err := bencode.Marshal(infoMap)
 	if err != nil {
-		return nil, "", err
+		return nil, TorrentHashIdentity{}, err
 	}
 	h2 := sha256.Sum256(infoBytes)
-	infoHash := hex.EncodeToString(h2[:])
+	v2Hex := strings.ToLower(hex.EncodeToString(h2[:]))
+	qbitID := v2Hex[:40]
 
 	torrentMap := map[string]interface{}{
 		"announce": "http://tracker.example.com/announce",
@@ -69,12 +76,17 @@ func makeTestTorrentV2(name string, length int64) ([]byte, string, error) {
 	}
 	torrentBytes, err := bencode.Marshal(torrentMap)
 	if err != nil {
-		return nil, "", err
+		return nil, TorrentHashIdentity{}, err
 	}
-	return torrentBytes, strings.ToLower(infoHash), nil
+	ident := TorrentHashIdentity{
+		V2Hash:        v2Hex,
+		QBitTorrentID: qbitID,
+	}
+	return torrentBytes, ident, nil
 }
 
-func makeTestTorrentHybrid(name string, length int64) ([]byte, string, error) {
+// Helper to create a bencoded hybrid (v1 + v2) torrent file buffer
+func makeTestTorrentHybrid(name string, length int64) ([]byte, TorrentHashIdentity, error) {
 	infoMap := map[string]interface{}{
 		"name":         name,
 		"piece length": int64(262144),
@@ -91,10 +103,13 @@ func makeTestTorrentHybrid(name string, length int64) ([]byte, string, error) {
 	}
 	infoBytes, err := bencode.Marshal(infoMap)
 	if err != nil {
-		return nil, "", err
+		return nil, TorrentHashIdentity{}, err
 	}
 	h1 := sha1.Sum(infoBytes)
-	infoHash := hex.EncodeToString(h1[:])
+	v1Hex := strings.ToLower(hex.EncodeToString(h1[:]))
+	h2 := sha256.Sum256(infoBytes)
+	v2Hex := strings.ToLower(hex.EncodeToString(h2[:]))
+	qbitID := v2Hex[:40]
 
 	torrentMap := map[string]interface{}{
 		"announce": "http://tracker.example.com/announce",
@@ -102,54 +117,112 @@ func makeTestTorrentHybrid(name string, length int64) ([]byte, string, error) {
 	}
 	torrentBytes, err := bencode.Marshal(torrentMap)
 	if err != nil {
-		return nil, "", err
+		return nil, TorrentHashIdentity{}, err
 	}
-	return torrentBytes, strings.ToLower(infoHash), nil
+	ident := TorrentHashIdentity{
+		V1Hash:        v1Hex,
+		V2Hash:        v2Hex,
+		QBitTorrentID: qbitID,
+	}
+	return torrentBytes, ident, nil
 }
 
-// 9. Test .torrent hash extraction fixtures with deterministic expected hashes
-func TestExtractTorrentInfoHash_Fixtures(t *testing.T) {
-	// V1
+// 1. Test .torrent hash extraction identity semantics for v1, v2, and hybrid
+func TestExtractTorrentIdentity_Fixtures(t *testing.T) {
+	// v1 only
 	v1Bytes, expectedV1, err := makeTestTorrentV1("ubuntu-22.04.iso", 1024*1024*1024)
 	if err != nil {
 		t.Fatalf("failed to make v1 torrent: %v", err)
 	}
-	gotV1, err := ExtractTorrentInfoHash(v1Bytes)
+	identV1, err := ExtractTorrentIdentity(v1Bytes)
 	if err != nil {
-		t.Fatalf("ExtractTorrentInfoHash(v1) failed: %v", err)
+		t.Fatalf("ExtractTorrentIdentity(v1) failed: %v", err)
 	}
-	if gotV1 != expectedV1 {
-		t.Fatalf("v1 info hash mismatch: got %s, want %s", gotV1, expectedV1)
+	if identV1.V1Hash != expectedV1.V1Hash {
+		t.Errorf("v1 V1Hash mismatch: got %s, want %s", identV1.V1Hash, expectedV1.V1Hash)
+	}
+	if identV1.V2Hash != "" {
+		t.Errorf("v1 V2Hash expected empty, got %s", identV1.V2Hash)
+	}
+	if identV1.QBitTorrentID != expectedV1.QBitTorrentID || len(identV1.QBitTorrentID) != 40 {
+		t.Errorf("v1 QBitTorrentID mismatch: got %s (len=%d), want %s (40 hex)", identV1.QBitTorrentID, len(identV1.QBitTorrentID), expectedV1.QBitTorrentID)
 	}
 
-	// V2
+	// v2 only
 	v2Bytes, expectedV2, err := makeTestTorrentV2("v2-archive.iso", 2048*1024*1024)
 	if err != nil {
 		t.Fatalf("failed to make v2 torrent: %v", err)
 	}
-	gotV2, err := ExtractTorrentInfoHash(v2Bytes)
+	identV2, err := ExtractTorrentIdentity(v2Bytes)
 	if err != nil {
-		t.Fatalf("ExtractTorrentInfoHash(v2) failed: %v", err)
+		t.Fatalf("ExtractTorrentIdentity(v2) failed: %v", err)
 	}
-	if gotV2 != expectedV2 {
-		t.Fatalf("v2 info hash mismatch: got %s, want %s", gotV2, expectedV2)
+	if identV2.V2Hash != expectedV2.V2Hash || len(identV2.V2Hash) != 64 {
+		t.Errorf("v2 V2Hash mismatch: got %s (len=%d), want %s (64 hex)", identV2.V2Hash, len(identV2.V2Hash), expectedV2.V2Hash)
+	}
+	if identV2.V1Hash != "" {
+		t.Errorf("v2 V1Hash expected empty, got %s", identV2.V1Hash)
+	}
+	if identV2.QBitTorrentID != expectedV2.QBitTorrentID || len(identV2.QBitTorrentID) != 40 {
+		t.Errorf("v2 QBitTorrentID mismatch: got %s (len=%d), want %s (40 hex)", identV2.QBitTorrentID, len(identV2.QBitTorrentID), expectedV2.QBitTorrentID)
 	}
 
-	// Hybrid (should resolve to v1 SHA-1 hash for qBittorrent compatibility)
+	// hybrid (v1 + v2)
 	hybridBytes, expectedHybrid, err := makeTestTorrentHybrid("hybrid.iso", 512*1024*1024)
 	if err != nil {
 		t.Fatalf("failed to make hybrid torrent: %v", err)
 	}
-	gotHybrid, err := ExtractTorrentInfoHash(hybridBytes)
+	identHybrid, err := ExtractTorrentIdentity(hybridBytes)
 	if err != nil {
-		t.Fatalf("ExtractTorrentInfoHash(hybrid) failed: %v", err)
+		t.Fatalf("ExtractTorrentIdentity(hybrid) failed: %v", err)
 	}
-	if gotHybrid != expectedHybrid {
-		t.Fatalf("hybrid info hash mismatch: got %s, want %s", gotHybrid, expectedHybrid)
+	if identHybrid.V1Hash != expectedHybrid.V1Hash || len(identHybrid.V1Hash) != 40 {
+		t.Errorf("hybrid V1Hash mismatch: got %s, want %s", identHybrid.V1Hash, expectedHybrid.V1Hash)
+	}
+	if identHybrid.V2Hash != expectedHybrid.V2Hash || len(identHybrid.V2Hash) != 64 {
+		t.Errorf("hybrid V2Hash mismatch: got %s, want %s", identHybrid.V2Hash, expectedHybrid.V2Hash)
+	}
+	if identHybrid.QBitTorrentID != expectedHybrid.QBitTorrentID || len(identHybrid.QBitTorrentID) != 40 {
+		t.Errorf("hybrid QBitTorrentID mismatch: got %s (len=%d), want %s (40 hex)", identHybrid.QBitTorrentID, len(identHybrid.QBitTorrentID), expectedHybrid.QBitTorrentID)
 	}
 }
 
-// 1. Magnet hash absent in qBittorrent: AddMagnet called normally
+// 2. Test v2 magnet and hybrid magnet handling
+func TestExtractMagnetIdentity_Variants(t *testing.T) {
+	// Standard v1 hex
+	v1Hex := "1111111111111111111111111111111111111111"
+	m1 := "magnet:?xt=urn:btih:" + v1Hex + "&dn=test.iso"
+	id1, err := ExtractMagnetIdentity(m1)
+	if err != nil {
+		t.Fatalf("ExtractMagnetIdentity(v1 hex) failed: %v", err)
+	}
+	if id1.V1Hash != v1Hex || id1.QBitTorrentID != v1Hex {
+		t.Errorf("v1 hex identity mismatch: got %+v", id1)
+	}
+
+	// BEP 52 v2 multihash (xt=urn:btmh:1220<64-hex>)
+	v2Hex := "2222222222222222222222222222222222222222222222222222222222222222"
+	m2 := "magnet:?xt=urn:btmh:1220" + v2Hex + "&dn=test-v2.iso"
+	id2, err := ExtractMagnetIdentity(m2)
+	if err != nil {
+		t.Fatalf("ExtractMagnetIdentity(v2 multihash) failed: %v", err)
+	}
+	if id2.V2Hash != v2Hex || id2.QBitTorrentID != v2Hex[:40] {
+		t.Errorf("v2 multihash identity mismatch: got %+v, want QBitTorrentID %s", id2, v2Hex[:40])
+	}
+
+	// Hybrid magnet (both btih and btmh)
+	m3 := "magnet:?xt=urn:btih:" + v1Hex + "&xt=urn:btmh:1220" + v2Hex + "&dn=hybrid.iso"
+	id3, err := ExtractMagnetIdentity(m3)
+	if err != nil {
+		t.Fatalf("ExtractMagnetIdentity(hybrid) failed: %v", err)
+	}
+	if id3.V1Hash != v1Hex || id3.V2Hash != v2Hex || id3.QBitTorrentID != v2Hex[:40] {
+		t.Errorf("hybrid identity mismatch: got %+v, want QBitTorrentID %s", id3, v2Hex[:40])
+	}
+}
+
+// 3. Magnet hash absent in qBittorrent: AddMagnet called normally
 func TestTorrentReconciliation_MagnetHashAbsent_CallsAddMagnet(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
@@ -179,7 +252,6 @@ func TestTorrentReconciliation_MagnetHashAbsent_CallsAddMagnet(t *testing.T) {
 		t.Fatalf("mgr.Create failed: %v", err)
 	}
 
-	// Wait for metadata acquisition
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		jobObj, _ := mgr.Get(context.Background(), j.ID)
@@ -194,7 +266,7 @@ func TestTorrentReconciliation_MagnetHashAbsent_CallsAddMagnet(t *testing.T) {
 	}
 }
 
-// 2 & 3. Same-job hash already exists: AddMagnet NOT called, existing torrent reused, retry succeeds without 409
+// 4. Same-job existing torrent: AddMagnet NOT called, existing torrent reused
 func TestTorrentReconciliation_SameJobExisting_ReusesTorrentWithoutCallingAdd(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
@@ -211,14 +283,14 @@ func TestTorrentReconciliation_SameJobExisting_ReusesTorrentWithoutCallingAdd(t 
 				return &TorrentOwnership{
 					Hash:     targetHash,
 					Category: "godownloader",
-					Tags:     []string{currentJobID}, // Tagged with current job ID
+					Tags:     []string{currentJobID},
 				}, nil
 			}
 			return nil, nil
 		},
 		addMagnetFunc: func(magnet string) (string, error) {
 			atomic.AddInt32(&addMagnetCalled, 1)
-			return "", errors.New("failed to add magnet, status: 409")
+			return "", &EngineAPIError{Operation: "AddMagnet", StatusCode: http.StatusConflict, Detail: "Torrent already present"}
 		},
 		stopDownloadFunc: func(hash string) error {
 			atomic.AddInt32(&stopDownloadCalled, 1)
@@ -241,7 +313,6 @@ func TestTorrentReconciliation_SameJobExisting_ReusesTorrentWithoutCallingAdd(t 
 	}
 	currentJobID = j.ID
 
-	// Wait for metadata acquisition
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		jobObj, _ := mgr.Get(context.Background(), j.ID)
@@ -256,24 +327,19 @@ func TestTorrentReconciliation_SameJobExisting_ReusesTorrentWithoutCallingAdd(t 
 		t.Fatalf("expected StatusAwaitingSelection, got %s (err=%s)", jobObj.Status, jobObj.Error)
 	}
 
-	// Verify AddMagnet was NOT called (avoiding 409)
 	if atomic.LoadInt32(&addMagnetCalled) != 0 {
 		t.Fatalf("expected AddMagnet to NOT be called for same-job existing torrent, called %d times", addMagnetCalled)
 	}
-
-	// Verify stopDownload was called for safety before file selection
 	if atomic.LoadInt32(&stopDownloadCalled) < 1 {
 		t.Fatalf("expected StopDownload to be called, got %d", stopDownloadCalled)
 	}
 }
 
-// 4 & 10 & 11. Orphan godownloader torrent: adopted safely, stopped before selection, no AddMagnet, never deletes files
-func TestTorrentReconciliation_OrphanGodownloader_AdoptedSafely(t *testing.T) {
+// 5. Adoption fails closed when StopTorrents returns an error
+func TestTorrentReconciliation_AdoptionFailClosed_StopTorrentsError(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
-	var addMagnetCalled int32
-	var adoptCalled int32
-	var removeCalled int32
+	var startDownloadCalled int32
 
 	targetHash := "3333333333333333333333333333333333333333"
 
@@ -284,28 +350,17 @@ func TestTorrentReconciliation_OrphanGodownloader_AdoptedSafely(t *testing.T) {
 				return &TorrentOwnership{
 					Hash:     targetHash,
 					Category: "godownloader",
-					Tags:     []string{"job_deadbeef"}, // Stale job ID that does not exist in local DB
+					Tags:     []string{"job_deadbeef"},
 				}, nil
 			}
 			return nil, nil
 		},
 		adoptTorrentFunc: func(hash, jobID string) error {
-			atomic.AddInt32(&adoptCalled, 1)
+			return errors.New("simulated StopTorrents daemon communication error")
+		},
+		startDownloadFunc: func(hash string) error {
+			atomic.AddInt32(&startDownloadCalled, 1)
 			return nil
-		},
-		addMagnetFunc: func(magnet string) (string, error) {
-			atomic.AddInt32(&addMagnetCalled, 1)
-			return "", errors.New("409 conflict")
-		},
-		removeTorrentFunc: func(hash string, deleteFiles bool) error {
-			atomic.AddInt32(&removeCalled, 1)
-			return nil
-		},
-		getTorrentInfoFunc: func(hash string) (*TorrentInfo, error) {
-			return &TorrentInfo{Name: "orphan.iso", TotalSize: 3000}, nil
-		},
-		getFilesFunc: func(hash string) ([]TorrentFile, error) {
-			return []TorrentFile{{Index: 0, Path: "orphan.iso", Size: 3000, Selected: true}}, nil
 		},
 	}
 	reg := &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": eng}}
@@ -320,29 +375,25 @@ func TestTorrentReconciliation_OrphanGodownloader_AdoptedSafely(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		jobObj, _ := mgr.Get(context.Background(), j.ID)
-		if jobObj != nil && jobObj.Status == StatusAwaitingSelection {
+		if jobObj != nil && jobObj.Status == StatusFailed {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
 	jobObj, _ := mgr.Get(context.Background(), j.ID)
-	if jobObj.Status != StatusAwaitingSelection {
-		t.Fatalf("expected StatusAwaitingSelection, got %s (err=%s)", jobObj.Status, jobObj.Error)
+	if jobObj.Status != StatusFailed {
+		t.Fatalf("expected StatusFailed when adoption fails closed, got %s", jobObj.Status)
 	}
-
-	if atomic.LoadInt32(&adoptCalled) != 1 {
-		t.Fatalf("expected AdoptTorrent to be called 1 time, got %d", adoptCalled)
+	if !strings.Contains(jobObj.Error, "StopTorrents") {
+		t.Fatalf("expected StopTorrents error in job.Error, got: %s", jobObj.Error)
 	}
-	if atomic.LoadInt32(&addMagnetCalled) != 0 {
-		t.Fatalf("expected AddMagnet to NOT be called during adoption, called %d", addMagnetCalled)
-	}
-	if atomic.LoadInt32(&removeCalled) != 0 {
-		t.Fatalf("expected DeleteTorrents to NOT be called during adoption, called %d", removeCalled)
+	if atomic.LoadInt32(&startDownloadCalled) != 0 {
+		t.Fatalf("StartDownload must NEVER be called when adoption fails, called %d times", startDownloadCalled)
 	}
 }
 
-// 5. Another existing local GoDownloader job owns hash: returns TORRENT_ALREADY_MANAGED and does not mutate
+// 6. Another active local job owns hash: returns TORRENT_ALREADY_MANAGED
 func TestTorrentReconciliation_AnotherLocalJobOwnsHash_ReturnsConflict(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
@@ -351,7 +402,6 @@ func TestTorrentReconciliation_AnotherLocalJobOwnsHash_ReturnsConflict(t *testin
 
 	targetHash := "4444444444444444444444444444444444444444"
 
-	// Pre-create active job 1 in local repo
 	existingJob := &Job{
 		ID:        "job_active1",
 		Status:    StatusDownloading,
@@ -412,7 +462,7 @@ func TestTorrentReconciliation_AnotherLocalJobOwnsHash_ReturnsConflict(t *testin
 	}
 }
 
-// 6. Externally-owned qBittorrent torrent: returns TORRENT_ALREADY_EXISTS_EXTERNALLY and does not mutate
+// 7. Externally-owned qBittorrent torrent: returns TORRENT_ALREADY_EXISTS_EXTERNALLY without mutating
 func TestTorrentReconciliation_ExternallyOwnedTorrent_ReturnsConflict(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
@@ -477,7 +527,7 @@ func TestTorrentReconciliation_ExternallyOwnedTorrent_ReturnsConflict(t *testing
 	}
 }
 
-// 7. Add races and returns 409: one ownership re-query reconciles same-job torrent as success
+// 8. Add returns typed *qbittorrent.APIError with HTTP 409: re-queries once and reconciles as success
 func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
@@ -491,10 +541,8 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 		getOwnershipFunc: func(hash string) (*TorrentOwnership, error) {
 			count := atomic.AddInt32(&getOwnershipCallCount, 1)
 			if count == 1 {
-				// Initial check: not found yet
-				return nil, nil
+				return nil, nil // Initial check: not found yet
 			}
-			// Second check after 409: found under godownloader
 			return &TorrentOwnership{
 				Hash:     targetHash,
 				Category: "godownloader",
@@ -503,7 +551,11 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 		},
 		addMagnetFunc: func(magnet string) (string, error) {
 			atomic.AddInt32(&addMagnetCallCount, 1)
-			return "", errors.New("failed to add magnet, status: 409 (Torrent already exists)")
+			return "", &EngineAPIError{
+				Operation:  "AddMagnet",
+				StatusCode: http.StatusConflict,
+				Detail:     "secret_passkey=123456&tracker_token=abcdef", // Sensitive daemon response
+			}
 		},
 		adoptTorrentFunc: func(hash, jobID string) error {
 			return nil
@@ -546,30 +598,32 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 	}
 }
 
-// 8. Uploaded .torrent file with same hash uses the same reconciliation rules
-func TestTorrentReconciliation_UploadedTorrentFile_SameRules(t *testing.T) {
+// 9. Uploaded .torrent v2 and hybrid file reconciliation using 40-character QBitTorrentID
+func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
 	var addTorrentFileCalled int32
 	var adoptCalled int32
 
-	data, hash, err := makeTestTorrentV1("uploaded.iso", 8000)
+	data, ident, err := makeTestTorrentV2("uploaded-v2.iso", 8000)
 	if err != nil {
-		t.Fatalf("makeTestTorrentV1 failed: %v", err)
+		t.Fatalf("makeTestTorrentV2 failed: %v", err)
 	}
 
 	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_upload.torrent")
+	filePath := filepath.Join(tempDir, "test_v2_upload.torrent")
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		t.Fatalf("write file failed: %v", err)
 	}
 
+	var lookedUpHash string
 	eng := &fakeTorrentEngine{
 		fakeEngine: &fakeEngine{},
 		getOwnershipFunc: func(infoHash string) (*TorrentOwnership, error) {
-			if infoHash == hash {
+			lookedUpHash = infoHash
+			if infoHash == ident.QBitTorrentID {
 				return &TorrentOwnership{
-					Hash:     hash,
+					Hash:     ident.QBitTorrentID,
 					Category: "godownloader",
 					Tags:     []string{"job_old123"},
 				}, nil
@@ -582,13 +636,13 @@ func TestTorrentReconciliation_UploadedTorrentFile_SameRules(t *testing.T) {
 		},
 		addTorrentFileFunc: func(path string) (string, error) {
 			atomic.AddInt32(&addTorrentFileCalled, 1)
-			return hash, nil
+			return ident.QBitTorrentID, nil
 		},
 		getTorrentInfoFunc: func(infoHash string) (*TorrentInfo, error) {
-			return &TorrentInfo{Name: "uploaded.iso", TotalSize: 8000}, nil
+			return &TorrentInfo{Name: "uploaded-v2.iso", TotalSize: 8000}, nil
 		},
 		getFilesFunc: func(infoHash string) ([]TorrentFile, error) {
-			return []TorrentFile{{Index: 0, Path: "uploaded.iso", Size: 8000, Selected: true}}, nil
+			return []TorrentFile{{Index: 0, Path: "uploaded-v2.iso", Size: 8000, Selected: true}}, nil
 		},
 	}
 	reg := &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": eng}}
@@ -614,7 +668,13 @@ func TestTorrentReconciliation_UploadedTorrentFile_SameRules(t *testing.T) {
 		t.Fatalf("expected StatusAwaitingSelection, got %s (err=%s)", jobObj.Status, jobObj.Error)
 	}
 
-	// Should have adopted instead of re-adding
+	// Verify qBittorrent was looked up using 40-character QBitTorrentID
+	if lookedUpHash != ident.QBitTorrentID || len(lookedUpHash) != 40 {
+		t.Fatalf("qBittorrent lookup must use 40-character QBitTorrentID, got %q (len=%d)", lookedUpHash, len(lookedUpHash))
+	}
+	if jobObj.EngineID != ident.QBitTorrentID {
+		t.Fatalf("Job.EngineID must be 40-character QBitTorrentID, got %s", jobObj.EngineID)
+	}
 	if atomic.LoadInt32(&adoptCalled) != 1 {
 		t.Fatalf("expected AdoptTorrent to be called 1 time, got %d", adoptCalled)
 	}
