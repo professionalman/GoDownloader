@@ -119,6 +119,16 @@ func (m *regressionMockEngine) SetFilePriorities(ctx context.Context, infoHash s
 		return m.setFilePrioritiesErr
 	}
 	m.prioritiesSet = selections
+	fileMap := make(map[int]*TorrentFile, len(m.filesToReturn))
+	for i := range m.filesToReturn {
+		fileMap[m.filesToReturn[i].Index] = &m.filesToReturn[i]
+	}
+	for _, s := range selections {
+		if file, ok := fileMap[s.Index]; ok {
+			file.Priority = s.Priority
+			file.Selected = (s.Priority != PrioritySkip)
+		}
+	}
 	return nil
 }
 func (m *regressionMockEngine) StartDownload(ctx context.Context, infoHash string) error {

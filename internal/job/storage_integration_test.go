@@ -285,8 +285,8 @@ func TestTorrentSelection_UpdatesSelectedTotalBytes(t *testing.T) {
 	fakeT := &fakeTorrentEngine{
 		getFilesFunc: func(hash string) ([]TorrentFile, error) {
 			return []TorrentFile{
-				{Index: 0, Path: "file1.iso", Size: 5 * 1024 * 1024 * 1024},  // 5 GB
-				{Index: 1, Path: "file2.iso", Size: 10 * 1024 * 1024 * 1024}, // 10 GB
+				{Index: 0, Path: "file1.iso", Size: 5 * 1024 * 1024 * 1024, Priority: PriorityNormal, Selected: true},  // 5 GB
+				{Index: 1, Path: "file2.iso", Size: 10 * 1024 * 1024 * 1024, Priority: PrioritySkip, Selected: false}, // 10 GB
 			}, nil
 		},
 	}
@@ -2206,9 +2206,9 @@ func TestStartTorrent_AcceptsCompleteSelectionSet(t *testing.T) {
 	torrentEng := &fakeTorrentEngine{
 		getFilesFunc: func(hash string) ([]TorrentFile, error) {
 			return []TorrentFile{
-				{Index: 0, Path: "file1.mp4", Size: 100, Priority: PriorityNormal},
-				{Index: 1, Path: "file2.mp4", Size: 200, Priority: PriorityNormal},
-				{Index: 2, Path: "file3.mp4", Size: 300, Priority: PriorityNormal},
+				{Index: 0, Path: "file1.mp4", Size: 100, Priority: PriorityNormal, Selected: true},
+				{Index: 1, Path: "file2.mp4", Size: 200, Priority: PrioritySkip, Selected: false},
+				{Index: 2, Path: "file3.mp4", Size: 300, Priority: PriorityHigh, Selected: true},
 			}, nil
 		},
 		setPrioritiesFunc: func(hash string) error {

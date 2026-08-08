@@ -1252,10 +1252,7 @@ loop:
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("acquireTorrentMetadata: job %s background task cancelled", jobID)
-			if infoHash != "" {
-				_ = torrentEng.RemoveTorrent(context.Background(), infoHash, false)
-			}
+			log.Printf("acquireTorrentMetadata: job %s background task stopped on shutdown", jobID)
 			return
 		case <-timeoutCh:
 			break loop
@@ -1327,33 +1324,8 @@ loop:
 				if info.Name != "" && info.Name != infoHash {
 					files, errFiles := torrentEng.GetFiles(ctx, infoHash)
 					if errFiles == nil && len(files) > 0 {
-						stopErr := torrentEng.StopDownload(ctx, infoHash)
-
-						// Poll raw qBittorrent state for up to 3s to confirm pausedDL or stoppedDL
-						var isStopped bool
-						deadline := time.Now().Add(3 * time.Second)
-						for {
-							var currentRaw string
-							if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
-								currentRaw, _ = rawProvider.GetRawState(ctx, infoHash)
-							}
-							if currentRaw == "" {
-								if st, errSt := torrentEng.Status(ctx, j); errSt == nil && st != nil {
-									currentRaw = st.RawState
-								}
-							}
-							if currentRaw == "pausedDL" || currentRaw == "stoppedDL" {
-								isStopped = true
-								break
-							}
-							if time.Now().After(deadline) {
-								break
-							}
-							time.Sleep(50 * time.Millisecond)
-						}
-
-						if !isStopped {
-							log.Printf("acquireTorrentMetadata: failed to verify torrent %s stopped after metadata acquisition (stopErr=%v)", infoHash, stopErr)
+						if stopErr := m.verifyTorrentStopped(ctx, j, torrentEng, infoHash, 3*time.Second); stopErr != nil {
+							log.Printf("acquireTorrentMetadata: failed to verify torrent %s stopped after metadata acquisition: %v", infoHash, stopErr)
 							if m.torrentRepo != nil && infoHash != "" {
 								rec, _ := m.torrentRepo.GetTorrentJob(ctx, jobID)
 								rec = cloneTorrentRecord(rec)
@@ -1365,14 +1337,9 @@ loop:
 								_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
 							}
 
-							errText := "failed to verify torrent stopped after metadata acquisition"
-							if stopErr != nil {
-								errText = fmt.Sprintf("failed to stop torrent after metadata acquisition: %v", stopErr)
-							}
-
 							j.EngineID = infoHash
 							j.Status = StatusFailed
-							j.Error = errText
+							j.Error = fmt.Sprintf("failed to verify torrent stopped after metadata acquisition: %v", stopErr)
 							j.UpdatedAt = time.Now()
 							m.repo.Update(ctx, j)
 							m.publish(EventJobFailed, j)
@@ -1595,6 +1562,12 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 	// 5. Apply file priorities to qBittorrent engine while torrent remains stopped
 	if err := torrentEng.SetFilePriorities(ctx, j.EngineID, selections); err != nil {
 		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to set file priorities: %v", err)}
+	}
+
+	// 5b. Verify file priorities in qBittorrent engine before queueing or starting
+	if err := m.verifyTorrentFilePriorities(ctx, torrentEng, j.EngineID, selections, 3*time.Second); err != nil {
+		log.Printf("StartTorrentWithPolicy: file priority verification failed for job %s: %v", j.ID, err)
+		return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to verify file priorities in engine: %v", err)}
 	}
 
 	// 6. Apply seeding policy to engine while torrent remains stopped
@@ -1986,6 +1959,13 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 			log.Printf("engine cancel failed for job %s: %v", id, err)
 			return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine cancel failed: %v", err)}
 		}
+	} else if j.Type == TypeTorrent && m.torrentRepo != nil {
+		rec, _ := m.torrentRepo.GetTorrentJob(ctx, id)
+		if rec != nil && rec.InfoHash != "" {
+			if eng, ok := m.engines.Get("qbittorrent"); ok {
+				_ = eng.Cancel(ctx, &Job{EngineID: rec.InfoHash})
+			}
+		}
 	}
 
 	m.triggerCancel(id)
@@ -2104,7 +2084,11 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+
+		if err := m.repo.Update(ctx, j); err != nil {
+			log.Printf("Retry: failed to persist ANALYZING state for torrent job %s: %v", j.ID, err)
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist retry state: %v", err)}
+		}
 		m.publish(EventJobUpdated, j)
 
 		go m.acquireTorrentMetadata(j.ID, j.Source, torrentFilePath)
@@ -2935,7 +2919,14 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		}
 		if j.TotalBytes != selBytes {
 			j.TotalBytes = selBytes
-			_ = m.repo.Update(ctx, j)
+			if err := m.repo.Update(ctx, j); err != nil {
+				log.Printf("dispatchQueuedJob: failed to persist repaired TotalBytes for job %s: %v", j.ID, err)
+				targetStatus := StatusPaused
+				if qj.Action == QueueActionStart {
+					targetStatus = StatusFailed
+				}
+				return m.persistDispatchFailure(ctx, j, qj, targetStatus, fmt.Errorf("failed to persist repaired selected total bytes: %w", err))
+			}
 		}
 		preflightTotal = selBytes
 
@@ -2981,7 +2972,9 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 				return fmt.Errorf("engine %q does not support torrent operations", j.Engine)
 			}
 			if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
-				return err
+				log.Printf("dispatchQueuedJob: torrent start failed for job %s: %v", j.ID, err)
+				targetStatus := StatusFailed
+				return m.persistDispatchFailure(ctx, j, qj, targetStatus, err)
 			}
 			if err := m.confirmTorrentEngineActive(ctx, j, torrentEng, 3*time.Second); err != nil {
 				log.Printf("dispatchQueuedJob: confirm torrent start failed for job %s: %v", j.ID, err)
@@ -3096,6 +3089,121 @@ func (m *Manager) confirmTorrentEngineActive(ctx context.Context, j *Job, torren
 		lastState = "stopped/paused"
 	}
 	return fmt.Errorf("torrent engine did not transition to active state within %v (last state=%s)", timeout, lastState)
+}
+
+// verifyTorrentStopped commands the torrent engine to stop the torrent and polls
+// for a bounded duration to confirm that the torrent is in stoppedDL or pausedDL state.
+func (m *Manager) verifyTorrentStopped(ctx context.Context, j *Job, torrentEng ITorrentEngine, infoHash string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	stopErr := torrentEng.StopDownload(ctx, infoHash)
+	deadline := time.Now().Add(timeout)
+	pollInterval := 50 * time.Millisecond
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		var currentRaw string
+		if rawProvider, ok := torrentEng.(ITorrentRawStateProvider); ok {
+			currentRaw, _ = rawProvider.GetRawState(ctx, infoHash)
+		}
+		if currentRaw == "" {
+			if st, errSt := torrentEng.Status(ctx, j); errSt == nil && st != nil {
+				currentRaw = st.RawState
+			}
+		}
+
+		if currentRaw == "pausedDL" || currentRaw == "stoppedDL" || currentRaw == "pausedUP" || currentRaw == "stoppedUP" {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	if stopErr != nil {
+		return fmt.Errorf("failed to stop torrent: %w", stopErr)
+	}
+	return fmt.Errorf("torrent %s is not in stopped or paused state", infoHash)
+}
+
+// verifyTorrentFilePriorities reads the authoritative file list back from the engine
+// using GetFiles and verifies every submitted TorrentFileSelection within a bounded timeout.
+func (m *Manager) verifyTorrentFilePriorities(ctx context.Context, torrentEng ITorrentEngine, engineID string, selections []TorrentFileSelection, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	pollInterval := 50 * time.Millisecond
+
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		files, err := torrentEng.GetFiles(ctx, engineID)
+		if err != nil {
+			lastErr = err
+		} else {
+			fileMap := make(map[int]TorrentFile, len(files))
+			for _, f := range files {
+				fileMap[f.Index] = f
+			}
+
+			allMatch := true
+			for _, s := range selections {
+				f, exists := fileMap[s.Index]
+				if !exists {
+					allMatch = false
+					lastErr = fmt.Errorf("file index %d not found in engine file list", s.Index)
+					break
+				}
+				if s.Priority == PrioritySkip {
+					if f.Priority != PrioritySkip || f.Selected {
+						allMatch = false
+						lastErr = fmt.Errorf("file %d expected skip/unselected, got priority=%s, selected=%v", s.Index, f.Priority, f.Selected)
+						break
+					}
+				} else {
+					if f.Priority != s.Priority || !f.Selected {
+						allMatch = false
+						lastErr = fmt.Errorf("file %d expected priority=%s, got priority=%s, selected=%v", s.Index, s.Priority, f.Priority, f.Selected)
+						break
+					}
+				}
+			}
+
+			if allMatch {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("torrent file priorities verification failed: %w", lastErr)
+	}
+	return fmt.Errorf("torrent file priorities could not be verified within %v", timeout)
 }
 
 func (m *Manager) cleanupQueueOnStartup(ctx context.Context) {

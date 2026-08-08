@@ -76,6 +76,7 @@ func (f *fakeEngine) Detect(url string) string {
 type fakeTorrentEngine struct {
 	*fakeEngine
 	isStopped          bool
+	files              map[string][]TorrentFile
 	addMagnetFunc      func(magnet string) (string, error)
 	addTorrentFileFunc func(path string) (string, error)
 	getOwnershipFunc   func(hash string) (*TorrentOwnership, error)
@@ -150,6 +151,9 @@ func (f *fakeTorrentEngine) GetFiles(ctx context.Context, infoHash string) ([]To
 	if f.getFilesFunc != nil {
 		return f.getFilesFunc(infoHash)
 	}
+	if f.files != nil && len(f.files[infoHash]) > 0 {
+		return f.files[infoHash], nil
+	}
 	return []TorrentFile{
 		{Index: 0, Path: "file1.bin", Size: 1024, Priority: PriorityNormal, Selected: true},
 	}, nil
@@ -158,6 +162,30 @@ func (f *fakeTorrentEngine) SetFilePriorities(ctx context.Context, infoHash stri
 	if f.setPrioritiesFunc != nil {
 		return f.setPrioritiesFunc(infoHash)
 	}
+	if f.files == nil {
+		f.files = make(map[string][]TorrentFile)
+	}
+	currentList := f.files[infoHash]
+	fileMap := make(map[int]*TorrentFile, len(currentList))
+	for i := range currentList {
+		fileMap[currentList[i].Index] = &currentList[i]
+	}
+	for _, s := range selections {
+		if file, exists := fileMap[s.Index]; exists {
+			file.Priority = s.Priority
+			file.Selected = (s.Priority != PrioritySkip)
+		} else {
+			currentList = append(currentList, TorrentFile{
+				Index:    s.Index,
+				Path:     fmt.Sprintf("file_%d.bin", s.Index),
+				Size:     1024,
+				Priority: s.Priority,
+				Selected: (s.Priority != PrioritySkip),
+			})
+			fileMap[s.Index] = &currentList[len(currentList)-1]
+		}
+	}
+	f.files[infoHash] = currentList
 	return nil
 }
 func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) error {
@@ -168,10 +196,14 @@ func (f *fakeTorrentEngine) StartDownload(ctx context.Context, infoHash string) 
 	return nil
 }
 func (f *fakeTorrentEngine) StopDownload(ctx context.Context, infoHash string) error {
-	f.isStopped = true
 	if f.stopDownloadFunc != nil {
-		return f.stopDownloadFunc(infoHash)
+		err := f.stopDownloadFunc(infoHash)
+		if err == nil {
+			f.isStopped = true
+		}
+		return err
 	}
+	f.isStopped = true
 	return nil
 }
 func (f *fakeTorrentEngine) RemoveTorrent(ctx context.Context, infoHash string, deleteFiles bool) error {

@@ -2,8 +2,11 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -57,6 +60,43 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 	if j.Status == StatusPaused {
 		log.Printf("recovery: job %s is PAUSED, preserving PAUSED status", j.ID)
 		m.publish(EventJobUpdated, j)
+		return
+	}
+
+	// 2b. Torrent jobs in ANALYZING: resume metadata acquisition and reconciliation across backend restarts
+	if (j.Type == TypeTorrent || j.Engine == "qbittorrent") && j.Status == StatusAnalyzing {
+		torrentFilePath := ""
+		if m.torrentRepo != nil {
+			rec, err := m.torrentRepo.GetTorrentJob(ctx, j.ID)
+			if err != nil {
+				log.Printf("recovery: failed to load torrent job record for analyzing job %s: %v", j.ID, err)
+			} else if rec != nil {
+				torrentFilePath = rec.TorrentFilePath
+			}
+		}
+
+		if strings.HasPrefix(j.Source, "torrent://") || filepath.Ext(j.Source) == ".torrent" {
+			if torrentFilePath == "" {
+				j.Status = StatusFailed
+				j.Error = "Torrent metainfo record missing during restart recovery. Retry the job."
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+			if _, err := os.Stat(torrentFilePath); os.IsNotExist(err) {
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("Torrent metainfo file missing at %s during restart recovery. Retry the job.", torrentFilePath)
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+		}
+
+		log.Printf("recovery: resuming metadata acquisition for analyzing torrent job %s (source=%s, file=%s)", j.ID, j.Source, torrentFilePath)
+		m.publish(EventJobUpdated, j)
+		go m.acquireTorrentMetadata(j.ID, j.Source, torrentFilePath)
 		return
 	}
 
