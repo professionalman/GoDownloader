@@ -224,6 +224,71 @@ func (e *Engine) ApplySeedingPolicy(ctx context.Context, j *job.Job, policy netw
 	return e.client.SetShareLimits(ctx, j.EngineID, ratio, minutes)
 }
 
+func (e *Engine) GetTorrentOwnership(ctx context.Context, infoHash string) (*job.TorrentOwnership, error) {
+	if infoHash == "" {
+		return nil, nil
+	}
+	info, err := e.client.GetTorrentInfo(ctx, infoHash)
+	if err != nil {
+		if errors.Is(err, ErrTorrentNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	rawTags := strings.Split(info.Tags, ",")
+	tags := make([]string, 0, len(rawTags))
+	for _, t := range rawTags {
+		trimmed := strings.TrimSpace(t)
+		if trimmed != "" {
+			tags = append(tags, trimmed)
+		}
+	}
+	return &job.TorrentOwnership{
+		Hash:     strings.ToLower(info.Hash),
+		Category: strings.TrimSpace(info.Category),
+		Tags:     tags,
+	}, nil
+}
+
+func (e *Engine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error {
+	if infoHash == "" {
+		return errors.New("info hash is required to adopt torrent")
+	}
+	// 1. Stop torrent to ensure no background downloading occurs before file selection
+	_ = e.client.StopTorrents(ctx, []string{infoHash})
+
+	// 2. Ensure category is godownloader
+	_ = e.client.SetCategory(ctx, []string{infoHash}, CategoryName)
+
+	// 3. Associate current job tag
+	if jobID != "" {
+		if err := e.client.AddTags(ctx, []string{infoHash}, []string{jobID}); err != nil {
+			return fmt.Errorf("failed to tag adopted torrent: %w", err)
+		}
+	}
+
+	// 4. Remove stale GoDownloader job tags if present
+	info, err := e.client.GetTorrentInfo(ctx, infoHash)
+	if err == nil && info != nil {
+		rawTags := strings.Split(info.Tags, ",")
+		var staleTags []string
+		for _, t := range rawTags {
+			trimmed := strings.TrimSpace(t)
+			if trimmed != "" && trimmed != jobID && strings.HasPrefix(trimmed, "job_") {
+				staleTags = append(staleTags, trimmed)
+			}
+		}
+		if len(staleTags) > 0 {
+			_ = e.client.RemoveTags(ctx, []string{infoHash}, staleTags)
+		}
+	}
+
+	return nil
+}
+
 func (e *Engine) ListTorrentOwnership(ctx context.Context) ([]job.TorrentOwnership, error) {
 	torrents, err := e.client.GetTorrents(ctx, "")
 	if err != nil {

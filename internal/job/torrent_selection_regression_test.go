@@ -104,6 +104,12 @@ func (m *regressionMockEngine) AddMagnet(ctx context.Context, magnet, savePath, 
 func (m *regressionMockEngine) AddTorrentFile(ctx context.Context, filePath, savePath, jobID string) (string, error) {
 	return "hash123", nil
 }
+func (m *regressionMockEngine) GetTorrentOwnership(ctx context.Context, infoHash string) (*TorrentOwnership, error) {
+	return nil, nil
+}
+func (m *regressionMockEngine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error {
+	return nil
+}
 func (m *regressionMockEngine) GetFiles(ctx context.Context, infoHash string) ([]TorrentFile, error) {
 	return m.filesToReturn, nil
 }

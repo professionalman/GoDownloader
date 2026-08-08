@@ -269,6 +269,8 @@ func (c *Client) ValidateCompatibility(ctx context.Context) error {
 	return nil
 }
 
+var ErrTorrentNotFound = errors.New("torrent not found")
+
 func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category string, tags []string, stopped bool) error {
 	data := url.Values{}
 	data.Set("urls", magnet)
@@ -293,6 +295,12 @@ func (c *Client) AddMagnet(ctx context.Context, magnet, savePath, category strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		lr := io.LimitReader(resp.Body, 4096)
+		bodyBytes, _ := io.ReadAll(lr)
+		bodyStr := strings.TrimSpace(string(bodyBytes))
+		if bodyStr != "" {
+			return fmt.Errorf("failed to add magnet, status: %d (%s)", resp.StatusCode, bodyStr)
+		}
 		return fmt.Errorf("failed to add magnet, status: %d", resp.StatusCode)
 	}
 	return nil
@@ -337,9 +345,39 @@ func (c *Client) AddTorrentFile(ctx context.Context, filePath, savePath, categor
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		lr := io.LimitReader(resp.Body, 4096)
+		bodyBytes, _ := io.ReadAll(lr)
+		bodyStr := strings.TrimSpace(string(bodyBytes))
+		if bodyStr != "" {
+			return fmt.Errorf("failed to add torrent file, status: %d (%s)", resp.StatusCode, bodyStr)
+		}
 		return fmt.Errorf("failed to add torrent file, status: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *Client) AddTags(ctx context.Context, hashes []string, tags []string) error {
+	data := url.Values{
+		"hashes": {strings.Join(hashes, "|")},
+		"tags":   {strings.Join(tags, ",")},
+	}
+	return c.postForm(ctx, "/api/v2/torrents/addTags", data)
+}
+
+func (c *Client) RemoveTags(ctx context.Context, hashes []string, tags []string) error {
+	data := url.Values{
+		"hashes": {strings.Join(hashes, "|")},
+		"tags":   {strings.Join(tags, ",")},
+	}
+	return c.postForm(ctx, "/api/v2/torrents/removeTags", data)
+}
+
+func (c *Client) SetCategory(ctx context.Context, hashes []string, category string) error {
+	data := url.Values{
+		"hashes":   {strings.Join(hashes, "|")},
+		"category": {category},
+	}
+	return c.postForm(ctx, "/api/v2/torrents/setCategory", data)
 }
 
 func (c *Client) GetTorrentInfo(ctx context.Context, hash string) (*qbTorrentInfo, error) {
@@ -363,7 +401,7 @@ func (c *Client) GetTorrentInfo(ctx context.Context, hash string) (*qbTorrentInf
 	}
 
 	if len(infos) == 0 {
-		return nil, errors.New("torrent not found")
+		return nil, ErrTorrentNotFound
 	}
 
 	return &infos[0], nil

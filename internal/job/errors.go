@@ -66,6 +66,8 @@ const (
 	ErrInvalidSeedingPolicy            = "INVALID_SEEDING_POLICY"
 	ErrSeedingPolicyApplicationFailed  = "SEEDING_POLICY_APPLICATION_FAILED"
 	ErrSeedingPolicyStateAmbiguous     = "SEEDING_POLICY_STATE_AMBIGUOUS"
+	ErrTorrentAlreadyManaged           = "TORRENT_ALREADY_MANAGED"
+	ErrTorrentAlreadyExistsExternally  = "TORRENT_ALREADY_EXISTS_EXTERNALLY"
 )
 
 type TorrentFinalizeFailureKind string

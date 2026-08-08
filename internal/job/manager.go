@@ -900,6 +900,16 @@ func (m *Manager) CreateTorrentFromFileWithOptions(ctx context.Context, torrentF
 		return nil, fmt.Errorf("read uploaded torrent file: %w", err)
 	}
 
+	if hash, err := ExtractTorrentInfoHash(data); err == nil && hash != "" && m.torrentRepo != nil {
+		rec, err := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, hash)
+		if err != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to verify torrent ownership: %v", err)}
+		}
+		if rec != nil {
+			return nil, &AppError{Code: ErrInvalidRequest, Message: fmt.Sprintf("a torrent with info hash %s is already managed by job %s", hash, rec.JobID)}
+		}
+	}
+
 	jobID := "job_" + uuid.New().String()[:8]
 	persistedPath := filepath.Join(m.dataDir, "torrents", jobID+".torrent")
 
@@ -987,25 +997,159 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 		saveDir = m.downloadDir
 	}
 
-	var infoHash string
+	// 1. Determine canonical torrent info hash before attempting add (if possible)
+	var expectedHash string
 	if torrentFilePath != "" {
-		infoHash, err = torrentEng.AddTorrentFile(ctx, torrentFilePath, saveDir, jobID)
-	} else {
-		infoHash, err = torrentEng.AddMagnet(ctx, source, saveDir, jobID)
-	}
-	if err != nil {
-		if ctx.Err() != nil {
-			log.Printf("acquireTorrentMetadata: job %s cancelled during add", jobID)
-			return
+		if hash, hashErr := ExtractTorrentInfoHashFromFile(torrentFilePath); hashErr == nil {
+			expectedHash = strings.ToLower(hash)
 		}
-		j.Status = StatusFailed
-		j.Error = fmt.Sprintf("Failed to add torrent: %v", err)
-		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
-		m.publish(EventJobFailed, j)
-		return
+	} else {
+		if hash, hashErr := ExtractMagnetHash(source); hashErr == nil {
+			expectedHash = strings.ToLower(hash)
+		}
 	}
 
+	reconcileOwnership := func(ownership *TorrentOwnership) (bool, error) {
+		if ownership == nil {
+			return false, nil
+		}
+
+		// 6. Externally-owned torrent: category != godownloader -> conflict
+		if ownership.Category != "godownloader" {
+			log.Printf("acquireTorrentMetadata: torrent %s already exists externally in qBittorrent with category %q", expectedHash, ownership.Category)
+			return false, &AppError{
+				Code:    ErrTorrentAlreadyExistsExternally,
+				Message: "This torrent already exists in qBittorrent outside GoDownloader.",
+			}
+		}
+
+		// Check tags for job ID
+		var isSameJob bool
+		var otherJobID string
+		for _, tag := range ownership.Tags {
+			if tag == jobID {
+				isSameJob = true
+				break
+			}
+			if strings.HasPrefix(tag, "job_") {
+				otherJobID = tag
+			} else if otherJobID == "" && tag != "" {
+				otherJobID = tag
+			}
+		}
+
+		// 3. Same-job existing torrent (e.g. Retry or restart recovery) -> idempotent success
+		if isSameJob {
+			log.Printf("acquireTorrentMetadata: torrent %s already owned by current job %s, reusing existing torrent", expectedHash, jobID)
+			_ = torrentEng.StopDownload(ctx, expectedHash)
+			return true, nil
+		}
+
+		// 5. Existing local owner: if tagged job ID still exists locally, do NOT steal ownership
+		if otherJobID != "" {
+			existingJob, _ := m.repo.GetByID(ctx, otherJobID)
+			if existingJob != nil && existingJob.ID != jobID {
+				log.Printf("acquireTorrentMetadata: torrent %s is already managed by local job %s", expectedHash, existingJob.ID)
+				return false, &AppError{
+					Code:    ErrTorrentAlreadyManaged,
+					Message: fmt.Sprintf("This torrent is already managed by GoDownloader job %s.", existingJob.ID),
+				}
+			}
+		}
+
+		// Check if another active local job owns this hash in the repository
+		if m.torrentRepo != nil {
+			rec, _ := m.torrentRepo.GetActiveTorrentJobByInfoHash(ctx, expectedHash)
+			if rec != nil && rec.JobID != jobID {
+				log.Printf("acquireTorrentMetadata: torrent %s is already managed by active local job %s", expectedHash, rec.JobID)
+				return false, &AppError{
+					Code:    ErrTorrentAlreadyManaged,
+					Message: fmt.Sprintf("This torrent is already managed by GoDownloader job %s.", rec.JobID),
+				}
+			}
+		}
+
+		// 4. Orphaned GoDownloader-owned torrent -> safely adopt it
+		log.Printf("acquireTorrentMetadata: adopting orphaned godownloader torrent %s into job %s", expectedHash, jobID)
+		if adoptErr := torrentEng.AdoptTorrent(ctx, expectedHash, jobID); adoptErr != nil {
+			return false, fmt.Errorf("failed to adopt existing torrent: %w", adoptErr)
+		}
+		return true, nil
+	}
+
+	var infoHash string
+
+	// 2. Check qBittorrent before Add (if hash is known)
+	if expectedHash != "" {
+		ownership, checkErr := torrentEng.GetTorrentOwnership(ctx, expectedHash)
+		if checkErr != nil {
+			log.Printf("acquireTorrentMetadata: warning: preflight ownership check failed for %s: %v", expectedHash, checkErr)
+		}
+
+		if ownership != nil {
+			reconciled, recErr := reconcileOwnership(ownership)
+			if recErr != nil {
+				j.Status = StatusFailed
+				j.Error = recErr.Error()
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+			if reconciled {
+				infoHash = expectedHash
+			}
+		}
+	}
+
+	// 3. If not already present/reconciled, call Add
+	if infoHash == "" {
+		var addErr error
+		if torrentFilePath != "" {
+			infoHash, addErr = torrentEng.AddTorrentFile(ctx, torrentFilePath, saveDir, jobID)
+		} else {
+			infoHash, addErr = torrentEng.AddMagnet(ctx, source, saveDir, jobID)
+		}
+
+		if addErr != nil {
+			if ctx.Err() != nil {
+				log.Printf("acquireTorrentMetadata: job %s cancelled during add", jobID)
+				return
+			}
+
+			// 7. Handle race-time 409: re-query qBittorrent once and classify ownership
+			if strings.Contains(addErr.Error(), "409") && expectedHash != "" {
+				log.Printf("acquireTorrentMetadata: add returned 409 for %s, re-querying qBittorrent ownership", expectedHash)
+				postOwnership, queryErr := torrentEng.GetTorrentOwnership(ctx, expectedHash)
+				if queryErr == nil && postOwnership != nil {
+					reconciled, recErr := reconcileOwnership(postOwnership)
+					if recErr != nil {
+						j.Status = StatusFailed
+						j.Error = recErr.Error()
+						j.UpdatedAt = time.Now()
+						m.repo.Update(ctx, j)
+						m.publish(EventJobFailed, j)
+						return
+					}
+					if reconciled {
+						infoHash = expectedHash
+						addErr = nil
+					}
+				}
+			}
+
+			if addErr != nil {
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("Failed to add torrent: %v", addErr)
+				j.UpdatedAt = time.Now()
+				m.repo.Update(ctx, j)
+				m.publish(EventJobFailed, j)
+				return
+			}
+		}
+	}
+
+	infoHash = strings.ToLower(infoHash)
 	j.EngineID = infoHash
 	j.UpdatedAt = time.Now()
 	m.repo.Update(ctx, j)
@@ -1054,6 +1198,15 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			m.repo.Update(ctx, j)
 			m.publish(EventJobFailed, j)
 			return
+		}
+
+		// Save/update the record for current job
+		rec, _ = m.torrentRepo.GetTorrentJob(ctx, jobID)
+		if rec != nil {
+			rec = cloneTorrentRecord(rec)
+			rec.InfoHash = infoHash
+			rec.TorrentFilePath = torrentFilePath
+			_ = m.torrentRepo.UpdateTorrentJob(ctx, rec)
 		}
 	}
 

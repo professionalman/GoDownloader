@@ -78,6 +78,8 @@ type fakeTorrentEngine struct {
 	isStopped          bool
 	addMagnetFunc      func(magnet string) (string, error)
 	addTorrentFileFunc func(path string) (string, error)
+	getOwnershipFunc   func(hash string) (*TorrentOwnership, error)
+	adoptTorrentFunc   func(hash, jobID string) error
 	getFilesFunc       func(hash string) ([]TorrentFile, error)
 	setPrioritiesFunc  func(hash string) error
 	startDownloadFunc  func(hash string) error
@@ -85,6 +87,20 @@ type fakeTorrentEngine struct {
 	removeTorrentFunc  func(hash string, deleteFiles bool) error
 	getTorrentInfoFunc func(hash string) (*TorrentInfo, error)
 	statusFunc         func(ctx context.Context, j *Job) (*EngineStatus, error)
+}
+
+func (f *fakeTorrentEngine) GetTorrentOwnership(ctx context.Context, infoHash string) (*TorrentOwnership, error) {
+	if f.getOwnershipFunc != nil {
+		return f.getOwnershipFunc(infoHash)
+	}
+	return nil, nil
+}
+
+func (f *fakeTorrentEngine) AdoptTorrent(ctx context.Context, infoHash, jobID string) error {
+	if f.adoptTorrentFunc != nil {
+		return f.adoptTorrentFunc(infoHash, jobID)
+	}
+	return nil
 }
 
 func (f *fakeTorrentEngine) GetRawState(ctx context.Context, infoHash string) (string, error) {
