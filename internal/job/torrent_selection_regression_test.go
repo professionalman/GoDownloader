@@ -720,9 +720,10 @@ func TestDispatchQueuedJob_SuccessfulSelectedSizeCondition(t *testing.T) {
 
 func TestMapStorageError_AllSentinels(t *testing.T) {
 	tests := []struct {
-		name         string
-		err          error
-		expectedCode string
+		name            string
+		err             error
+		expectedCode    string
+		expectedMessage string
 	}{
 		{
 			name:         "ErrInsufficientDiskSpace",
@@ -760,9 +761,10 @@ func TestMapStorageError_AllSentinels(t *testing.T) {
 			expectedCode: ErrStorageError,
 		},
 		{
-			name:         "unknown error falls back to INTERNAL_ERROR",
-			err:          fmt.Errorf("something completely unexpected"),
-			expectedCode: ErrInternalError,
+			name:            "unknown error falls back to INTERNAL_ERROR and sanitizes message",
+			err:             fmt.Errorf("something completely unexpected"),
+			expectedCode:    ErrInternalError,
+			expectedMessage: "an internal error occurred",
 		},
 	}
 
@@ -776,9 +778,12 @@ func TestMapStorageError_AllSentinels(t *testing.T) {
 			if appErr.Code != tt.expectedCode {
 				t.Fatalf("expected code %s, got %s", tt.expectedCode, appErr.Code)
 			}
-			// Verify the original message is preserved
-			if appErr.Message != tt.err.Error() {
-				t.Fatalf("expected message %q, got %q", tt.err.Error(), appErr.Message)
+			expectedMsg := tt.expectedMessage
+			if expectedMsg == "" {
+				expectedMsg = tt.err.Error()
+			}
+			if appErr.Message != expectedMsg {
+				t.Fatalf("expected message %q, got %q", expectedMsg, appErr.Message)
 			}
 		})
 	}

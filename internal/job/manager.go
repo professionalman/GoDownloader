@@ -865,16 +865,21 @@ func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, s
 		return nil, err
 	}
 
-	if err := m.repo.Create(ctx, j); err != nil {
-		return nil, fmt.Errorf("persist job: %w", err)
+	torrentRecord := &TorrentJobRecord{
+		JobID:             jobID,
+		TorrentFilePath:   torrentFilePath,
+		SeedAfterComplete: j.SeedAfterComplete,
+		SeedingPolicy:     j.SeedingPolicy,
+		CustomTrackers:    j.CustomTrackers,
 	}
+
 	if m.torrentRepo != nil {
-		if err := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
-			JobID: jobID, TorrentFilePath: torrentFilePath,
-			SeedAfterComplete: j.SeedAfterComplete, SeedingPolicy: j.SeedingPolicy,
-			CustomTrackers: j.CustomTrackers,
-		}); err != nil {
-			return nil, fmt.Errorf("persist torrent policy: %w", err)
+		if err := m.torrentRepo.CreateTorrentJobAtomic(ctx, j, torrentRecord); err != nil {
+			return nil, fmt.Errorf("persist torrent job: %w", err)
+		}
+	} else {
+		if err := m.repo.Create(ctx, j); err != nil {
+			return nil, fmt.Errorf("persist job: %w", err)
 		}
 	}
 
@@ -909,11 +914,13 @@ func (m *Manager) CreateTorrentFromFileWithOptions(ctx context.Context, torrentF
 		return nil, fmt.Errorf("write persisted torrent file: %w", err)
 	}
 
-	os.Remove(torrentFilePath)
+	_ = os.Remove(torrentFilePath)
 
 	j, err := m.createTorrentJobWithIDAndOptions(ctx, jobID, "torrent://"+persistedPath, persistedPath, opts)
 	if err != nil {
-		os.Remove(persistedPath)
+		if removeErr := os.Remove(persistedPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.Printf("CreateTorrentFromFileWithOptions: failed to cleanup persisted torrent file %s after DB error: %v", persistedPath, removeErr)
+		}
 		return nil, err
 	}
 	return j, nil

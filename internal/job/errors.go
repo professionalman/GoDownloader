@@ -3,6 +3,7 @@ package job
 import (
 	"errors"
 	"fmt"
+	"log"
 
 	"downloader/internal/storage"
 )
@@ -164,6 +165,7 @@ func mapStorageError(err error) error {
 	case errors.Is(err, storage.ErrStorageError):
 		return &AppError{Code: ErrStorageError, Message: err.Error()}
 	default:
-		return &AppError{Code: ErrInternalError, Message: err.Error()}
+		log.Printf("mapStorageError: unhandled storage error: type=%T err=%v", err, err)
+		return &AppError{Code: ErrInternalError, Message: "an internal error occurred"}
 	}
 }

@@ -362,6 +362,23 @@ func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *Torre
 	return nil
 }
 
+func (f *fakeTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j *Job, rec *TorrentJobRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if f.jobRepo != nil {
+		if err := f.jobRepo.Create(ctx, j); err != nil {
+			return err
+		}
+	}
+	if rec != nil {
+		f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
+	}
+	return nil
+}
+
 func (f *fakeTorrentRepository) GetTorrentJob(ctx context.Context, jobID string) (*TorrentJobRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

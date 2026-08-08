@@ -82,30 +82,58 @@ func torrentPolicyValues(rec *job.TorrentJobRecord) (any, any, any, string, erro
 	return ratio, duration, started, string(data), err
 }
 
-// CreateTorrentJob inserts a new torrent job record.
-func (r *SQLiteTorrentRepository) CreateTorrentJob(ctx context.Context, rec *job.TorrentJobRecord) error {
+func insertTorrentJobExec(ctx context.Context, execer sqlExecer, rec *job.TorrentJobRecord) error {
 	query := `INSERT INTO torrent_jobs (` + torrentJobColumns + `)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	seedInt := 0
 	if rec.SeedAfterComplete {
 		seedInt = 1
 	}
-	if rec.SeedingPolicy.Mode == "" {
+	seedingMode := rec.SeedingPolicy.Mode
+	if seedingMode == "" {
 		if rec.SeedAfterComplete {
-			rec.SeedingPolicy.Mode = networkpolicy.SeedingModeUnlimited
+			seedingMode = networkpolicy.SeedingModeUnlimited
 		} else {
-			rec.SeedingPolicy.Mode = networkpolicy.SeedingModeNone
+			seedingMode = networkpolicy.SeedingModeNone
 		}
 	}
 	ratio, duration, started, trackersJSON, marshalErr := torrentPolicyValues(rec)
 	if marshalErr != nil {
 		return fmt.Errorf("marshal custom trackers: %w", marshalErr)
 	}
-	_, err := r.db.conn.ExecContext(ctx, query, rec.JobID, rec.InfoHash, rec.Name,
-		rec.TotalSize, seedInt, rec.TorrentFilePath, rec.SeedingPolicy.Mode, ratio,
+	_, err := execer.ExecContext(ctx, query, rec.JobID, rec.InfoHash, rec.Name,
+		rec.TotalSize, seedInt, rec.TorrentFilePath, seedingMode, ratio,
 		duration, started, rec.SeedingStopReason, rec.SeedingReconcilePending, trackersJSON)
 	if err != nil {
 		return fmt.Errorf("insert torrent job: %w", err)
+	}
+	return nil
+}
+
+// CreateTorrentJob inserts a new torrent job record.
+func (r *SQLiteTorrentRepository) CreateTorrentJob(ctx context.Context, rec *job.TorrentJobRecord) error {
+	return insertTorrentJobExec(ctx, r.db.conn, rec)
+}
+
+// CreateTorrentJobAtomic inserts both the job and torrent job record within the same transaction.
+func (r *SQLiteTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j *job.Job, rec *job.TorrentJobRecord) error {
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := insertJobExec(ctx, tx, j); err != nil {
+		return err
+	}
+	if rec != nil {
+		if err := insertTorrentJobExec(ctx, tx, rec); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
 }
