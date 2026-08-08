@@ -172,3 +172,140 @@ func TestCreateTorrentJobAtomic_JobsFailureRollsBackEverything(t *testing.T) {
 		t.Fatalf("expected torrent_jobs row to be rolled back, but found: %+v", rec)
 	}
 }
+
+func TestCreateTorrentJobAtomic_NilJob_ReturnsErrorAndZeroRows(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	jobRepo := NewSQLiteJobRepository(db)
+	torrentRepo := NewSQLiteTorrentRepository(db)
+	ctx := context.Background()
+
+	rec := &job.TorrentJobRecord{
+		JobID:    "some-job-id",
+		InfoHash: "hash123",
+	}
+
+	err := torrentRepo.CreateTorrentJobAtomic(ctx, nil, rec)
+	if err == nil {
+		t.Fatal("expected error on nil job")
+	}
+
+	jobs, err := jobRepo.List(ctx)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("expected 0 jobs in DB, got %d, err=%v", len(jobs), err)
+	}
+
+	savedRec, err := torrentRepo.GetTorrentJob(ctx, "some-job-id")
+	if err != nil || savedRec != nil {
+		t.Fatalf("expected nil torrent record in DB, got %+v, err=%v", savedRec, err)
+	}
+}
+
+func TestCreateTorrentJobAtomic_NilTorrentRecord_ReturnsErrorAndZeroRows(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	jobRepo := NewSQLiteJobRepository(db)
+	torrentRepo := NewSQLiteTorrentRepository(db)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &job.Job{
+		ID:        "job-nil-rec",
+		Source:    "magnet:?xt=urn:btih:5555",
+		Status:    job.StatusAnalyzing,
+		Type:      job.TypeTorrent,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	err := torrentRepo.CreateTorrentJobAtomic(ctx, j, nil)
+	if err == nil {
+		t.Fatal("expected error on nil torrent record")
+	}
+
+	savedJob, err := jobRepo.GetByID(ctx, j.ID)
+	if err != nil || savedJob != nil {
+		t.Fatalf("expected nil job in DB, got %+v, err=%v", savedJob, err)
+	}
+
+	savedRec, err := torrentRepo.GetTorrentJob(ctx, j.ID)
+	if err != nil || savedRec != nil {
+		t.Fatalf("expected nil torrent record in DB, got %+v, err=%v", savedRec, err)
+	}
+}
+
+func TestCreateTorrentJobAtomic_MismatchedJobID_ReturnsErrorAndZeroRows(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	jobRepo := NewSQLiteJobRepository(db)
+	torrentRepo := NewSQLiteTorrentRepository(db)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &job.Job{
+		ID:        "job-id-1",
+		Source:    "magnet:?xt=urn:btih:6666",
+		Status:    job.StatusAnalyzing,
+		Type:      job.TypeTorrent,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	rec := &job.TorrentJobRecord{
+		JobID:    "job-id-2", // Mismatched ID
+		InfoHash: "6666",
+	}
+
+	err := torrentRepo.CreateTorrentJobAtomic(ctx, j, rec)
+	if err == nil {
+		t.Fatal("expected error on mismatched job ID")
+	}
+
+	savedJob1, err := jobRepo.GetByID(ctx, "job-id-1")
+	if err != nil || savedJob1 != nil {
+		t.Fatalf("expected nil job-id-1 in DB, got %+v, err=%v", savedJob1, err)
+	}
+	savedJob2, err := jobRepo.GetByID(ctx, "job-id-2")
+	if err != nil || savedJob2 != nil {
+		t.Fatalf("expected nil job-id-2 in DB, got %+v, err=%v", savedJob2, err)
+	}
+	savedRec1, err := torrentRepo.GetTorrentJob(ctx, "job-id-1")
+	if err != nil || savedRec1 != nil {
+		t.Fatalf("expected nil torrent record job-id-1 in DB, got %+v, err=%v", savedRec1, err)
+	}
+	savedRec2, err := torrentRepo.GetTorrentJob(ctx, "job-id-2")
+	if err != nil || savedRec2 != nil {
+		t.Fatalf("expected nil torrent record job-id-2 in DB, got %+v, err=%v", savedRec2, err)
+	}
+}
+
+func TestCreateTorrentJobAtomic_EmptyJobID_ReturnsErrorAndZeroRows(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	jobRepo := NewSQLiteJobRepository(db)
+	torrentRepo := NewSQLiteTorrentRepository(db)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &job.Job{
+		ID:        "",
+		Source:    "magnet:?xt=urn:btih:7777",
+		Status:    job.StatusAnalyzing,
+		Type:      job.TypeTorrent,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	rec := &job.TorrentJobRecord{
+		JobID:    "",
+		InfoHash: "7777",
+	}
+
+	err := torrentRepo.CreateTorrentJobAtomic(ctx, j, rec)
+	if err == nil {
+		t.Fatal("expected error on empty job ID")
+	}
+
+	jobs, err := jobRepo.List(ctx)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("expected 0 jobs in DB, got %d, err=%v", len(jobs), err)
+	}
+}

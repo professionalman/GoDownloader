@@ -814,6 +814,9 @@ func (m *Manager) createTorrentJobWithID(ctx context.Context, jobID, source, tor
 }
 
 func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, source, torrentFilePath string, opts CreateOptions) (*Job, error) {
+	if m.torrentRepo == nil {
+		return nil, &AppError{Code: ErrInternalError, Message: "torrent repository unavailable"}
+	}
 	if _, ok := m.engines.Get("qbittorrent"); !ok {
 		return nil, &AppError{Code: ErrEngineError, Message: "engine not registered: qBittorrent"}
 	}
@@ -873,14 +876,8 @@ func (m *Manager) createTorrentJobWithIDAndOptions(ctx context.Context, jobID, s
 		CustomTrackers:    j.CustomTrackers,
 	}
 
-	if m.torrentRepo != nil {
-		if err := m.torrentRepo.CreateTorrentJobAtomic(ctx, j, torrentRecord); err != nil {
-			return nil, fmt.Errorf("persist torrent job: %w", err)
-		}
-	} else {
-		if err := m.repo.Create(ctx, j); err != nil {
-			return nil, fmt.Errorf("persist job: %w", err)
-		}
+	if err := m.torrentRepo.CreateTorrentJobAtomic(ctx, j, torrentRecord); err != nil {
+		return nil, fmt.Errorf("persist torrent job: %w", err)
 	}
 
 	m.publish(EventJobCreated, j)

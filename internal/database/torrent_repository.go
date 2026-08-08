@@ -117,6 +117,22 @@ func (r *SQLiteTorrentRepository) CreateTorrentJob(ctx context.Context, rec *job
 
 // CreateTorrentJobAtomic inserts both the job and torrent job record within the same transaction.
 func (r *SQLiteTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j *job.Job, rec *job.TorrentJobRecord) error {
+	if j == nil {
+		return fmt.Errorf("job is required")
+	}
+	if rec == nil {
+		return fmt.Errorf("torrent record is required")
+	}
+	if j.ID == "" {
+		return fmt.Errorf("job ID is required")
+	}
+	if rec.JobID == "" {
+		return fmt.Errorf("torrent record job ID is required")
+	}
+	if rec.JobID != j.ID {
+		return fmt.Errorf("torrent record job ID (%s) does not match job ID (%s)", rec.JobID, j.ID)
+	}
+
 	tx, err := r.db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -126,10 +142,8 @@ func (r *SQLiteTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j 
 	if err := insertJobExec(ctx, tx, j); err != nil {
 		return err
 	}
-	if rec != nil {
-		if err := insertTorrentJobExec(ctx, tx, rec); err != nil {
-			return err
-		}
+	if err := insertTorrentJobExec(ctx, tx, rec); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {

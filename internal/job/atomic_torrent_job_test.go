@@ -206,3 +206,37 @@ func TestMapStorageError_SanitizesSensitiveUnknownErrors(t *testing.T) {
 		t.Fatalf("expected message 'an internal error occurred', got '%s'", appErr.Message)
 	}
 }
+
+func TestManager_CreateMagnet_NilTorrentRepo_ReturnsErrorAndZeroJobs(t *testing.T) {
+	jobRepo := newFakeJobRepository()
+	eng := &regressionMockEngine{}
+	reg := &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": eng}}
+	bus := newFakeEventBus()
+	// Manager created with nil torrentRepo
+	mgr := NewManager(jobRepo, reg, bus, t.TempDir(), nil)
+
+	sub := bus.Subscribe()
+
+	_, err := mgr.Create(context.Background(), "magnet:?xt=urn:btih:9999999999999999999999999999999999999999")
+	if err == nil {
+		t.Fatal("expected Create to fail when torrentRepo is nil")
+	}
+
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.Code != ErrInternalError {
+		t.Fatalf("expected AppError with INTERNAL_ERROR, got: %v", err)
+	}
+
+	// Verify zero jobs persisted
+	if len(jobRepo.jobs) != 0 {
+		t.Fatalf("expected 0 jobs in repo, got %d", len(jobRepo.jobs))
+	}
+
+	// Verify no EventJobCreated event published
+	select {
+	case evt := <-sub:
+		t.Fatalf("unexpected event published: %+v", evt)
+	default:
+		// OK
+	}
+}

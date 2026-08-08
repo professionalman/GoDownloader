@@ -363,6 +363,22 @@ func (f *fakeTorrentRepository) CreateTorrentJob(ctx context.Context, rec *Torre
 }
 
 func (f *fakeTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j *Job, rec *TorrentJobRecord) error {
+	if j == nil {
+		return fmt.Errorf("job is required")
+	}
+	if rec == nil {
+		return fmt.Errorf("torrent record is required")
+	}
+	if j.ID == "" {
+		return fmt.Errorf("job ID is required")
+	}
+	if rec.JobID == "" {
+		return fmt.Errorf("torrent record job ID is required")
+	}
+	if rec.JobID != j.ID {
+		return fmt.Errorf("torrent record job ID (%s) does not match job ID (%s)", rec.JobID, j.ID)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.createErr != nil {
@@ -373,9 +389,7 @@ func (f *fakeTorrentRepository) CreateTorrentJobAtomic(ctx context.Context, j *J
 			return err
 		}
 	}
-	if rec != nil {
-		f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
-	}
+	f.torrentJobs[rec.JobID] = cloneTorrentRecord(rec)
 	return nil
 }
 
