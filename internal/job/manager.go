@@ -1656,6 +1656,7 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 		records = append(records, TorrentFileRecord{
 			JobID:     id,
 			FileIndex: s.Index,
+			Size:      fileSizeMap[s.Index],
 			Selected:  s.Priority != PrioritySkip,
 			Priority:  string(s.Priority),
 		})
@@ -1685,6 +1686,17 @@ func (m *Manager) StartTorrentWithPolicy(ctx context.Context, id string, selecti
 		if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
 			j.Status = StatusFailed
 			j.Error = fmt.Sprintf("failed to start torrent: %v", err)
+			j.UpdatedAt = time.Now()
+			m.repo.Update(ctx, j)
+			if m.queueRepo != nil {
+				m.queueRepo.Delete(ctx, j.ID)
+			}
+			m.publish(EventJobFailed, j)
+			return j, nil
+		}
+		if err := m.confirmTorrentEngineActive(ctx, j, torrentEng, 3*time.Second); err != nil {
+			j.Status = StatusFailed
+			j.Error = fmt.Sprintf("failed to confirm torrent start: %v", err)
 			j.UpdatedAt = time.Now()
 			m.repo.Update(ctx, j)
 			if m.queueRepo != nil {
@@ -1723,8 +1735,12 @@ func (m *Manager) StopSeeding(ctx context.Context, id string) (*Job, error) {
 		return nil, err
 	}
 
+	if j.Type != TypeTorrent {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "stop seeding is only valid for torrent jobs"}
+	}
+
 	if j.Status != StatusSeeding {
-		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot stop seeding a %s job", j.Status)}
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot stop seeding from %s state", j.Status)}
 	}
 
 	stopped, err := m.stopSeedingWithReason(ctx, j, "manual")
@@ -1885,14 +1901,34 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 			if prepErr := m.prepareNetworkDispatch(ctx, j, eng); prepErr != nil {
 				return nil, prepErr
 			}
-			engineID, err := eng.Start(ctx, j, m.downloadDir)
-			if err != nil {
-				return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine start failed: %v", err)}
+			if j.Type == TypeTorrent {
+				torrentEng, ok := eng.(ITorrentEngine)
+				if !ok {
+					return nil, &AppError{Code: ErrEngineError, Message: "engine does not support torrent operations"}
+				}
+				if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
+					return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine start failed: %v", err)}
+				}
+				if err := m.confirmTorrentEngineActive(ctx, j, torrentEng, 3*time.Second); err != nil {
+					return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to confirm torrent start: %v", err)}
+				}
+			} else {
+				engineID, err := eng.Start(ctx, j, m.downloadDir)
+				if err != nil {
+					return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine start failed: %v", err)}
+				}
+				j.EngineID = engineID
 			}
-			j.EngineID = engineID
 		} else {
 			if err := eng.Resume(ctx, j); err != nil {
 				return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("engine resume failed: %v", err)}
+			}
+			if j.Type == TypeTorrent {
+				if torrentEng, ok := eng.(ITorrentEngine); ok {
+					if err := m.confirmTorrentEngineActive(ctx, j, torrentEng, 3*time.Second); err != nil {
+						return nil, &AppError{Code: ErrEngineError, Message: fmt.Sprintf("failed to confirm torrent resume: %v", err)}
+					}
+				}
 			}
 		}
 		if limitErr := m.applyJobLimits(ctx, j, eng, false); limitErr != nil {
@@ -2947,6 +2983,11 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 			if err := torrentEng.StartDownload(ctx, j.EngineID); err != nil {
 				return err
 			}
+			if err := m.confirmTorrentEngineActive(ctx, j, torrentEng, 3*time.Second); err != nil {
+				log.Printf("dispatchQueuedJob: confirm torrent start failed for job %s: %v", j.ID, err)
+				targetStatus := StatusFailed
+				return m.persistDispatchFailure(ctx, j, qj, targetStatus, err)
+			}
 		} else {
 			engineID, err := eng.Start(ctx, j, execDir)
 			if err != nil {
@@ -2962,6 +3003,15 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		// QueueActionResume
 		if err := eng.Resume(ctx, j); err != nil {
 			return err
+		}
+		if j.Type == TypeTorrent {
+			if torrentEng, ok := eng.(ITorrentEngine); ok {
+				if err := m.confirmTorrentEngineActive(ctx, j, torrentEng, 3*time.Second); err != nil {
+					log.Printf("dispatchQueuedJob: confirm torrent resume failed for job %s: %v", j.ID, err)
+					targetStatus := StatusPaused
+					return m.persistDispatchFailure(ctx, j, qj, targetStatus, err)
+				}
+			}
 		}
 	}
 
@@ -2988,6 +3038,64 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	m.addActive(j)
 	m.publish(EventJobUpdated, j)
 	return nil
+}
+
+// confirmTorrentEngineActive polls the torrent engine for a bounded duration
+// to confirm that the torrent has transitioned to an active/downloading/seeding/completed state
+// and is no longer in transient stoppedDL/pausedDL state.
+func (m *Manager) confirmTorrentEngineActive(ctx context.Context, j *Job, torrentEng ITorrentEngine, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var lastState string
+	pollInterval := 50 * time.Millisecond
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		status, err := torrentEng.Status(ctx, j)
+		if err == nil && status != nil {
+			lastState = status.RawState
+			if lastState == "" {
+				lastState = string(status.Status)
+			}
+
+			// Active startup states:
+			// StatusDownloading includes: downloading, forcedDL, stalledDL, queuedDL, checkingDL, allocating, checkingResumeData, moving.
+			// StatusSeeding includes: uploading, forcedUP, stalledUP, queuedUP, checkingUP.
+			// StatusCompleted includes: stoppedUP, pausedUP.
+			if status.Status == StatusDownloading || status.Status == StatusSeeding || status.Status == StatusCompleted {
+				return nil
+			}
+
+			// Terminal failure states:
+			if status.Status == StatusFailed || status.Status == StatusCancelled {
+				errMsg := status.Error
+				if errMsg == "" {
+					errMsg = fmt.Sprintf("torrent engine reported %s state during startup", lastState)
+				}
+				return errors.New(errMsg)
+			}
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	if lastState == "" {
+		lastState = "stopped/paused"
+	}
+	return fmt.Errorf("torrent engine did not transition to active state within %v (last state=%s)", timeout, lastState)
 }
 
 func (m *Manager) cleanupQueueOnStartup(ctx context.Context) {
