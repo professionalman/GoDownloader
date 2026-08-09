@@ -682,3 +682,321 @@ func TestDelete_NonexistentJob_ReturnsNotFound(t *testing.T) {
 		t.Errorf("expected ErrJobNotFound, got: %v", err)
 	}
 }
+
+// 25. Regression test: DestinationDir/file.iso existed before download, actual output file.1.iso, FinalPath empty, Name file.iso
+// Delete with deleteFiles=true MUST NEVER remove the original file.iso when exact path cannot be proven.
+func TestDelete_DirectDownload_NoUnsafePathGuessing(t *testing.T) {
+	tempDir := t.TempDir()
+	originalFile := filepath.Join(tempDir, "file.iso")
+	if err := os.WriteFile(originalFile, []byte("pre-existing original file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	actualAria2Output := filepath.Join(tempDir, "file.1.iso")
+	if err := os.WriteFile(actualAria2Output, []byte("aria2 renamed partial data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := newFakeJobRepository()
+	jobID := "job_aria2_guess_test"
+	// FinalPath is empty, Name is file.iso, engine status is not available / cannot prove path
+	createDeleteTestJob(repo, jobID, StatusCancelled, TypeDownload, "aria2", "", tempDir, "", "")
+
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"aria2": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err == nil {
+		t.Fatalf("expected delete to fail safely with ErrStorageError when output path cannot be proven")
+	}
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.Code != ErrStorageError {
+		t.Errorf("expected ErrStorageError, got: %v", err)
+	}
+
+	// CRITICAL: original file.iso MUST NEVER be deleted!
+	if _, err := os.Stat(originalFile); err != nil {
+		t.Fatalf("CRITICAL BUG: pre-existing file.iso was deleted by unsafe path guessing!")
+	}
+	// DB record must remain
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB when deleteFiles fails safely")
+	}
+
+	// Record-only delete MUST still succeed
+	err = m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err != nil {
+		t.Fatalf("expected record-only delete to succeed, got: %v", err)
+	}
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("job should be deleted after record-only delete")
+	}
+	// original file still intact
+	if _, err := os.Stat(originalFile); err != nil {
+		t.Errorf("original file was removed during record-only delete: %v", err)
+	}
+}
+
+// 26. Direct download: authoritative OutputPath resolved from engine status
+func TestDelete_DirectDownload_AuthoritativeOutputPathFromEngine(t *testing.T) {
+	tempDir := t.TempDir()
+	originalFile := filepath.Join(tempDir, "file.iso")
+	if err := os.WriteFile(originalFile, []byte("pre-existing original file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	actualOutput := filepath.Join(tempDir, "file.1.iso")
+	if err := os.WriteFile(actualOutput, []byte("aria2 output data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := newFakeJobRepository()
+	jobID := "job_aria2_status_path"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeDownload, "aria2", "gid26", tempDir, "", "")
+
+	// Fake engine whose Status returns exact OutputPath: file.1.iso
+	eng := &fakeEngine{
+		statusFunc: func(ctx context.Context, j *Job) (*EngineStatus, error) {
+			return &EngineStatus{
+				Status:     StatusCompleted,
+				OutputPath: actualOutput,
+			}, nil
+		},
+	}
+
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"aria2": eng}}, newFakeEventBus(), tempDir, nil)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+
+	// Proven output file.1.iso is deleted
+	if _, err := os.Stat(actualOutput); !os.IsNotExist(err) {
+		t.Errorf("expected actual output file.1.iso to be deleted")
+	}
+	// Pre-existing file.iso is untouched
+	if _, err := os.Stat(originalFile); err != nil {
+		t.Errorf("pre-existing file.iso was wrongly deleted: %v", err)
+	}
+	// DB record removed
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("expected job to be deleted from repo")
+	}
+}
+
+// 27. Torrent repository GetTorrentJob error retains DB record
+func TestDelete_TorrentRepo_GetTorrentJobError_RetainsDBRecord(t *testing.T) {
+	repo := newFakeJobRepository()
+	jobID := "job_t_rec_err"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", "hash27", t.TempDir(), "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.getErr = errors.New("simulated SQLite read failure")
+
+	torrentEng := &fakeTorrentEngine{fakeEngine: &fakeEngine{}}
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}, newFakeEventBus(), t.TempDir(), torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err == nil {
+		t.Fatalf("expected error on GetTorrentJob failure")
+	}
+
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB when torrent repository read fails")
+	}
+}
+
+// 28. Torrent repository GetTorrentFiles error retains DB record
+func TestDelete_TorrentRepo_GetTorrentFilesError_RetainsDBRecord(t *testing.T) {
+	repo := newFakeJobRepository()
+	jobID := "job_t_files_err"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", "hash28", t.TempDir(), "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: "hash28"}
+	torrentRepo.getFilesErr = errors.New("simulated SQLite files read failure")
+
+	torrentEng := &fakeTorrentEngine{fakeEngine: &fakeEngine{}}
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}, newFakeEventBus(), t.TempDir(), torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err == nil {
+		t.Fatalf("expected error on GetTorrentFiles failure")
+	}
+
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB when torrent files repository read fails")
+	}
+}
+
+// 29. Torrent engine unavailable: returns ErrEngineError and retains DB record
+func TestDelete_TorrentEngineUnavailable_RetainsDBRecord(t *testing.T) {
+	repo := newFakeJobRepository()
+	jobID := "job_t_no_eng"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", "hash29", t.TempDir(), "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: "hash29"}
+
+	// Empty engine registry (qbittorrent unavailable)
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{}}, newFakeEventBus(), t.TempDir(), torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err == nil {
+		t.Fatalf("expected error when torrent engine is unavailable")
+	}
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.Code != ErrEngineError {
+		t.Errorf("expected ErrEngineError, got: %v", err)
+	}
+
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB when torrent engine is unavailable")
+	}
+}
+
+// 30. Torrent engine wrong interface: returns ErrEngineError and retains DB record
+func TestDelete_TorrentEngineWrongInterface_RetainsDBRecord(t *testing.T) {
+	repo := newFakeJobRepository()
+	jobID := "job_t_wrong_iface"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", "hash30", t.TempDir(), "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: "hash30"}
+
+	// Registered engine does NOT implement ITorrentEngine
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": &fakeEngine{}}}, newFakeEventBus(), t.TempDir(), torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err == nil {
+		t.Fatalf("expected error when registered engine has wrong interface")
+	}
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.Code != ErrEngineError {
+		t.Errorf("expected ErrEngineError, got: %v", err)
+	}
+
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB when torrent engine interface is invalid")
+	}
+}
+
+// 31. Local fallback preserves unselected/pre-existing torrent files
+func TestDelete_Torrent_LocalFallback_PreservesUnselectedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	selectedFile := filepath.Join(tempDir, "movie.mkv")
+	skippedPreExistingFile := filepath.Join(tempDir, "cover.jpg")
+	if err := os.WriteFile(selectedFile, []byte("movie data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skippedPreExistingFile, []byte("pre-existing cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := newFakeJobRepository()
+	jobID := "job_unselected_preserve"
+	infoHash := "hash31"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", infoHash, tempDir, "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: infoHash}
+	torrentRepo.torrentFiles[jobID] = []TorrentFileRecord{
+		{JobID: jobID, FileIndex: 0, Path: "movie.mkv", Size: 1000, Selected: true},
+		{JobID: jobID, FileIndex: 1, Path: "cover.jpg", Size: 50, Selected: false}, // SKIPPED / unselected
+	}
+
+	// qBittorrent already absent
+	torrentEng := &fakeTorrentEngine{
+		fakeEngine: &fakeEngine{},
+		removeTorrentFunc: func(hash string, delFiles bool) error {
+			return errors.New("torrent not found")
+		},
+	}
+
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}, newFakeEventBus(), tempDir, torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+
+	// Selected file deleted
+	if _, err := os.Stat(selectedFile); !os.IsNotExist(err) {
+		t.Errorf("expected selected movie.mkv to be deleted")
+	}
+	// Skipped file MUST remain untouched!
+	if _, err := os.Stat(skippedPreExistingFile); err != nil {
+		t.Errorf("skipped/pre-existing cover.jpg was wrongly deleted: %v", err)
+	}
+	// DB record removed
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("expected job to be deleted from repo")
+	}
+}
+
+// 32. Path validation occurs BEFORE any destructive external side effects
+func TestDelete_Torrent_PathValidationBeforeDestructiveSideEffects(t *testing.T) {
+	tempDir := t.TempDir()
+	repo := newFakeJobRepository()
+	jobID := "job_path_val_pre"
+	infoHash := "hash32"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", infoHash, tempDir, "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: infoHash}
+	torrentRepo.torrentFiles[jobID] = []TorrentFileRecord{
+		{JobID: jobID, FileIndex: 0, Path: "../../../outside/file.txt", Size: 100, Selected: true},
+	}
+
+	var removeCalled int32
+	torrentEng := &fakeTorrentEngine{
+		fakeEngine: &fakeEngine{},
+		removeTorrentFunc: func(hash string, delFiles bool) error {
+			atomic.AddInt32(&removeCalled, 1)
+			return nil
+		},
+	}
+
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}, newFakeEventBus(), tempDir, torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err == nil {
+		t.Fatalf("expected delete to fail on path traversal")
+	}
+
+	// External engine must NOT have been called
+	if atomic.LoadInt32(&removeCalled) != 0 {
+		t.Errorf("RemoveTorrent was called despite pre-validation failure")
+	}
+	// DB record must remain
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB after pre-validation failure")
+	}
+}
+
+// 33. Internal cleanup error on .torrent file removal retains DB record
+func TestDelete_TorrentFileRemovalError_RetainsDBRecord(t *testing.T) {
+	tempDir := t.TempDir()
+	// Create a directory where TorrentFilePath is expected to be a file, so os.Remove fails
+	badTorrentPath := filepath.Join(tempDir, "cannot_remove_dir.torrent")
+	if err := os.MkdirAll(filepath.Join(badTorrentPath, "child"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := newFakeJobRepository()
+	jobID := "job_torrent_file_rm_err"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", "hash33", tempDir, "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: "hash33", TorrentFilePath: badTorrentPath}
+
+	torrentEng := &fakeTorrentEngine{fakeEngine: &fakeEngine{}}
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}, newFakeEventBus(), tempDir, torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err == nil {
+		t.Fatalf("expected error on non-removable torrent file")
+	}
+
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+		t.Errorf("job must remain in DB when internal .torrent file cleanup fails")
+	}
+}

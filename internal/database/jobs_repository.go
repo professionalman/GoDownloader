@@ -290,7 +290,7 @@ func (r *SQLiteJobRepository) DeleteJobCascade(ctx context.Context, jobID string
 	if _, err := tx.ExecContext(ctx, `DELETE FROM torrent_jobs WHERE job_id = ?`, jobID); err != nil {
 		return fmt.Errorf("delete from torrent_jobs: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM encrypted_secrets WHERE owner_id = ?`, jobID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM encrypted_secrets WHERE scope = 'job' AND owner_id = ?`, jobID); err != nil {
 		return fmt.Errorf("delete from encrypted_secrets: %w", err)
 	}
 

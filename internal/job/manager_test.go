@@ -396,6 +396,7 @@ type fakeTorrentRepository struct {
 	torrentFiles map[string][]TorrentFileRecord
 	getActiveErr error
 	getErr       error
+	getFilesErr  error
 	createErr    error
 	updateErr    error
 	finalizeErr  error
@@ -463,7 +464,7 @@ func (f *fakeTorrentRepository) GetTorrentJob(ctx context.Context, jobID string)
 	}
 	rec, ok := f.torrentJobs[jobID]
 	if !ok {
-		return nil, fmt.Errorf("not found")
+		return nil, nil
 	}
 	return rec, nil
 }
@@ -547,6 +548,9 @@ func (f *fakeTorrentRepository) SaveTorrentFiles(ctx context.Context, jobID stri
 func (f *fakeTorrentRepository) GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getFilesErr != nil {
+		return nil, f.getFilesErr
+	}
 	return f.torrentFiles[jobID], nil
 }
 

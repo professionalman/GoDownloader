@@ -219,7 +219,9 @@ func (e *Aria2Engine) Status(ctx context.Context, j *job.Job) (*engine.EngineSta
 	}
 
 	var fileName string
+	var outputPath string
 	if len(info.Files) > 0 && info.Files[0].Path != "" {
+		outputPath = info.Files[0].Path
 		fileName = filepath.Base(info.Files[0].Path)
 	}
 
@@ -232,5 +234,6 @@ func (e *Aria2Engine) Status(ctx context.Context, j *job.Job) (*engine.EngineSta
 		Progress:            progress,
 		Error:               errorMsg,
 		FileName:            fileName,
+		OutputPath:          outputPath,
 	}, nil
 }
