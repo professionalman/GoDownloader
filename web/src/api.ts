@@ -183,6 +183,18 @@ export async function cancelJob(id: string): Promise<Job> {
   return handleResponse<Job>(res);
 }
 
+export async function deleteJob(id: string, deleteFiles: boolean): Promise<void> {
+  const res = await fetch(`${API_BASE}/jobs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deleteFiles }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || `Failed to delete job: ${res.statusText}`);
+  }
+}
+
 export async function selectFormat(jobId: string, formatId: string): Promise<Job> {
   const res = await fetch(`${API_BASE}/jobs/${jobId}/format`, {
     method: 'POST',
@@ -209,6 +221,7 @@ export function connectSSE(onEvent: (eventType: string, job: Job) => void): Even
   es.addEventListener('job.completed', handler);
   es.addEventListener('job.failed', handler);
   es.addEventListener('job.cancelled', handler);
+  es.addEventListener('job.deleted', handler);
 
   es.onerror = () => {
     // EventSource will auto-reconnect

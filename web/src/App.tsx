@@ -5,6 +5,7 @@ import { QueueSection } from './components/QueueSection';
 import { SettingsPanel } from './components/SettingsPanel';
 import { FormatSelector } from './components/FormatSelector';
 import { TorrentFileSelector } from './components/TorrentFileSelector';
+import { DeleteConfirmDialog } from './components/DeleteConfirmDialog';
 import { AppShell } from './components/AppShell';
 import type { ConnectionState } from './components/AppShell';
 import type {
@@ -17,7 +18,7 @@ import type {
   SeedingPolicy,
   BulkAction,
 } from './types';
-import { replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
+import { removeJob, replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
 import { useJobSelection } from './hooks/useJobSelection';
 import {
   getJobs,
@@ -25,6 +26,7 @@ import {
   createBatchJobs,
   bulkAction,
   cancelJob,
+  deleteJob,
   pauseJob,
   resumeJob,
   retryJob,
@@ -61,6 +63,7 @@ function App() {
   } = useJobSelection(jobs);
   const [formatJobId, setFormatJobId] = useState<string | null>(null);
   const [torrentJobId, setTorrentJobId] = useState<string | null>(null);
+  const [deleteJobId, setDeleteJobId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
   const fetchQueue = useCallback(async () => {
@@ -111,8 +114,12 @@ function App() {
 
   // Connect SSE for live progress
   useEffect(() => {
-    const es = connectSSE((_eventType: string, updatedJob: Job) => {
-      setJobs((currentJobs) => upsertJob(currentJobs, updatedJob));
+    const es = connectSSE((eventType: string, updatedJob: Job) => {
+      if (eventType === 'job.deleted') {
+        setJobs((currentJobs) => removeJob(currentJobs, updatedJob.id));
+      } else {
+        setJobs((currentJobs) => upsertJob(currentJobs, updatedJob));
+      }
       fetchQueue();
     });
 
@@ -320,6 +327,24 @@ function App() {
     [fetchQueue]
   );
 
+  const handleDelete = useCallback(
+    async (id: string, deleteFiles: boolean) => {
+      try {
+        await deleteJob(id, deleteFiles);
+        setJobs((currentJobs) => removeJob(currentJobs, id));
+        fetchQueue();
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to delete download');
+        throw err;
+      }
+    },
+    [fetchQueue]
+  );
+
+  const handleOpenDelete = useCallback((id: string) => {
+    setDeleteJobId(id);
+  }, []);
+
   const handlePause = useCallback(
     async (id: string) => {
       try {
@@ -411,6 +436,7 @@ function App() {
 
   const formatJob = formatJobId ? jobs.find((j) => j.id === formatJobId) : null;
   const torrentJob = torrentJobId ? jobs.find((j) => j.id === torrentJobId) : null;
+  const jobToDelete = deleteJobId ? jobs.find((j) => j.id === deleteJobId) : null;
 
   return (
     <>
@@ -461,6 +487,7 @@ function App() {
               onPause={handlePause}
               onResume={handleResume}
               onRetry={handleRetry}
+              onDelete={handleOpenDelete}
               onOpenFolder={openFolder}
               onSelectFormat={handleSelectFormat}
               onSelectTorrentFiles={handleSelectTorrentFiles}
@@ -504,6 +531,15 @@ function App() {
           job={torrentJob}
           onStart={handleStartTorrent}
           onClose={() => setTorrentJobId(null)}
+        />
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {jobToDelete && (
+        <DeleteConfirmDialog
+          job={jobToDelete}
+          onConfirm={handleDelete}
+          onClose={() => setDeleteJobId(null)}
         />
       )}
     </>

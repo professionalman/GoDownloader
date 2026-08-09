@@ -11,6 +11,7 @@ import (
 type IJobRepository interface {
 	Create(ctx context.Context, j *Job) error
 	Update(ctx context.Context, j *Job) error
+	DeleteJobCascade(ctx context.Context, jobID string) error
 	UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority JobPriority, newPosition int64) error
 	GetByID(ctx context.Context, id string) (*Job, error)
 	List(ctx context.Context) ([]Job, error)
@@ -40,6 +41,7 @@ const (
 	EventJobCompleted            = "job.completed"
 	EventJobFailed               = "job.failed"
 	EventJobCancelled            = "job.cancelled"
+	EventJobDeleted              = "job.deleted"
 	EventJobNetworkUpdated       = "job.network.updated"
 	EventJobSeedingPolicyUpdated = "job.seeding_policy.updated"
 	EventTrackerSourceUpdated    = "tracker_source.updated"

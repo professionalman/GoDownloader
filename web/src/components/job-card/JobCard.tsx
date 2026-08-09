@@ -20,6 +20,7 @@ export interface JobCardProps {
   onPause?: (id: string) => void;
   onResume?: (id: string) => void;
   onRetry?: (id: string) => void;
+  onDelete?: (id: string) => void;
   onOpenFolder?: () => void;
   onSelectFormat?: (id: string) => void;
   onSelectTorrentFiles?: (id: string) => void;
@@ -36,6 +37,7 @@ export function JobCard({
   onPause,
   onResume,
   onRetry,
+  onDelete,
   onOpenFolder,
   onSelectFormat,
   onSelectTorrentFiles,
@@ -96,6 +98,7 @@ export function JobCard({
                 onToggleDetails={() => setDetailsOpen((prev) => !prev)}
                 onCancel={onCancel}
                 onRetry={onRetry}
+                onDelete={onDelete}
                 onOpenFolder={onOpenFolder}
                 onAction={handleAction}
               />

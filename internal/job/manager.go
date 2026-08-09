@@ -2005,6 +2005,195 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 	return j, nil
 }
 
+// DeleteJobOptions configures the job deletion operation.
+type DeleteJobOptions struct {
+	DeleteFiles bool
+}
+
+// isPathInsideDir reports whether targetPath resides strictly inside baseDir (and is not baseDir itself).
+func isPathInsideDir(targetPath, baseDir string) bool {
+	if targetPath == "" || baseDir == "" {
+		return false
+	}
+	cleanBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		cleanBase = filepath.Clean(baseDir)
+	}
+	cleanTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		cleanTarget = filepath.Clean(targetPath)
+	}
+	if cleanTarget == cleanBase {
+		return false
+	}
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil {
+		return false
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return false
+	}
+	return true
+}
+
+// Delete removes a terminal download job from GoDownloader, optionally deleting owned user files from storage.
+func (m *Manager) Delete(ctx context.Context, id string, opts DeleteJobOptions) error {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// 1. Initial validation: only terminal jobs (completed, cancelled, failed) may be deleted
+	switch j.Status {
+	case StatusCompleted, StatusCancelled, StatusFailed:
+		// allowed
+	default:
+		return &AppError{
+			Code:    ErrInvalidJobState,
+			Message: "Cancel the download before deleting it.",
+		}
+	}
+
+	// 2. Load authoritative metadata before deleting any database records
+	engineID := j.EngineID
+	var torrentRec *TorrentJobRecord
+	var torrentFiles []TorrentFileRecord
+	if m.torrentRepo != nil {
+		torrentRec, _ = m.torrentRepo.GetTorrentJob(ctx, id)
+		torrentFiles, _ = m.torrentRepo.GetTorrentFiles(ctx, id)
+		if engineID == "" && torrentRec != nil && torrentRec.InfoHash != "" {
+			engineID = torrentRec.InfoHash
+		}
+	}
+
+	// 3. External engine cleanup
+	if j.Type == TypeTorrent || j.Engine == "qbittorrent" {
+		if engineID != "" {
+			if eng, ok := m.engines.Get("qbittorrent"); ok && eng != nil {
+				if torrentEng, ok := eng.(ITorrentEngine); ok {
+					err := torrentEng.RemoveTorrent(ctx, engineID, opts.DeleteFiles)
+					if err != nil {
+						errLower := strings.ToLower(err.Error())
+						if !strings.Contains(errLower, "not found") && !strings.Contains(errLower, "torrent_not_found") {
+							log.Printf("Delete: engine RemoveTorrent failed for job %s (hash %s): %v", id, engineID, err)
+							return &AppError{
+								Code:    ErrEngineError,
+								Message: fmt.Sprintf("failed to remove torrent from engine: %v", err),
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	m.cleanupTerminalEngineState(j)
+
+	// 4. Safe user file deletion (if opts.DeleteFiles == true)
+	if opts.DeleteFiles {
+		if j.Type == TypeTorrent {
+			if len(torrentFiles) > 0 && j.DestinationDir != "" {
+				for _, f := range torrentFiles {
+					if f.Path == "" {
+						continue
+					}
+					fullPath := filepath.Join(j.DestinationDir, f.Path)
+					if !isPathInsideDir(fullPath, j.DestinationDir) {
+						log.Printf("Delete: refusing to delete unsafe torrent file path %q for job %s", fullPath, id)
+						return &AppError{
+							Code:    ErrStorageError,
+							Message: fmt.Sprintf("refusing to delete unsafe file path %q outside destination", f.Path),
+						}
+					}
+					if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+						log.Printf("Delete: failed to delete torrent file %q for job %s: %v", fullPath, id, err)
+						return &AppError{
+							Code:    ErrStorageError,
+							Message: fmt.Sprintf("failed to delete file %q: %v", fullPath, err),
+						}
+					}
+					// Walk upward and safely remove empty parent directories
+					parent := filepath.Dir(fullPath)
+					for isPathInsideDir(parent, j.DestinationDir) {
+						if err := os.Remove(parent); err != nil {
+							break
+						}
+						parent = filepath.Dir(parent)
+					}
+				}
+			}
+			if j.FinalPath != "" && isPathInsideDir(j.FinalPath, j.DestinationDir) {
+				_ = os.Remove(j.FinalPath)
+			}
+		} else if j.Type == TypeDownload || j.Engine == "aria2" {
+			if j.FinalPath != "" && isPathInsideDir(j.FinalPath, j.DestinationDir) {
+				if err := os.Remove(j.FinalPath); err != nil && !os.IsNotExist(err) {
+					log.Printf("Delete: failed to delete direct download final file %q for job %s: %v", j.FinalPath, id, err)
+					return &AppError{
+						Code:    ErrStorageError,
+						Message: fmt.Sprintf("failed to delete file %q: %v", j.FinalPath, err),
+					}
+				}
+				aria2File := j.FinalPath + ".aria2"
+				if isPathInsideDir(aria2File, j.DestinationDir) {
+					_ = os.Remove(aria2File)
+				}
+			} else if j.Name != "" && j.DestinationDir != "" {
+				target := filepath.Join(j.DestinationDir, j.Name)
+				if isPathInsideDir(target, j.DestinationDir) {
+					_ = os.Remove(target)
+					_ = os.Remove(target + ".aria2")
+				}
+			}
+		} else if j.Type == TypeMedia {
+			if j.FinalPath != "" && isPathInsideDir(j.FinalPath, j.DestinationDir) {
+				if err := os.Remove(j.FinalPath); err != nil && !os.IsNotExist(err) {
+					log.Printf("Delete: failed to delete media final file %q for job %s: %v", j.FinalPath, id, err)
+					return &AppError{
+						Code:    ErrStorageError,
+						Message: fmt.Sprintf("failed to delete file %q: %v", j.FinalPath, err),
+					}
+				}
+			}
+		}
+	}
+
+	// 5. Internal GoDownloader metadata cleanup (always executed regardless of opts.DeleteFiles)
+	if j.WorkDir != "" {
+		if m.storageService != nil {
+			if err := m.storageService.CleanupWorkDir(ctx, j.ID, j.WorkDir); err != nil {
+				log.Printf("Delete: failed to clean workdir %s for job %s: %v", j.WorkDir, id, err)
+			}
+		} else {
+			if err := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); err == nil {
+				_ = os.RemoveAll(j.WorkDir)
+			}
+		}
+	}
+	if torrentRec != nil && torrentRec.TorrentFilePath != "" {
+		if _, err := os.Stat(torrentRec.TorrentFilePath); err == nil {
+			_ = os.Remove(torrentRec.TorrentFilePath)
+		}
+	}
+
+	// 6. Transactional Database Deletion
+	if err := m.repo.DeleteJobCascade(ctx, j.ID); err != nil {
+		log.Printf("Delete: DB cascade deletion failed for job %s: %v", id, err)
+		return &AppError{
+			Code:    ErrInternalError,
+			Message: fmt.Sprintf("failed to delete job from database: %v", err),
+		}
+	}
+
+	// 7. Remove active in-memory tracking, publish EventJobDeleted and kick scheduler
+	m.removeActive(j.ID)
+	m.publish(EventJobDeleted, j)
+	if m.scheduler != nil {
+		m.scheduler.Kick()
+	}
+
+	return nil
+}
+
 // Retry retries a failed job with a fresh engine execution via the scheduler.
 func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
@@ -3462,7 +3651,7 @@ func (m *Manager) processPendingEngineCleanups(ctx context.Context) {
 }
 
 func (m *Manager) publish(eventType string, j *Job) {
-	if j == nil {
+	if j == nil || m.bus == nil {
 		return
 	}
 	jobCopy := cloneJobSeedingState(j)

@@ -250,6 +250,7 @@ type fakeJobRepository struct {
 	mu        sync.Mutex
 	jobs      map[string]*Job
 	updateErr error
+	deleteErr error
 }
 
 func newFakeJobRepository() *fakeJobRepository {
@@ -275,6 +276,19 @@ func (f *fakeJobRepository) Update(ctx context.Context, j *Job) error {
 	}
 	jCopy := *j
 	f.jobs[j.ID] = &jCopy
+	return nil
+}
+
+func (f *fakeJobRepository) DeleteJobCascade(ctx context.Context, jobID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if _, exists := f.jobs[jobID]; !exists {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	delete(f.jobs, jobID)
 	return nil
 }
 
@@ -2283,6 +2297,12 @@ func (f *failingUpdateJobRepo) CountDownloading(ctx context.Context) (int, error
 }
 func (f *failingUpdateJobRepo) ListPendingEngineCleanups(ctx context.Context) ([]Job, error) {
 	return nil, nil
+}
+func (f *failingUpdateJobRepo) DeleteJobCascade(ctx context.Context, jobID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.jobs, jobID)
+	return nil
 }
 
 func TestEndToEnd_UploadedTorrent(t *testing.T) {

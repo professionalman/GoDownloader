@@ -28,6 +28,7 @@ interface DownloadsPanelProps {
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
+  onDelete?: (id: string) => void;
   onOpenFolder: () => void;
   onSelectFormat: (id: string) => void;
   onSelectTorrentFiles: (id: string) => void;
@@ -260,6 +261,7 @@ export function DownloadsPanel(props: DownloadsPanelProps) {
           onPause={props.onPause}
           onResume={props.onResume}
           onRetry={props.onRetry}
+          onDelete={props.onDelete}
           onOpenFolder={props.onOpenFolder}
           onSelectFormat={props.onSelectFormat}
           onSelectTorrentFiles={props.onSelectTorrentFiles}

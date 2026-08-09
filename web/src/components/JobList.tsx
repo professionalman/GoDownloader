@@ -10,6 +10,7 @@ interface JobListProps {
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
+  onDelete?: (id: string) => void;
   onOpenFolder: () => void;
   onSelectFormat: (id: string) => void;
   onSelectTorrentFiles: (id: string) => void;
@@ -31,6 +32,7 @@ export function JobList(props: JobListProps) {
           onPause={props.onPause}
           onResume={props.onResume}
           onRetry={props.onRetry}
+          onDelete={props.onDelete}
           onOpenFolder={props.onOpenFolder}
           onSelectFormat={props.onSelectFormat}
           onSelectTorrentFiles={props.onSelectTorrentFiles}

@@ -8,6 +8,7 @@ interface JobActionsMenuProps {
   onToggleDetails: () => void;
   onCancel?: (id: string) => void;
   onRetry?: (id: string) => void;
+  onDelete?: (id: string) => void;
   onOpenFolder?: () => void;
   onAction: (actionFn?: (id: string) => void) => void;
 }
@@ -18,6 +19,7 @@ export function JobActionsMenu({
   onToggleDetails,
   onCancel,
   onRetry,
+  onDelete,
   onOpenFolder,
   onAction,
 }: JobActionsMenuProps) {
@@ -29,6 +31,7 @@ export function JobActionsMenu({
   const isCancelled = job.status === 'cancelled';
   const isFailed = job.status === 'failed';
   const isSeeding = job.status === 'seeding';
+  const isTerminal = isCompleted || isCancelled || isFailed;
 
   // Handle outside click & Escape key
   useEffect(() => {
@@ -110,6 +113,33 @@ export function JobActionsMenu({
             >
               Retry
             </button>
+          )}
+
+          {onDelete && (
+            isTerminal ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-destructive hover:bg-surface focus-visible:bg-surface focus-visible:outline-none"
+                onClick={() => {
+                  setOpen(false);
+                  onDelete(job.id);
+                }}
+              >
+                Delete
+              </button>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                disabled
+                title="Cancel the download first"
+                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground/50 opacity-50 cursor-not-allowed"
+              >
+                <span>Delete</span>
+                <span className="text-[10px] text-muted-foreground">Cancel first</span>
+              </button>
+            )
           )}
 
           {onOpenFolder && (isCompleted || isSeeding) && (

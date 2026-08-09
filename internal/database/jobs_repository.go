@@ -271,3 +271,43 @@ func (r *SQLiteJobRepository) ListPendingEngineCleanups(ctx context.Context) ([]
 	}
 	return jobs, rows.Err()
 }
+
+// DeleteJobCascade removes a job and all associated child records across all tables in a single SQLite transaction.
+// It enforces child-before-parent deletion order and verifies that exactly one job row is removed.
+func (r *SQLiteJobRepository) DeleteJobCascade(ctx context.Context, jobID string) error {
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_queue WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from job_queue: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM torrent_files WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from torrent_files: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM torrent_jobs WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from torrent_jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM encrypted_secrets WHERE owner_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from encrypted_secrets: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, jobID)
+	if err != nil {
+		return fmt.Errorf("delete from jobs: %w", err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check affected rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete transaction: %w", err)
+	}
+	return nil
+}
