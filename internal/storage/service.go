@@ -270,9 +270,22 @@ func (s *StorageService) FinalizeFile(ctx context.Context, srcPath, destinationD
 }
 
 // CleanupWorkDir removes jobID's temporary work directory after validating the safety marker.
+// If the directory is already absent, it returns nil (idempotent success).
+// If the directory exists, it requires a valid safety marker before removal.
 func (s *StorageService) CleanupWorkDir(ctx context.Context, jobID, workDir string) error {
 	if workDir == "" {
 		return nil
+	}
+
+	fi, err := os.Stat(workDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: failed to stat work directory %s: %v", ErrStorageError, workDir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%w: work directory %s is not a directory", ErrStorageError, workDir)
 	}
 
 	if err := ValidateWorkDirMarker(workDir, jobID); err != nil {

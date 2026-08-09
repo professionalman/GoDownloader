@@ -2247,7 +2247,30 @@ func (m *Manager) Delete(ctx context.Context, id string, opts DeleteJobOptions) 
 				}
 			}
 		} else {
-			if err := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); err == nil {
+			fi, err := os.Stat(j.WorkDir)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("Delete: failed to stat workdir %s for job %s: %v", j.WorkDir, id, err)
+					return &AppError{
+						Code:    ErrStorageError,
+						Message: fmt.Sprintf("failed to stat workdir %s: %v", j.WorkDir, err),
+					}
+				}
+			} else {
+				if !fi.IsDir() {
+					log.Printf("Delete: workdir %s is not a directory for job %s", j.WorkDir, id)
+					return &AppError{
+						Code:    ErrStorageError,
+						Message: fmt.Sprintf("workdir %s is not a directory", j.WorkDir),
+					}
+				}
+				if err := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); err != nil {
+					log.Printf("Delete: refusing workdir cleanup for job %s: %v", id, err)
+					return &AppError{
+						Code:    ErrStorageError,
+						Message: fmt.Sprintf("refusing workdir cleanup for job %s: %v", id, err),
+					}
+				}
 				if err := os.RemoveAll(j.WorkDir); err != nil && !os.IsNotExist(err) {
 					log.Printf("Delete: failed to clean workdir %s for job %s: %v", j.WorkDir, id, err)
 					return &AppError{

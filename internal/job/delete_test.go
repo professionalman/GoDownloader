@@ -1072,3 +1072,193 @@ func TestDelete_Torrent_QBitPresent_PreservesUnselectedFiles_PassesFalseToEngine
 		t.Errorf("expected job to be deleted from repo")
 	}
 }
+
+// 35. Regression test (manual Test A scenario): Completed yt-dlp media job whose WorkDir was already
+// cleaned on completion. Delete with deleteFiles=false MUST succeed idempotently, retain final media file,
+// and remove the DB record.
+func TestDelete_CompletedMedia_WorkDirAlreadyCleaned_KeepFile(t *testing.T) {
+	tempDir := t.TempDir()
+	finalMediaFile := filepath.Join(tempDir, "Tiësto, Jonas Blue & Rita Ora - Ritual (Official Video).mkv")
+	if err := os.WriteFile(finalMediaFile, []byte("video stream data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// WorkDir path that has already been cleaned on completion (does not exist on disk)
+	alreadyCleanedWorkDir := filepath.Join(tempDir, "data", "tmp", "job_6128b543")
+
+	repo := newFakeJobRepository()
+	jobID := "job_6128b543"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeMedia, "ytdlp", "", tempDir, finalMediaFile, alreadyCleanedWorkDir)
+
+	storageSvc := storage.NewStorageService(nil, nil, nil, tempDir, tempDir)
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"ytdlp": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+	m.SetStorageService(storageSvc)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err != nil {
+		t.Fatalf("expected delete to succeed for media job with already-cleaned WorkDir, got error: %v", err)
+	}
+
+	// 1. DB job record removed
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("expected job to be deleted from repo")
+	}
+
+	// 2. Final media file preserved on disk
+	if _, err := os.Stat(finalMediaFile); err != nil {
+		t.Errorf("final media file was wrongly removed: %v", err)
+	}
+}
+
+// 36. Completed media job whose WorkDir was already cleaned. Delete with deleteFiles=true MUST succeed,
+// remove the final media file, and remove the DB record.
+func TestDelete_CompletedMedia_WorkDirAlreadyCleaned_DeleteFile(t *testing.T) {
+	tempDir := t.TempDir()
+	finalMediaFile := filepath.Join(tempDir, "song.mkv")
+	if err := os.WriteFile(finalMediaFile, []byte("video stream data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	alreadyCleanedWorkDir := filepath.Join(tempDir, "data", "tmp", "job_media_del")
+
+	repo := newFakeJobRepository()
+	jobID := "job_media_del"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeMedia, "ytdlp", "", tempDir, finalMediaFile, alreadyCleanedWorkDir)
+
+	storageSvc := storage.NewStorageService(nil, nil, nil, tempDir, tempDir)
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"ytdlp": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+	m.SetStorageService(storageSvc)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err != nil {
+		t.Fatalf("expected delete to succeed, got error: %v", err)
+	}
+
+	// 1. DB job record removed
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("expected job to be deleted from repo")
+	}
+
+	// 2. Final media file deleted from disk
+	if _, err := os.Stat(finalMediaFile); !os.IsNotExist(err) {
+		t.Errorf("expected final media file to be deleted")
+	}
+}
+
+// 37. Completed media job with already-cleaned WorkDir using fallback path (storageService == nil).
+func TestDelete_CompletedMedia_WorkDirAlreadyCleaned_FallbackNoStorageService(t *testing.T) {
+	tempDir := t.TempDir()
+	finalMediaFile := filepath.Join(tempDir, "fallback_song.mkv")
+	if err := os.WriteFile(finalMediaFile, []byte("video stream data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	alreadyCleanedWorkDir := filepath.Join(tempDir, "data", "tmp", "job_media_fb")
+
+	repo := newFakeJobRepository()
+	jobID := "job_media_fb"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeMedia, "ytdlp", "", tempDir, finalMediaFile, alreadyCleanedWorkDir)
+
+	// Manager without storageService (storageService == nil)
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"ytdlp": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+	if err != nil {
+		t.Fatalf("expected delete fallback to succeed for already-cleaned WorkDir, got error: %v", err)
+	}
+
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("expected job to be deleted from repo")
+	}
+	if _, err := os.Stat(finalMediaFile); err != nil {
+		t.Errorf("final media file was wrongly removed: %v", err)
+	}
+}
+
+// 38. Cancelled and Failed media jobs with already-cleaned WorkDir succeed idempotently.
+func TestDelete_CancelledAndFailedMedia_WorkDirAlreadyCleaned(t *testing.T) {
+	tempDir := t.TempDir()
+	storageSvc := storage.NewStorageService(nil, nil, nil, tempDir, tempDir)
+
+	for _, status := range []JobStatus{StatusCancelled, StatusFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			repo := newFakeJobRepository()
+			jobID := "job_media_" + string(status)
+			alreadyCleanedWorkDir := filepath.Join(tempDir, "data", "tmp", jobID)
+			createDeleteTestJob(repo, jobID, status, TypeMedia, "ytdlp", "", tempDir, "", alreadyCleanedWorkDir)
+
+			m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"ytdlp": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+			m.SetStorageService(storageSvc)
+
+			err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+			if err != nil {
+				t.Fatalf("expected delete to succeed for status %s, got: %v", status, err)
+			}
+			if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+				t.Errorf("expected job %s to be deleted from repo", jobID)
+			}
+		})
+	}
+}
+
+// 39. Existing WorkDir with invalid or missing marker fails closed (both storageService and fallback).
+func TestDelete_ExistingWorkDir_InvalidMarker_FailsClosed(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("with_storage_service", func(t *testing.T) {
+		workDir := filepath.Join(tempDir, "workdirs", "job_with_bad_marker")
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// Missing marker in existing directory
+		repo := newFakeJobRepository()
+		jobID := "job_with_bad_marker"
+		createDeleteTestJob(repo, jobID, StatusCompleted, TypeMedia, "ytdlp", "", tempDir, "", workDir)
+
+		storageSvc := storage.NewStorageService(nil, nil, nil, tempDir, tempDir)
+		m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"ytdlp": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+		m.SetStorageService(storageSvc)
+
+		err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+		if err == nil {
+			t.Fatalf("expected error cleaning unmarked existing directory")
+		}
+		var appErr *AppError
+		if !errors.As(err, &appErr) || appErr.Code != ErrStorageError {
+			t.Errorf("expected ErrStorageError, got: %v", err)
+		}
+		if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+			t.Errorf("expected DB record to remain when cleanup fails")
+		}
+	})
+
+	t.Run("fallback_without_storage_service", func(t *testing.T) {
+		workDir := filepath.Join(tempDir, "workdirs", "job_fb_bad_marker")
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// Write wrong marker (belonging to other job)
+		markerPath := filepath.Join(workDir, storage.WorkDirMarkerFilename)
+		if err := os.WriteFile(markerPath, []byte("wrong_owner_job\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		repo := newFakeJobRepository()
+		jobID := "job_fb_bad_marker"
+		createDeleteTestJob(repo, jobID, StatusCompleted, TypeMedia, "ytdlp", "", tempDir, "", workDir)
+
+		m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"ytdlp": &fakeEngine{}}}, newFakeEventBus(), tempDir, nil)
+
+		err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: false})
+		if err == nil {
+			t.Fatalf("expected error cleaning wrong-marker existing directory in fallback")
+		}
+		var appErr *AppError
+		if !errors.As(err, &appErr) || appErr.Code != ErrStorageError {
+			t.Errorf("expected ErrStorageError, got: %v", err)
+		}
+		if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
+			t.Errorf("expected DB record to remain when fallback cleanup fails")
+		}
+	})
+}
