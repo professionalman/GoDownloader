@@ -250,6 +250,7 @@ type fakeJobRepository struct {
 	mu        sync.Mutex
 	jobs      map[string]*Job
 	updateErr error
+	deleteErr error
 }
 
 func newFakeJobRepository() *fakeJobRepository {
@@ -275,6 +276,19 @@ func (f *fakeJobRepository) Update(ctx context.Context, j *Job) error {
 	}
 	jCopy := *j
 	f.jobs[j.ID] = &jCopy
+	return nil
+}
+
+func (f *fakeJobRepository) DeleteJobCascade(ctx context.Context, jobID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if _, exists := f.jobs[jobID]; !exists {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	delete(f.jobs, jobID)
 	return nil
 }
 
@@ -382,6 +396,7 @@ type fakeTorrentRepository struct {
 	torrentFiles map[string][]TorrentFileRecord
 	getActiveErr error
 	getErr       error
+	getFilesErr  error
 	createErr    error
 	updateErr    error
 	finalizeErr  error
@@ -449,7 +464,7 @@ func (f *fakeTorrentRepository) GetTorrentJob(ctx context.Context, jobID string)
 	}
 	rec, ok := f.torrentJobs[jobID]
 	if !ok {
-		return nil, fmt.Errorf("not found")
+		return nil, nil
 	}
 	return rec, nil
 }
@@ -533,6 +548,9 @@ func (f *fakeTorrentRepository) SaveTorrentFiles(ctx context.Context, jobID stri
 func (f *fakeTorrentRepository) GetTorrentFiles(ctx context.Context, jobID string) ([]TorrentFileRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getFilesErr != nil {
+		return nil, f.getFilesErr
+	}
 	return f.torrentFiles[jobID], nil
 }
 
@@ -2283,6 +2301,12 @@ func (f *failingUpdateJobRepo) CountDownloading(ctx context.Context) (int, error
 }
 func (f *failingUpdateJobRepo) ListPendingEngineCleanups(ctx context.Context) ([]Job, error) {
 	return nil, nil
+}
+func (f *failingUpdateJobRepo) DeleteJobCascade(ctx context.Context, jobID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.jobs, jobID)
+	return nil
 }
 
 func TestEndToEnd_UploadedTorrent(t *testing.T) {

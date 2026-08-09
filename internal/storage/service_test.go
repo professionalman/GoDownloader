@@ -349,6 +349,118 @@ func TestStorageService_WorkDirSafetyMarker(t *testing.T) {
 	}
 }
 
+func TestCleanupWorkDir_AlreadyAbsent_IsSuccess(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	jobID := "job_absent_test"
+	nonExistentWorkDir := filepath.Join(tmpDir, "does_not_exist", jobID)
+
+	// WorkDir path does not exist on disk -> idempotent success
+	err := svc.CleanupWorkDir(ctx, jobID, nonExistentWorkDir)
+	if err != nil {
+		t.Fatalf("expected nil for already-absent workdir, got: %v", err)
+	}
+}
+
+func TestCleanupWorkDir_ExistingMarkedDir_IsRemoved(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	jobID := "job_marked_test"
+	workDir := filepath.Join(tmpDir, "workdirs", jobID)
+	if err := svc.PrepareWorkDir(ctx, jobID, workDir); err != nil {
+		t.Fatalf("failed to prepare workdir: %v", err)
+	}
+
+	testFile := filepath.Join(workDir, "temp_data.bin")
+	if err := os.WriteFile(testFile, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.CleanupWorkDir(ctx, jobID, workDir); err != nil {
+		t.Fatalf("expected successful cleanup with valid marker, got: %v", err)
+	}
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Errorf("expected marked workDir to be removed from disk")
+	}
+}
+
+func TestCleanupWorkDir_ExistingDirMissingMarker_FailsClosed(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	jobID := "job_unmarked_test"
+	workDir := filepath.Join(tmpDir, "user_directory", jobID)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	userFile := filepath.Join(workDir, "important_user_file.txt")
+	if err := os.WriteFile(userFile, []byte("precious user data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Existing directory without marker -> FAIL CLOSED
+	err := svc.CleanupWorkDir(ctx, jobID, workDir)
+	if err == nil {
+		t.Fatalf("expected error cleaning unmarked existing directory")
+	}
+
+	// Directory and contained files must remain untouched
+	if _, err := os.Stat(workDir); err != nil {
+		t.Errorf("unmarked directory was wrongly removed: %v", err)
+	}
+	if _, err := os.Stat(userFile); err != nil {
+		t.Errorf("file inside unmarked directory was wrongly removed: %v", err)
+	}
+}
+
+func TestCleanupWorkDir_WrongMarker_FailsClosed(t *testing.T) {
+	db, repo := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	svc := storage.NewStorageService(repo, nil, nil, tmpDir, tmpDir)
+
+	jobA := "job_owner_A"
+	jobB := "job_attacker_B"
+	workDir := filepath.Join(tmpDir, "workdirs", jobA)
+	if err := svc.PrepareWorkDir(ctx, jobA, workDir); err != nil {
+		t.Fatalf("failed to prepare workdir: %v", err)
+	}
+	jobAFile := filepath.Join(workDir, "job_a_data.bin")
+	if err := os.WriteFile(jobAFile, []byte("job A data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Job B tries to clean Job A's workdir -> FAIL CLOSED
+	err := svc.CleanupWorkDir(ctx, jobB, workDir)
+	if err == nil {
+		t.Fatalf("expected error when cleaning workdir with wrong marker owner")
+	}
+
+	// Directory and contained files must remain untouched
+	if _, err := os.Stat(workDir); err != nil {
+		t.Errorf("wrongly marked directory was removed: %v", err)
+	}
+	if _, err := os.Stat(jobAFile); err != nil {
+		t.Errorf("file inside directory was wrongly removed: %v", err)
+	}
+}
+
 func TestFinalizeOverwrite_ExistingFile(t *testing.T) {
 	db, repo := setupTestDB(t)
 	defer db.Close()

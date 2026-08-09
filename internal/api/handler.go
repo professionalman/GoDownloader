@@ -187,6 +187,34 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j)
 }
 
+// deleteJobRequest is the request body for DELETE /api/v1/jobs/{id}.
+type deleteJobRequest struct {
+	DeleteFiles bool `json:"deleteFiles"`
+}
+
+// DeleteJob handles DELETE /api/v1/jobs/{id}.
+func (h *Handler) DeleteJob(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	var req deleteJobRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := decodeStrictJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+			return
+		}
+	}
+
+	err := h.manager.Delete(r.Context(), id, job.DeleteJobOptions{
+		DeleteFiles: req.DeleteFiles,
+	})
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // SelectFormat handles POST /api/v1/jobs/{id}/format
 func (h *Handler) SelectFormat(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]

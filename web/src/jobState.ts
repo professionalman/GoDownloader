@@ -60,3 +60,7 @@ export function upsertJob(currentJobs: readonly Job[], incomingJob: Job): Job[] 
 export function replaceJobsFromInitialLoad(currentJobs: readonly Job[], loadedJobs: readonly Job[]): Job[] {
   return upsertJobs(deduplicateJobsById(loadedJobs), currentJobs);
 }
+
+export function removeJob(currentJobs: readonly Job[], jobId: string): Job[] {
+  return currentJobs.filter((job) => job.id !== jobId);
+}
