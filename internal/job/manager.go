@@ -2165,7 +2165,7 @@ func (m *Manager) Delete(ctx context.Context, id string, opts DeleteJobOptions) 
 					Message: "registered engine does not implement torrent interface",
 				}
 			}
-			err := torrentEng.RemoveTorrent(ctx, engineID, opts.DeleteFiles)
+			err := torrentEng.RemoveTorrent(ctx, engineID, false)
 			if err != nil {
 				errLower := strings.ToLower(err.Error())
 				if !strings.Contains(errLower, "not found") && !strings.Contains(errLower, "torrent_not_found") {

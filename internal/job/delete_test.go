@@ -341,10 +341,12 @@ func TestDelete_CompletedTorrent_DeleteFiles(t *testing.T) {
 	torrentRepo.torrentFiles[jobID] = []TorrentFileRecord{{JobID: jobID, FileIndex: 0, Path: "torrent_dir/video.mkv", Size: 10, Selected: true}}
 
 	var removeCalled int32
+	var removeDelFiles bool
 	torrentEng := &fakeTorrentEngine{
 		fakeEngine: &fakeEngine{},
 		removeTorrentFunc: func(hash string, delFiles bool) error {
 			atomic.AddInt32(&removeCalled, 1)
+			removeDelFiles = delFiles
 			return nil
 		},
 	}
@@ -357,6 +359,9 @@ func TestDelete_CompletedTorrent_DeleteFiles(t *testing.T) {
 
 	if atomic.LoadInt32(&removeCalled) != 1 {
 		t.Errorf("expected RemoveTorrent to be called once, got %d", removeCalled)
+	}
+	if removeDelFiles != false {
+		t.Errorf("expected RemoveTorrent delFiles=false, got %v", removeDelFiles)
 	}
 
 	// Owned file removed
@@ -998,5 +1003,72 @@ func TestDelete_TorrentFileRemovalError_RetainsDBRecord(t *testing.T) {
 
 	if saved, _ := repo.GetByID(context.Background(), jobID); saved == nil {
 		t.Errorf("job must remain in DB when internal .torrent file cleanup fails")
+	}
+}
+
+// 34. Regression test: with qBit PRESENT, deleteFiles=true MUST pass delFiles=false to RemoveTorrent,
+// delete selected files locally, preserve unselected files, and remove DB record.
+func TestDelete_Torrent_QBitPresent_PreservesUnselectedFiles_PassesFalseToEngine(t *testing.T) {
+	tempDir := t.TempDir()
+	selectedFile := filepath.Join(tempDir, "movie.mkv")
+	skippedPreExistingFile := filepath.Join(tempDir, "cover.jpg")
+	if err := os.WriteFile(selectedFile, []byte("movie data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skippedPreExistingFile, []byte("pre-existing cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := newFakeJobRepository()
+	jobID := "job_qbit_present_unselected"
+	infoHash := "hash34"
+	createDeleteTestJob(repo, jobID, StatusCompleted, TypeTorrent, "qbittorrent", infoHash, tempDir, "", "")
+
+	torrentRepo := newFakeTorrentRepository(repo)
+	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: infoHash}
+	torrentRepo.torrentFiles[jobID] = []TorrentFileRecord{
+		{JobID: jobID, FileIndex: 0, Path: "movie.mkv", Size: 1000, Selected: true},
+		{JobID: jobID, FileIndex: 1, Path: "cover.jpg", Size: 50, Selected: false}, // UNSELECTED / skipped
+	}
+
+	var removeCalled int32
+	var removeDelFiles bool
+	torrentEng := &fakeTorrentEngine{
+		fakeEngine: &fakeEngine{},
+		removeTorrentFunc: func(hash string, delFiles bool) error {
+			atomic.AddInt32(&removeCalled, 1)
+			removeDelFiles = delFiles
+			return nil
+		},
+	}
+
+	m := NewManager(repo, &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}, newFakeEventBus(), tempDir, torrentRepo)
+
+	err := m.Delete(context.Background(), jobID, DeleteJobOptions{DeleteFiles: true})
+	if err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+
+	// 1. RemoveTorrent called exactly once with delFiles == false
+	if atomic.LoadInt32(&removeCalled) != 1 {
+		t.Errorf("expected RemoveTorrent to be called exactly once, got %d", removeCalled)
+	}
+	if removeDelFiles != false {
+		t.Errorf("expected RemoveTorrent to receive delFiles=false, got %v", removeDelFiles)
+	}
+
+	// 2. Selected movie.mkv deleted locally by GoDownloader
+	if _, err := os.Stat(selectedFile); !os.IsNotExist(err) {
+		t.Errorf("expected selected movie.mkv to be deleted")
+	}
+
+	// 3. Unselected cover.jpg remains intact
+	if _, err := os.Stat(skippedPreExistingFile); err != nil {
+		t.Errorf("unselected/pre-existing cover.jpg was wrongly deleted: %v", err)
+	}
+
+	// 4. DB record removed
+	if saved, _ := repo.GetByID(context.Background(), jobID); saved != nil {
+		t.Errorf("expected job to be deleted from repo")
 	}
 }
