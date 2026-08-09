@@ -1,80 +1,78 @@
-# GoDownloader
+<p align="center">
+  <strong>GoDownloader</strong>
+</p>
 
-A self-hosted download manager that handles direct files, media streams, and torrents — all from one clean interface.
+<p align="center">
+  A self-hosted download manager for direct files, media streams, and torrents — unified in one clean interface.
+</p>
 
-Current release: **V0.7 — Network & Protocol Power Controls**
-
-Built with **Go**, **React**, **SQLite**, and powered by **aria2**, **yt-dlp**, and **qBittorrent** under the hood.
-
----
-
-## What It Does
-
-Paste a link. GoDownloader figures out the rest.
-
-- **Direct files** (HTTP/HTTPS) — handed off to aria2 for fast, resumable downloads.
-- **Media links** (YouTube, Vimeo, Twitch, etc.) — analyzed by yt-dlp so you can pick a format and resolution before downloading.
-- **Torrents & magnets** — managed through qBittorrent with full file selection, priority control, and seeding lifecycle.
-
-Everything runs locally on your machine. No cloud. No accounts. Your downloads, your storage.
+<p align="center">
+  <a href="https://github.com/professionalman/GoDownloader/actions/workflows/ci.yml"><img src="https://github.com/professionalman/GoDownloader/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <img src="https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25">
+  <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react&logoColor=white" alt="React 19">
+  <img src="https://img.shields.io/badge/sqlite-3-003B57?logo=sqlite&logoColor=white" alt="SQLite">
+  <img src="https://img.shields.io/badge/license-personal_use-gray" alt="License">
+</p>
 
 ---
 
-## Features
+## Overview
 
-### Smart Queue & Scheduler
-Downloads don't all fire at once. A built-in scheduler manages concurrency with configurable limits (default: 3 simultaneous downloads). Jobs are organized into **priority lanes** (high, normal, low) and processed in FIFO order within each lane. Higher priority jobs move ahead in the queue but never interrupt downloads already in progress.
+GoDownloader is a unified download management system that orchestrates three specialized engines behind a single API and UI. Paste a link — GoDownloader routes it to the right backend, manages the lifecycle, and streams progress to your browser in real time.
 
-### Batch & Bulk Operations
-Submit up to 100 links at once. Select multiple jobs in the UI and pause, resume, cancel, or retry them in one click.
+| Engine | Protocols | Capabilities |
+|---|---|---|
+| **aria2** | HTTP / HTTPS / FTP | Multi-connection, resumable, segmented downloads |
+| **yt-dlp** | 1800+ media sites | Format selection, audio/video merge via FFmpeg |
+| **qBittorrent** | BitTorrent / Magnet | File selection, priority control, seeding lifecycle |
 
-### Torrent Support
-- Accepts magnet links and `.torrent` file uploads
-- Shows the full file list before you start — pick which files to download and set per-file priorities
-- Tracks seeding progress (upload speed, ratio, peers) with a one-click stop
+Everything runs locally. No cloud services, no accounts, no telemetry.
 
-### Media Downloads
-- Auto-detects supported media platforms via yt-dlp
-- Presents available formats (1080p, 720p, audio-only, etc.) with estimated file sizes
+---
+
+## Key Features
+
+### 🎯 Intelligent Routing
+Paste any URL, magnet link, or upload a `.torrent` file. The engine router analyzes the source and dispatches to the optimal backend automatically.
+
+### 📊 Priority Queue & Scheduler
+A built-in scheduler manages download concurrency with configurable limits. Jobs are organized into **priority lanes** (high, normal, low) and processed in FIFO order within each lane. Higher priority jobs advance in the queue without interrupting active downloads.
+
+### 🔄 Real-Time Progress
+All job updates — speed, ETA, progress, state changes — stream to the browser via Server-Sent Events. No polling, no page refreshes.
+
+### 📦 Batch & Bulk Operations
+Submit up to 100 links at once. Select multiple jobs and pause, resume, cancel, retry, or delete them in a single action.
+
+### 🎬 Media Downloads
+- Auto-detects 1800+ supported platforms via yt-dlp
+- Presents available formats (4K, 1080p, 720p, audio-only) with codec info and estimated file sizes
 - Merges video + audio streams automatically using FFmpeg
+- Isolated temporary workspace with safe finalization to destination
 
-### Storage, Categories & File Lifecycle
-- **Per-Job Destinations**: Target specific download directories per job, snapshotting destination path at creation time.
-- **Download Categories**: Organize downloads with category folder mappings (relative to default download dir or absolute).
-- **Disk-Space Preflight**: Automatic free disk space validation before start/resume to prevent out-of-disk failures.
-- **Filename Conflict Policies**: Choose how collisions are handled for direct and media downloads (`rename`, `overwrite`, `fail`).
-- **Isolated Media Workspace**: Media downloads (yt-dlp/FFmpeg) process in an isolated temporary directory before safe finalization to destination.
+### 🌊 Torrent Support
+- Accepts magnet links and `.torrent` file uploads
+- Full file tree with per-file selection and priority control before starting
+- Live seeding statistics (upload speed, ratio, connected peers)
+- Five seeding policies: `none`, `unlimited`, `ratio`, `duration`, `ratio_or_duration`
 
-### Real-Time Progress
-All job updates (speed, ETA, progress percentage, state changes) stream to the browser in real time via Server-Sent Events. No polling, no page refreshes.
+### 🗂️ Storage & File Lifecycle
+- **Per-job destinations** with path snapshotting at creation time
+- **Download categories** with folder mappings (relative or absolute)
+- **Disk-space preflight** validation before start/resume
+- **Filename conflict policies**: `rename`, `overwrite`, or `fail`
+- **Safe deletion** with ownership verification — only files GoDownloader created are touched
 
-### Restart Recovery
-Active downloads are reattached after a restart. Queued jobs are preserved. Torrent jobs reconnect to the qBittorrent daemon automatically.
+### 🔒 Network & Protocol Controls (v0.7)
+- Global and per-job bandwidth limits (download + upload)
+- Proxy support (HTTP, HTTPS, SOCKS5) with per-engine capability awareness
+- Custom User-Agent, HTTP headers, retry/timeout controls
+- AES-256-GCM encryption for proxy passwords and sensitive headers
+- HTTP(S) tracker subscriptions with bounded refresh and transactional persistence
+- qBittorrent operations scoped exclusively to GoDownloader-owned hashes
 
-### Settings
-Configure max concurrent downloads from the UI or via environment variable. The setting is persisted in the database and takes effect immediately.
-
-### V0.7 Network and Protocol Controls
-
-- Normalized global and per-job bandwidth limits. `0` means unlimited; positive values are bytes per second.
-- Capability-driven proxy, User-Agent, HTTP header, retry, timeout, aria2 connection, torrent tracker, and seeding controls.
-- Five torrent seeding modes: `none`, `unlimited`, `ratio`, `duration`, and `ratio_or_duration`.
-- HTTP(S) tracker subscriptions with conditional refresh, 2 MiB/10,000-line bounds, four-worker concurrency, and transactional last-good entries.
-- AES-256-GCM encryption for proxy passwords and sensitive headers. APIs, SSE, logs, and UI responses expose only configured markers.
-- qBittorrent changes are restricted to hashes persisted for GoDownloader jobs. Managed daemon-global proxy settings are off by default and fail closed when the daemon contains unowned torrents.
-
-The global bandwidth setting follows truthful engine scope: aria2 applies an aggregate daemon limit, yt-dlp applies the effective limit to future processes, and qBittorrent projects it only to GoDownloader-owned torrents. It is not a strict cross-engine aggregate.
-
-| Control | Direct (aria2) | Media (yt-dlp) | Torrent (qBittorrent) |
-|---|---|---|---|
-| Pause/resume | Live | Unsupported | Live |
-| Download limit | Live | Startup-only | Live |
-| Upload limit | Unsupported | Unsupported | Live |
-| Proxy | Snapshot HTTP/system/disabled | Snapshot HTTP/HTTPS/SOCKS5 | Managed global HTTP/SOCKS5 opt-in |
-| Headers/retry/timeouts | Snapshot | Snapshot | Unsupported |
-| Trackers/seeding | Unsupported | Unsupported | Owned public torrents only |
-
-Tracker source URLs may intentionally target HTTP(S) loopback or private-network services. Userinfo, unsafe schemes, scheme-changing redirects, and more than five redirects are rejected.
+### 🛡️ Restart Recovery
+Active downloads reattach after server restart. Queued jobs are preserved. Torrent jobs automatically reconnect to the qBittorrent daemon.
 
 ---
 
@@ -105,37 +103,32 @@ Tracker source URLs may intentionally target HTTP(S) loopback or private-network
    aria2  yt-dlp  qBittorrent
 ```
 
-**Engine Router** automatically selects the right backend:
-- `http://` / `https://` → aria2
-- YouTube, Vimeo, media URLs → yt-dlp (+ FFmpeg for merging)
-- `magnet:` links / `.torrent` files → qBittorrent
-
 ---
 
 ## Prerequisites
 
 | Dependency | Version | Install |
 |---|---|---|
-| **Go** | 1.25+ | [go.dev](https://go.dev/dl/) |
+| **Go** | 1.25+ | [go.dev/dl](https://go.dev/dl/) |
 | **Node.js** | 18+ | [nodejs.org](https://nodejs.org/) |
 | **aria2** | any | `winget install aria2` · `brew install aria2` · `apt install aria2` |
 | **yt-dlp** | any | `winget install yt-dlp` · `brew install yt-dlp` · `pip install yt-dlp` |
 | **FFmpeg** | any | `winget install ffmpeg` · `brew install ffmpeg` · `apt install ffmpeg` |
-| **qBittorrent-nox** | 5.0+ | `apt install qbittorrent-nox` · [Docker](https://hub.docker.com/r/linuxserver/qbittorrent) · Desktop app with Web UI |
+| **qBittorrent** | 5.0+ | `apt install qbittorrent-nox` · [Docker](https://hub.docker.com/r/linuxserver/qbittorrent) · Desktop with Web UI |
 
-> **Note:** aria2 and qBittorrent run as background daemons. GoDownloader communicates with them over their local APIs — it does not bundle or manage these processes.
+> **Note:** aria2 and qBittorrent run as separate daemon processes. GoDownloader communicates with them over their local APIs — it does not bundle or manage these processes.
 
 ---
 
 ## Quick Start
 
-### 1. Start the daemons
+### 1. Start the external engines
 
 ```bash
 # aria2 RPC daemon
 aria2c --enable-rpc --rpc-listen-all=false --rpc-listen-port=6800 --rpc-allow-origin-all
 
-# qBittorrent Web API (in a separate terminal)
+# qBittorrent Web API (separate terminal)
 qbittorrent-nox --webui-port=8081
 ```
 
@@ -149,49 +142,58 @@ cd web && npm install && npm run build && cd ..
 go run ./cmd/server
 ```
 
-Open **http://localhost:8080** in your browser.
+### 3. Open the UI
+
+Navigate to **http://localhost:8080** in your browser.
 
 ---
 
 ## Development
 
-For frontend hot-reloading during development:
+### Local Development Setup
 
 ```bash
 # Terminal 1 — Go backend
 go run ./cmd/server
 
-# Terminal 2 — React dev server (proxies API to :8080)
+# Terminal 2 — React dev server with hot reload (proxies API to :8080)
 cd web && npm run dev
 ```
 
-Dev UI is at **http://localhost:5173**.
+Dev UI available at **http://localhost:5173**.
 
 ### Running Tests
 
 ```bash
-# All unit tests (isolated, fast, no live network calls)
+# Backend — all unit tests
 go test ./...
 
-# With race condition detection
+# Backend — with race condition detection
 go test -race ./...
 
-# Live yt-dlp integration tests (isolated behind integration tag)
-YTDLP_PATH="yt-dlp" FFMPEG_PATH="ffmpeg" FFPROBE_PATH="ffprobe" YTDLP_TEST_URL="https://example.com/media" go test -tags=integration -count=1 -v ./internal/engine/ytdlp
-
-# Frontend verification
-cd web && npm run typecheck && npm test && npm run build && npm run lint
+# Frontend — full verification suite
+cd web && npm run typecheck && npm test -- --run && npm run lint && npm run build
 ```
+
+### CI Pipeline
+
+Automated CI runs on every push and pull request against `main`:
+
+| Job | Checks |
+|---|---|
+| **Go Backend Verification** | `gofmt`, `go vet`, unit tests, race detector |
+| **Web Frontend Verification** | TypeScript typecheck, Vitest, linting, production build |
 
 ---
 
-## API
+## API Reference
 
-| Method | Endpoint | Purpose |
+### Jobs
+
+| Method | Endpoint | Description |
 |---|---|---|
-| **Jobs** | | |
-| `POST` | `/api/v1/jobs` | Create a single download job |
-| `POST` | `/api/v1/jobs/batch` | Submit multiple jobs at once |
+| `POST` | `/api/v1/jobs` | Create a download job |
+| `POST` | `/api/v1/jobs/batch` | Submit multiple jobs |
 | `POST` | `/api/v1/jobs/bulk` | Bulk pause / resume / cancel / retry |
 | `GET` | `/api/v1/jobs` | List all jobs |
 | `GET` | `/api/v1/jobs/{id}` | Get job details |
@@ -199,36 +201,53 @@ cd web && npm run typecheck && npm test && npm run build && npm run lint
 | `POST` | `/api/v1/jobs/{id}/resume` | Resume a job |
 | `POST` | `/api/v1/jobs/{id}/retry` | Retry a failed job |
 | `POST` | `/api/v1/jobs/{id}/cancel` | Cancel a job |
+| `DELETE` | `/api/v1/jobs/{id}` | Delete a job (with optional file removal) |
 | `PUT` | `/api/v1/jobs/{id}/priority` | Change priority lane |
-| **Torrents** | | |
+
+### Torrents
+
+| Method | Endpoint | Description |
+|---|---|---|
 | `POST` | `/api/v1/jobs/torrent` | Upload a `.torrent` file |
 | `GET` | `/api/v1/jobs/{id}/torrent/files` | Get torrent file list |
 | `POST` | `/api/v1/jobs/{id}/torrent/start` | Set file priorities and start |
 | `POST` | `/api/v1/jobs/{id}/stop-seeding` | Stop seeding |
-| `PUT` | `/api/v1/jobs/{id}/network` | Update supported live bandwidth limits |
-| `GET` | `/api/v1/jobs/{id}/capabilities` | Get normalized controls for a job |
 | `POST` | `/api/v1/jobs/{id}/torrent/trackers` | Add trackers to an owned public torrent |
-| `PUT` | `/api/v1/jobs/{id}/torrent/seeding-policy` | Update normalized seeding policy |
-| **Capabilities & Trackers** | | |
+| `PUT` | `/api/v1/jobs/{id}/torrent/seeding-policy` | Update seeding policy |
+
+### Network & Capabilities
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `PUT` | `/api/v1/jobs/{id}/network` | Update live bandwidth limits |
+| `GET` | `/api/v1/jobs/{id}/capabilities` | Get normalized controls for a job |
 | `GET` | `/api/v1/capabilities` | Get capability profiles |
-| `POST` | `/api/v1/capabilities/resolve` | Resolve a source or batch intersection |
-| `GET/POST` | `/api/v1/tracker-sources` | List or create tracker subscriptions |
-| `PUT/DELETE` | `/api/v1/tracker-sources/{id}` | Update or delete a subscription |
+| `POST` | `/api/v1/capabilities/resolve` | Resolve source or batch intersection |
+
+### Tracker Subscriptions
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/tracker-sources` | List tracker subscriptions |
+| `POST` | `/api/v1/tracker-sources` | Create a tracker subscription |
+| `PUT` | `/api/v1/tracker-sources/{id}` | Update a subscription |
+| `DELETE` | `/api/v1/tracker-sources/{id}` | Delete a subscription |
 | `POST` | `/api/v1/tracker-sources/{id}/refresh` | Refresh one subscription |
 | `POST` | `/api/v1/tracker-sources/refresh` | Refresh all enabled subscriptions |
-| **Categories** | | |
-| `GET` | `/api/v1/categories` | List all download categories |
-| `POST` | `/api/v1/categories` | Create a new download category |
-| `PUT` | `/api/v1/categories/{id}` | Update category name and directory |
-| `DELETE` | `/api/v1/categories/{id}` | Delete a category |
-| **Media** | | |
+
+### Media, Categories & Queue
+
+| Method | Endpoint | Description |
+|---|---|---|
 | `POST` | `/api/v1/jobs/{id}/format` | Select media format |
-| **Queue & Settings** | | |
+| `GET` | `/api/v1/categories` | List download categories |
+| `POST` | `/api/v1/categories` | Create a category |
+| `PUT` | `/api/v1/categories/{id}` | Update a category |
+| `DELETE` | `/api/v1/categories/{id}` | Delete a category |
 | `GET` | `/api/v1/queue` | Queue snapshot and capacity |
 | `PUT` | `/api/v1/queue/reorder` | Reorder jobs within a lane |
 | `GET` | `/api/v1/settings` | Get current settings |
 | `PUT` | `/api/v1/settings` | Update settings |
-| **Events** | | |
 | `GET` | `/api/v1/events` | SSE stream for live updates |
 
 ---
@@ -237,46 +256,89 @@ cd web && npm run typecheck && npm test && npm run build && npm run lint
 
 All settings are optional. Defaults work out of the box for a typical local setup.
 
+<details>
+<summary><strong>Core Settings</strong></summary>
+
 | Variable | Default | Description |
 |---|---|---|
-| `LISTEN_ADDR` | `127.0.0.1:8080` | Address the server listens on |
-| `MAX_CONCURRENT_DOWNLOADS` | — | Override max concurrent downloads (otherwise set via UI/DB, default 3) |
-| `DOWNLOAD_DIR` | `./downloads` | Where downloaded files are saved |
-| `TEMP_DIR` | `<DATA_DIR>/tmp` | Temporary working directory for media downloads |
-| `MIN_FREE_SPACE_BYTES` | `1073741824` (1 GiB) | Minimum free disk space reserve before download start |
-| `DEFAULT_CONFLICT_POLICY` | `rename` | Default filename conflict policy (`rename`, `overwrite`, `fail`) |
-| `DATA_DIR` | `./data` | Storage for `.torrent` files and app data |
+| `LISTEN_ADDR` | `127.0.0.1:8080` | Server listen address |
+| `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum simultaneous downloads |
+| `DOWNLOAD_DIR` | `./downloads` | Default download directory |
+| `DATA_DIR` | `./data` | Application data storage |
+| `TEMP_DIR` | `<DATA_DIR>/tmp` | Temporary workspace for media downloads |
+| `WEB_DIR` | `./web/dist` | Built frontend directory |
+| `MIN_FREE_SPACE_BYTES` | `1073741824` | Minimum free disk space reserve (1 GiB) |
+| `DEFAULT_CONFLICT_POLICY` | `rename` | Filename conflict policy: `rename`, `overwrite`, `fail` |
+
+</details>
+
+<details>
+<summary><strong>Engine Connections</strong></summary>
+
+| Variable | Default | Description |
+|---|---|---|
 | `ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` | aria2 JSON-RPC endpoint |
-| `ARIA2_SECRET` | — | aria2 RPC secret (if configured) |
+| `ARIA2_SECRET` | — | aria2 RPC secret |
 | `QBIT_URL` | `http://127.0.0.1:8081` | qBittorrent Web API address |
 | `QBIT_USERNAME` | `admin` | qBittorrent username |
 | `QBIT_PASSWORD` | — | qBittorrent password |
 | `QBIT_TIMEOUT` | `30` | qBittorrent request timeout (seconds) |
 | `YTDLP_PATH` | `yt-dlp` | Path to yt-dlp binary |
-| `FFMPEG_PATH` | `""` (empty string) | Path to FFmpeg binary; defaults to empty so yt-dlp searches PATH automatically |
-| `WEB_DIR` | `./web/dist` | Directory serving the built frontend |
-| `V0.7_SETTINGS_ENCRYPTION_KEY` | — | Base64 32-byte or 64-character hex AES key for persisted secrets |
-| `GLOBAL_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Engine-scoped global download limit |
-| `DEFAULT_TORRENT_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Default owned-torrent download limit |
-| `DEFAULT_TORRENT_UPLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Default owned-torrent upload limit |
+| `FFMPEG_PATH` | `""` | Path to FFmpeg binary (empty = auto-detect via PATH) |
+
+</details>
+
+<details>
+<summary><strong>Network & Security</strong></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `GLOBAL_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Global download limit (0 = unlimited) |
+| `DEFAULT_TORRENT_DOWNLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Default per-torrent download limit |
+| `DEFAULT_TORRENT_UPLOAD_LIMIT_BYTES_PER_SECOND` | `0` | Default per-torrent upload limit |
 | `DEFAULT_PROXY_MODE` | `disabled` | `disabled`, `system`, or `custom` |
-| `DEFAULT_PROXY_PROTOCOL` | — | `http`, `https`, or `socks5` where supported |
+| `DEFAULT_PROXY_PROTOCOL` | — | `http`, `https`, or `socks5` |
 | `DEFAULT_PROXY_HOST` / `DEFAULT_PROXY_PORT` | — | Custom proxy endpoint |
-| `DEFAULT_PROXY_USERNAME` / `DEFAULT_PROXY_PASSWORD` | — | Proxy credentials; environment passwords are not copied to SQLite |
+| `DEFAULT_PROXY_USERNAME` / `DEFAULT_PROXY_PASSWORD` | — | Proxy credentials |
 | `DEFAULT_NO_PROXY` | — | Comma-separated proxy bypass list |
-| `DEFAULT_USER_AGENT` | — | Default normalized User-Agent |
-| `DEFAULT_MAX_ATTEMPTS` | `0` | Engine default at `0`; otherwise 1–100 attempts |
-| `DEFAULT_RETRY_WAIT_SECONDS` | `0` | Retry wait, 0–3600 seconds |
-| `DEFAULT_CONNECT_TIMEOUT_SECONDS` | `0` | Connect timeout, `0` or 1–86400 seconds |
-| `DEFAULT_REQUEST_TIMEOUT_SECONDS` | `0` | Request timeout, `0` or 1–86400 seconds |
-| `DEFAULT_ARIA2_SPLIT` | `5` | aria2 split count, 1–16 |
-| `DEFAULT_ARIA2_MAX_CONNECTIONS_PER_SERVER` | `1` | aria2 connections/server, 1–16 |
-| `DEFAULT_ARIA2_MIN_SPLIT_SIZE_BYTES` | `20971520` | aria2 minimum split, 1 MiB–1 GiB |
-| `DEFAULT_SEEDING_MODE` | `none` | `none`, `unlimited`, `ratio`, `duration`, or `ratio_or_duration` |
-| `DEFAULT_SEED_RATIO` | — | Ratio threshold required by ratio modes |
-| `DEFAULT_SEED_TIME_SECONDS` | — | Active seeding-time threshold required by duration modes |
-| `TRACKER_AUTO_APPLY` | `false` | Snapshot enabled tracker entries into new public torrents |
-| `MANAGE_QBIT_GLOBAL_NETWORK_SETTINGS` | `false` | Dedicated-daemon opt-in for verified qB proxy management |
+| `DEFAULT_USER_AGENT` | — | Default User-Agent |
+| `V0.7_SETTINGS_ENCRYPTION_KEY` | — | AES-256-GCM key for persisted secrets |
+| `MANAGE_QBIT_GLOBAL_NETWORK_SETTINGS` | `false` | Opt-in for managed qBittorrent proxy settings |
+
+</details>
+
+<details>
+<summary><strong>Download Tuning</strong></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEFAULT_MAX_ATTEMPTS` | `0` | Retry attempts (0 = engine default) |
+| `DEFAULT_RETRY_WAIT_SECONDS` | `0` | Wait between retries (0–3600s) |
+| `DEFAULT_CONNECT_TIMEOUT_SECONDS` | `0` | Connection timeout (0 = engine default) |
+| `DEFAULT_REQUEST_TIMEOUT_SECONDS` | `0` | Request timeout (0 = engine default) |
+| `DEFAULT_ARIA2_SPLIT` | `5` | aria2 split count (1–16) |
+| `DEFAULT_ARIA2_MAX_CONNECTIONS_PER_SERVER` | `1` | aria2 connections per server (1–16) |
+| `DEFAULT_ARIA2_MIN_SPLIT_SIZE_BYTES` | `20971520` | aria2 minimum split size (1 MiB–1 GiB) |
+| `DEFAULT_SEEDING_MODE` | `none` | Seeding policy: `none`, `unlimited`, `ratio`, `duration`, `ratio_or_duration` |
+| `DEFAULT_SEED_RATIO` | — | Ratio threshold for ratio-based modes |
+| `DEFAULT_SEED_TIME_SECONDS` | — | Time threshold for duration-based modes |
+| `TRACKER_AUTO_APPLY` | `false` | Auto-apply tracker entries to new public torrents |
+
+</details>
+
+---
+
+## Engine Capability Matrix
+
+| Control | Direct (aria2) | Media (yt-dlp) | Torrent (qBittorrent) |
+|---|---|---|---|
+| Pause / Resume | ✅ Live | ❌ | ✅ Live |
+| Download Limit | ✅ Live | ⚡ Startup-only | ✅ Live |
+| Upload Limit | ❌ | ❌ | ✅ Live |
+| Delete with Files | ✅ Ownership-verified | ✅ Ownership-verified | ✅ Selected-only |
+| Proxy | Snapshot HTTP | Snapshot HTTP/HTTPS/SOCKS5 | Managed global opt-in |
+| Headers / Retry / Timeouts | Snapshot | Snapshot | ❌ |
+| Trackers / Seeding | ❌ | ❌ | ✅ Owned torrents only |
 
 ---
 
@@ -284,28 +346,30 @@ All settings are optional. Defaults work out of the box for a typical local setu
 
 ```
 GoDownloader/
-├── cmd/server/           Entry point
+├── cmd/server/              Application entry point
 ├── internal/
-│   ├── api/              HTTP handlers and routing
-│   ├── config/           Environment and configuration
-│   ├── database/         SQLite storage and migrations
-│   ├── engine/           Engine registry and adapters
-│   │   ├── aria2/          aria2 RPC client
-│   │   ├── ytdlp/          yt-dlp runner and format analyzer
-│   │   └── qbittorrent/    qBittorrent Web API client
-│   ├── events/           Event bus and SSE handler
-│   ├── job/              Job state machine, scheduler, and recovery
-│   ├── settings/         App settings persistence
-│   ├── networkpolicy/    Normalized capability and policy validation
-│   ├── securestore/      Field-bound AES-256-GCM secret storage
-│   ├── tracker/          Bounded tracker subscription refresh
-│   └── storage/          Storage resolution, disk preflight, and file lifecycle
-├── web/src/              React frontend
-│   ├── components/         UI components
-│   ├── api.ts              API client
-│   └── types.ts            TypeScript types
-├── downloads/            Default download directory
-└── data/                 Application data
+│   ├── api/                 HTTP handlers and REST routing
+│   ├── config/              Environment and configuration loading
+│   ├── database/            SQLite storage, migrations, and repositories
+│   ├── engine/              Engine registry and adapters
+│   │   ├── aria2/             aria2 JSON-RPC client
+│   │   ├── ytdlp/             yt-dlp process runner and format analyzer
+│   │   └── qbittorrent/       qBittorrent Web API client
+│   ├── events/              Event bus and SSE handler
+│   ├── job/                 Job state machine, scheduler, queue, and recovery
+│   ├── networkpolicy/       Capability profiles and policy validation
+│   ├── securestore/         Field-bound AES-256-GCM secret storage
+│   ├── settings/            Application settings persistence
+│   ├── storage/             Storage resolution, disk preflight, and file lifecycle
+│   └── tracker/             Bounded tracker subscription management
+├── web/
+│   └── src/
+│       ├── components/      React UI components
+│       ├── hooks/           Custom React hooks
+│       ├── api.ts           API client
+│       └── App.tsx          Application root
+├── .github/workflows/       CI pipeline definitions
+└── go.mod                   Go module definition
 ```
 
 ---
