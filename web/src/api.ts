@@ -20,6 +20,8 @@ import type {
   SeedingPolicy,
   JobCapabilities,
   TrackerSource,
+  MediaAuthSettings,
+  UpdateMediaAuthPayload,
 } from './types';
 
 const API_BASE = '/api/v1';
@@ -342,4 +344,35 @@ export async function refreshAllTrackerSources(): Promise<{ failureCount: number
 export async function stopSeeding(jobId: string): Promise<Job> {
   const res = await fetch(`${API_BASE}/jobs/${jobId}/stop-seeding`, { method: 'POST' });
   return handleResponse<Job>(res);
+}
+
+export async function getMediaAuth(): Promise<MediaAuthSettings> {
+  const res = await fetch(`${API_BASE}/media-auth`);
+  return handleResponse<MediaAuthSettings>(res);
+}
+
+export async function updateMediaAuth(payload: UpdateMediaAuthPayload): Promise<MediaAuthSettings> {
+  const res = await fetch(`${API_BASE}/media-auth`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<MediaAuthSettings>(res);
+}
+
+export async function importMediaCookies(file: File): Promise<MediaAuthSettings> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/media-auth/cookies`, {
+    method: 'POST',
+    body: formData,
+  });
+  return handleResponse<MediaAuthSettings>(res);
+}
+
+export async function deleteMediaCookies(): Promise<MediaAuthSettings> {
+  const res = await fetch(`${API_BASE}/media-auth/cookies`, {
+    method: 'DELETE',
+  });
+  return handleResponse<MediaAuthSettings>(res);
 }

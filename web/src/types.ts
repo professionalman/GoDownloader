@@ -382,6 +382,21 @@ export interface SelectFormatRequest {
   formatId: string;
 }
 
+export type MediaAuthMode = 'none' | 'browser' | 'cookie_file';
+
+export interface MediaAuthSettings {
+  mode: MediaAuthMode;
+  browser?: string;
+  profile?: string;
+  hasCookieFile: boolean;
+}
+
+export interface UpdateMediaAuthPayload {
+  mode: MediaAuthMode;
+  browser?: string;
+  profile?: string;
+}
+
 export interface ApiError {
   error: {
     code: string;

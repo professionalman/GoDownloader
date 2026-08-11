@@ -5,10 +5,12 @@ on:
     branches:
       - main
       - feat/v0.7-lovable-integration
+      - feat/v0.7.1-authenticated-media
   pull_request:
     branches:
       - main
       - feat/v0.7-lovable-integration
+      - feat/v0.7.1-authenticated-media
 
 jobs:
   backend:

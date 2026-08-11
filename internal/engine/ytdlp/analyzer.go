@@ -43,8 +43,23 @@ func (e *Engine) Analyze(ctx context.Context, url string) (*job.MediaInfo, error
 	return e.AnalyzeWithPolicy(ctx, url, nil)
 }
 
-// AnalyzeWithPolicy applies server-resolved network controls without exposing raw flags.
+// AnalyzeWithPolicy applies server-resolved network controls and media authentication without exposing raw flags.
 func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *networkpolicy.RuntimePolicy) (*job.MediaInfo, error) {
+	var authArgs []string
+	cleanup := func() {}
+	e.mu.RLock()
+	provider := e.authProvider
+	e.mu.RUnlock()
+
+	if provider != nil {
+		var err error
+		authArgs, cleanup, err = provider.PrepareAuthArgs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("media auth preparation failed: %w", err)
+		}
+	}
+	defer cleanup()
+
 	args := []string{
 		"--dump-json",
 		"--no-download",
@@ -56,6 +71,7 @@ func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *netw
 		args = append(args, "--ffmpeg-location", e.ffmpegPath)
 	}
 	args = appendNetworkArgs(args, policy)
+	args = append(args, authArgs...)
 
 	args = append(args, url)
 

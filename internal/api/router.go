@@ -11,6 +11,7 @@ import (
 	"downloader/internal/config"
 	"downloader/internal/events"
 	"downloader/internal/job"
+	"downloader/internal/mediaauth"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
 	"downloader/internal/tracker"
@@ -26,6 +27,8 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 			h.SetCategoryRepository(value)
 		case *tracker.Service:
 			h.SetTrackerService(value)
+		case *mediaauth.Service:
+			h.SetMediaAuthService(value)
 		}
 	}
 
@@ -56,6 +59,11 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/categories", h.CreateCategory).Methods("POST")
 	api.HandleFunc("/categories/{id}", h.UpdateCategory).Methods("PUT")
 	api.HandleFunc("/categories/{id}", h.DeleteCategory).Methods("DELETE")
+
+	api.HandleFunc("/media-auth", h.GetMediaAuth).Methods("GET")
+	api.HandleFunc("/media-auth", h.UpdateMediaAuth).Methods("PUT")
+	api.HandleFunc("/media-auth/cookies", h.ImportMediaCookies).Methods("POST")
+	api.HandleFunc("/media-auth/cookies", h.DeleteMediaCookies).Methods("DELETE")
 
 	api.HandleFunc("/queue", h.GetQueueSnapshot).Methods("GET")
 	api.HandleFunc("/queue/reorder", h.ReorderQueue).Methods("PUT")

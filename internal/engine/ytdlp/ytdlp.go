@@ -37,8 +37,9 @@ var (
 
 // Engine implements job.IEngine and job.IMediaAnalyzer for yt-dlp.
 type Engine struct {
-	ytdlpPath  string
-	ffmpegPath string
+	ytdlpPath    string
+	ffmpegPath   string
+	authProvider job.IMediaAuthProvider
 
 	mu        sync.RWMutex
 	downloads map[string]*downloadState // keyed by job ID
@@ -54,6 +55,13 @@ func NewEngine(ytdlpPath, ffmpegPath string) *Engine {
 		ffmpegPath: ffmpegPath,
 		downloads:  make(map[string]*downloadState),
 	}
+}
+
+// SetAuthProvider configures the media authentication provider.
+func (e *Engine) SetAuthProvider(provider job.IMediaAuthProvider) {
+	e.mu.Lock()
+	e.authProvider = provider
+	e.mu.Unlock()
 }
 
 func (e *Engine) Capabilities() networkpolicy.EngineCapabilities {
@@ -82,6 +90,20 @@ func (e *Engine) Available() bool {
 
 // Start begins a new yt-dlp download. The engine ID is the job ID itself.
 func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {
+	var authArgs []string
+	cleanup := func() {}
+	e.mu.RLock()
+	provider := e.authProvider
+	e.mu.RUnlock()
+
+	if provider != nil {
+		var err error
+		authArgs, cleanup, err = provider.PrepareAuthArgs(ctx)
+		if err != nil {
+			return "", fmt.Errorf("media auth preparation failed: %w", err)
+		}
+	}
+
 	// Build command arguments
 	args := []string{
 		"--newline", // Force progress on new lines
@@ -98,6 +120,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 		args = append(args, "--ffmpeg-location", e.ffmpegPath)
 	}
 	args = appendNetworkArgs(args, j.RuntimeNetworkPolicy())
+	args = append(args, authArgs...)
 
 	// Apply format selection if specified (pairing video-only selections with bestaudio)
 	args = append(args, "-f", buildFormatSelector(j))
@@ -116,7 +139,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	e.mu.Unlock()
 
 	// Launch download in background goroutine
-	go e.runDownload(dlCtx, j.ID, state, downloadDir, args)
+	go e.runDownload(dlCtx, j.ID, state, downloadDir, args, cleanup)
 
 	return j.ID, nil
 }
@@ -423,7 +446,10 @@ func (e *Engine) handleYTDLPLine(jobID string, state *downloadState, line string
 }
 
 // runDownload executes yt-dlp and parses its output in real-time.
-func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, downloadDir string, args []string) {
+func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, downloadDir string, args []string, cleanup func()) {
+	if cleanup != nil {
+		defer cleanup()
+	}
 	cmd := exec.CommandContext(ctx, e.ytdlpPath, args...)
 
 	stdout, err := cmd.StdoutPipe()

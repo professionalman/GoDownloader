@@ -4,6 +4,7 @@ import {
   FolderTree,
   Gauge,
   HardDrive,
+  KeyRound,
   Lock,
   Magnet,
   Network,
@@ -19,6 +20,7 @@ import { createCategory, deleteCategory, getCategories, updateCategory } from '.
 import type { AppSettings, Category, FilenameConflictPolicy, UpdateSettingsPayload } from '../types';
 import { cx } from '../downloadUi';
 import { PowerSettingsPanel } from './PowerSettingsPanel';
+import { MediaAuthPanel } from './MediaAuthPanel';
 
 interface SettingsPanelProps {
   settings: AppSettings | null;
@@ -26,12 +28,13 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-type SettingsSection = 'general' | 'storage' | 'categories' | 'network' | 'direct' | 'torrents' | 'trackers' | 'dependencies';
+type SettingsSection = 'general' | 'storage' | 'categories' | 'media-auth' | 'network' | 'direct' | 'torrents' | 'trackers' | 'dependencies';
 
 const sections: Array<{ id: SettingsSection; label: string; icon: typeof Settings2 }> = [
   { id: 'general', label: 'General', icon: Settings2 },
   { id: 'storage', label: 'Storage', icon: HardDrive },
   { id: 'categories', label: 'Categories', icon: FolderTree },
+  { id: 'media-auth', label: 'Media Auth', icon: KeyRound },
   { id: 'network', label: 'Network', icon: Network },
   { id: 'direct', label: 'Direct Downloads', icon: ArrowDownToLine },
   { id: 'torrents', label: 'Torrents', icon: Magnet },
@@ -224,6 +227,8 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
                 </div>
               </div>
             )}
+
+            {section === 'media-auth' && <MediaAuthPanel />}
 
             {powerSection && <PowerSettingsPanel settings={settings} onSave={onSave} activeSection={section} />}
 

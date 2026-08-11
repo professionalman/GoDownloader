@@ -90,6 +90,11 @@ type INetworkMediaAnalyzer interface {
 	AnalyzeWithPolicy(ctx context.Context, url string, policy *networkpolicy.RuntimePolicy) (*MediaInfo, error)
 }
 
+// IMediaAuthProvider is optionally provided to engines to supply runtime authentication arguments (e.g. cookies).
+type IMediaAuthProvider interface {
+	PrepareAuthArgs(ctx context.Context) (args []string, cleanup func(), err error)
+}
+
 // IMediaAnalyzer is optionally implemented by engines that can extract media metadata.
 type IMediaAnalyzer interface {
 	// Analyze extracts media information from a URL without downloading.

@@ -19,6 +19,7 @@ import (
 	"downloader/internal/engine/ytdlp"
 	"downloader/internal/events"
 	"downloader/internal/job"
+	"downloader/internal/mediaauth"
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
@@ -28,7 +29,7 @@ import (
 func main() {
 	cfg := config.New()
 
-	log.Printf("Download Manager V0.7")
+	log.Printf("Download Manager V0.7.1")
 	log.Printf("Listen: %s", cfg.ListenAddr)
 	log.Printf("Download dir: %s", cfg.DownloadDir)
 	log.Printf("Aria2 RPC: %s", cfg.Aria2RPCURL)
@@ -61,6 +62,12 @@ func main() {
 	secretStore := securestore.NewStore(secretRepo, cipher)
 	settingsService := settings.NewSettingsService(settingsRepo, cfg.DownloadDir, cfg.DataDir, secretStore)
 
+	// Initialize media auth service & perform startup stale temp cleanup
+	mediaAuthService := mediaauth.NewService(settingsRepo, secretStore, filepath.Join(cfg.DataDir, "tmp", "auth"))
+	if err := mediaAuthService.CleanupStaleTempFiles(); err != nil {
+		log.Printf("media auth startup cleanup: %v", err)
+	}
+
 	// Initialize storage service
 	storageService := storage.NewStorageService(catRepo, settingsService, storage.NewOSFreeSpaceProvider(), cfg.DownloadDir, cfg.DataDir)
 
@@ -73,6 +80,7 @@ func main() {
 
 	// Initialize yt-dlp engine if available
 	ytdlpEng := ytdlp.NewEngine(cfg.YtdlpPath, cfg.FFmpegPath)
+	ytdlpEng.SetAuthProvider(mediaAuthService)
 	if ytdlpEng.Available() {
 		registry.Register("ytdlp", ytdlpEng)
 		log.Printf("yt-dlp engine: available")
@@ -116,7 +124,7 @@ func main() {
 	defer manager.Stop()
 
 	// Setup router
-	router := api.NewRouter(cfg, manager, sseHandler, settingsService, catRepo, trackerService)
+	router := api.NewRouter(cfg, manager, sseHandler, settingsService, catRepo, trackerService, mediaAuthService)
 
 	// Start server
 	server := &http.Server{

@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"downloader/internal/job"
+	"downloader/internal/mediaauth"
 	"downloader/internal/networkpolicy"
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
@@ -53,6 +54,7 @@ type Handler struct {
 	settings     *settings.SettingsService
 	categoryRepo storage.ICategoryRepository
 	trackers     *tracker.Service
+	mediaAuth    *mediaauth.Service
 }
 
 // NewHandler creates a new API handler.
@@ -71,6 +73,10 @@ func (h *Handler) SetSettingsService(s *settings.SettingsService) {
 
 func (h *Handler) SetTrackerService(service *tracker.Service) {
 	h.trackers = service
+}
+
+func (h *Handler) SetMediaAuthService(service *mediaauth.Service) {
+	h.mediaAuth = service
 }
 
 // CreateJob handles POST /api/v1/jobs
@@ -646,4 +652,95 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, st)
+}
+
+// GetMediaAuth handles GET /api/v1/media-auth
+func (h *Handler) GetMediaAuth(w http.ResponseWriter, r *http.Request) {
+	if h.mediaAuth == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "media auth service unavailable")
+		return
+	}
+	res, err := h.mediaAuth.GetSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// UpdateMediaAuth handles PUT /api/v1/media-auth
+func (h *Handler) UpdateMediaAuth(w http.ResponseWriter, r *http.Request) {
+	if h.mediaAuth == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "media auth service unavailable")
+		return
+	}
+	var req mediaauth.UpdateSettingsRequest
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "invalid request body")
+		return
+	}
+	res, err := h.mediaAuth.UpdateSettings(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, mediaauth.ErrNoCookieFile) || errors.Is(err, mediaauth.ErrInvalidMode) {
+			writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// ImportMediaCookies handles POST /api/v1/media-auth/cookies
+func (h *Handler) ImportMediaCookies(w http.ResponseWriter, r *http.Request) {
+	if h.mediaAuth == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "media auth service unavailable")
+		return
+	}
+
+	// Limit request size to 10 MiB + 2 KiB multipart overhead
+	r.Body = http.MaxBytesReader(w, r.Body, mediaauth.MaxCookieFileSize+2048)
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "cookie file is required in 'file' form field")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, mediaauth.MaxCookieFileSize+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, "failed to read uploaded cookie file")
+		return
+	}
+	if len(data) > mediaauth.MaxCookieFileSize {
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, fmt.Sprintf("cookie file exceeds maximum allowed size of %d bytes", mediaauth.MaxCookieFileSize))
+		return
+	}
+
+	res, err := h.mediaAuth.ImportCookies(r.Context(), data)
+	if err != nil {
+		if errors.Is(err, mediaauth.ErrSecretStorageUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, job.ErrSecretStorageUnavailable, "secret storage is unavailable; cannot securely store cookies")
+			return
+		}
+		writeError(w, http.StatusBadRequest, job.ErrInvalidRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
+// DeleteMediaCookies handles DELETE /api/v1/media-auth/cookies
+func (h *Handler) DeleteMediaCookies(w http.ResponseWriter, r *http.Request) {
+	if h.mediaAuth == nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "media auth service unavailable")
+		return
+	}
+	res, err := h.mediaAuth.DeleteCookies(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
