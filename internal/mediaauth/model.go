@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -91,8 +92,8 @@ func ValidateProfile(profile string) (string, error) {
 }
 
 // NormalizeCookieFile validates and normalizes Netscape/Mozilla cookie file data.
-// It strips UTF-8 BOM, removes leading blank lines, ensures the Netscape header is the first physical line,
-// preserves cookie entries (including #HttpOnly_ prefixes), and ensures at least one valid cookie entry is present.
+// It strips UTF-8 BOM, removes leading blank lines, ensures the canonical Netscape header is the first physical line,
+// preserves cookie entries (including #HttpOnly_ prefixes), and enforces strict 7-field Netscape row validation.
 func NormalizeCookieFile(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("cookie file is empty")
@@ -129,31 +130,39 @@ func NormalizeCookieFile(data []byte) ([]byte, error) {
 				continue
 			}
 
-			lowerHeader := strings.ToLower(trimmed)
-			if !strings.HasPrefix(lowerHeader, "# netscape http cookie file") &&
-				!strings.HasPrefix(lowerHeader, "# http cookie file") {
+			var canonicalHeader string
+			if strings.EqualFold(trimmed, "# Netscape HTTP Cookie File") {
+				canonicalHeader = "# Netscape HTTP Cookie File"
+			} else if strings.EqualFold(trimmed, "# HTTP Cookie File") {
+				canonicalHeader = "# HTTP Cookie File"
+			} else {
 				return nil, errors.New("invalid cookie file format: must be a Netscape/Mozilla HTTP cookie file starting with '# Netscape HTTP Cookie File' or '# HTTP Cookie File'")
 			}
 
 			headerFound = true
-			normalizedLines = append(normalizedLines, line)
+			normalizedLines = append(normalizedLines, canonicalHeader)
 			continue
 		}
 
 		// Header is found, process subsequent lines
-		normalizedLines = append(normalizedLines, line)
-
 		if trimmed == "" {
+			normalizedLines = append(normalizedLines, "")
 			continue
 		}
 
-		// Check if this line is a valid cookie data row (either non-comment or #HttpOnly_ prefixed)
-		if !strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "#HttpOnly_") {
-			fields := strings.Split(trimmed, "\t")
-			if len(fields) >= 4 || strings.Contains(trimmed, "\t") || len(strings.Fields(trimmed)) >= 4 {
-				hasCookieEntry = true
-			}
+		// Check if this line is a comment line (starts with # but NOT #HttpOnly_)
+		if strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "#HttpOnly_") {
+			normalizedLines = append(normalizedLines, line)
+			continue
 		}
+
+		// Validate cookie data row (either non-comment or #HttpOnly_ prefixed)
+		if err := validateCookieRow(line); err != nil {
+			return nil, err
+		}
+
+		hasCookieEntry = true
+		normalizedLines = append(normalizedLines, line)
 	}
 
 	if !headerFound {
@@ -170,6 +179,52 @@ func NormalizeCookieFile(data []byte) ([]byte, error) {
 	}
 
 	return []byte(normalized), nil
+}
+
+// validateCookieRow validates that a line conforms to the standard 7 tab-delimited Netscape cookie row format.
+// Format: domain \t includeSubdomains \t path \t secure \t expires \t name \t value
+func validateCookieRow(line string) error {
+	fields := strings.Split(line, "\t")
+	if len(fields) != 7 {
+		return fmt.Errorf("invalid cookie line: expected 7 tab-separated fields, got %d", len(fields))
+	}
+
+	domain := fields[0]
+	if strings.HasPrefix(domain, "#HttpOnly_") {
+		domain = strings.TrimPrefix(domain, "#HttpOnly_")
+	}
+	if strings.TrimSpace(domain) == "" {
+		return errors.New("invalid cookie line: empty domain")
+	}
+
+	includeSub := strings.ToUpper(strings.TrimSpace(fields[1]))
+	if includeSub != "TRUE" && includeSub != "FALSE" {
+		return errors.New("invalid cookie line: includeSubdomains must be TRUE or FALSE")
+	}
+
+	path := strings.TrimSpace(fields[2])
+	if path == "" {
+		return errors.New("invalid cookie line: empty path")
+	}
+
+	secure := strings.ToUpper(strings.TrimSpace(fields[3]))
+	if secure != "TRUE" && secure != "FALSE" {
+		return errors.New("invalid cookie line: secure flag must be TRUE or FALSE")
+	}
+
+	expiresStr := strings.TrimSpace(fields[4])
+	expires, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil || expires < 0 {
+		return errors.New("invalid cookie line: expires must be a valid non-negative integer")
+	}
+
+	name := strings.TrimSpace(fields[5])
+	if name == "" {
+		return errors.New("invalid cookie line: empty cookie name")
+	}
+
+	// fields[6] is the cookie value, which can be empty or non-empty
+	return nil
 }
 
 // ValidateCookieFile validates that data is a valid Netscape/Mozilla format cookie file.

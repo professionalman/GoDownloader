@@ -323,8 +323,18 @@ func TestMediaAuth_ValidNetscapeFormatAndNormalization(t *testing.T) {
 			firstRow: "# Netscape HTTP Cookie File",
 		},
 		{
+			name:     "Leading spaces on header normalized to canonical header",
+			input:    "   # Netscape HTTP Cookie File   \r\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
+			firstRow: "# Netscape HTTP Cookie File",
+		},
+		{
 			name:     "HttpOnly cookies preserved and recognized as valid cookie entries",
 			input:    "# Netscape HTTP Cookie File\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t2147483647\ttoken\tsecret123\n",
+			firstRow: "# Netscape HTTP Cookie File",
+		},
+		{
+			name:     "Empty cookie value accepted in valid 7-field row",
+			input:    "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tlogged_in\t\n",
 			firstRow: "# Netscape HTTP Cookie File",
 		},
 	}
@@ -353,19 +363,12 @@ func TestMediaAuth_ImportNormalizesTempFile(t *testing.T) {
 	store := securestore.NewStore(secretRepo, testCipher(t))
 	svc := NewService(repo, store, t.TempDir())
 
-	rawInput := "\xef\xbb\xbf\r\n\r\n\n# Netscape HTTP Cookie File\r\n.example.com\tTRUE\t/\tTRUE\t2147483647\tauth_key\tval123\r\n"
+	rawInput := "\xef\xbb\xbf\r\n\r\n\n   # Netscape HTTP Cookie File   \r\n.example.com\tTRUE\t/\tTRUE\t2147483647\tauth_key\tval123\r\n"
 
 	_, err := svc.ImportCookies(context.Background(), []byte(rawInput))
 	if err != nil {
 		t.Fatalf("import failed: %v", err)
 	}
-
-	// Prepare auth args to materialize temp file
-	_, cleanup, err := svc.PrepareAuthArgs(context.Background())
-	if err != nil {
-		t.Fatalf("prepare auth args failed: %v", err)
-	}
-	defer cleanup()
 
 	// Update mode to cookie_file so PrepareAuthArgs materializes temp file
 	_, err = svc.UpdateSettings(context.Background(), UpdateSettingsRequest{Mode: ModeCookieFile})
@@ -373,11 +376,11 @@ func TestMediaAuth_ImportNormalizesTempFile(t *testing.T) {
 		t.Fatalf("update settings failed: %v", err)
 	}
 
-	args, cleanup2, err := svc.PrepareAuthArgs(context.Background())
+	args, cleanup, err := svc.PrepareAuthArgs(context.Background())
 	if err != nil {
 		t.Fatalf("prepare auth args in cookie_file mode failed: %v", err)
 	}
-	defer cleanup2()
+	defer cleanup()
 
 	if len(args) != 2 || args[0] != "--cookies" {
 		t.Fatalf("expected --cookies flag, got %v", args)
@@ -390,7 +393,7 @@ func TestMediaAuth_ImportNormalizesTempFile(t *testing.T) {
 	}
 
 	if !strings.HasPrefix(string(content), "# Netscape HTTP Cookie File\n") {
-		t.Fatalf("materialized temp file must start with '# Netscape HTTP Cookie File\\n', got: %q", string(content))
+		t.Fatalf("materialized temp file must start with canonical '# Netscape HTTP Cookie File\\n', got: %q", string(content))
 	}
 	if content[0] != '#' {
 		t.Fatalf("first byte must be '#', got %q", content[0])
@@ -422,6 +425,20 @@ func TestMediaAuth_InvalidFormatRejected(t *testing.T) {
 		"# Some random comment\nnot a cookie header",
 		"# Netscape HTTP Cookie File\n# Header only with no cookie entries\n# More comments\n",
 		"# HTTP Cookie File\n\n\n",
+		// Suffix garbage on header line
+		"# Netscape HTTP Cookie File garbage\n.example.com\tTRUE\t/\tTRUE\t2147483647\tk\tv\n",
+		"# HTTP Cookie File with extra stuff\n.example.com\tTRUE\t/\tTRUE\t2147483647\tk\tv\n",
+		// Malformed tab rows
+		"# Netscape HTTP Cookie File\nfoo\tbar\n",
+		"# Netscape HTTP Cookie File\na\tb\tc\td\n",
+		"# Netscape HTTP Cookie File\ndomain\tTRUE\t/\tTRUE\n",
+		"# Netscape HTTP Cookie File\n.example.com\tINVALID\t/\tTRUE\t0\tk\tv\n",
+		"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tINVALID\t0\tk\tv\n",
+		"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t-1\tk\tv\n",
+		"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\tnotanumber\tk\tv\n",
+		"# Netscape HTTP Cookie File\n\tTRUE\t/\tTRUE\t0\tk\tv\n",
+		"# Netscape HTTP Cookie File\n.example.com\tTRUE\t\tTRUE\t0\tk\tv\n",
+		"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\t\tv\n",
 	}
 	for _, inv := range invalids {
 		if err := ValidateCookieFile([]byte(inv)); err == nil {
@@ -443,6 +460,14 @@ func TestMediaAuth_OversizedFileRejected(t *testing.T) {
 type errorSettingsRepo struct {
 	fakeSettingsRepo
 	setErr error
+	getErr error
+}
+
+func (r *errorSettingsRepo) Get(ctx context.Context, key string) (string, error) {
+	if r.getErr != nil {
+		return "", r.getErr
+	}
+	return r.fakeSettingsRepo.Get(ctx, key)
 }
 
 func (r *errorSettingsRepo) Set(ctx context.Context, key, value string) error {
@@ -455,6 +480,7 @@ func (r *errorSettingsRepo) Set(ctx context.Context, key, value string) error {
 type errorSecretRepo struct {
 	fakeSecretRepo
 	deleteErr error
+	hasErr    error
 }
 
 func (r *errorSecretRepo) DeleteSecret(ctx context.Context, scope, owner, field string) error {
@@ -462,6 +488,13 @@ func (r *errorSecretRepo) DeleteSecret(ctx context.Context, scope, owner, field 
 		return r.deleteErr
 	}
 	return r.fakeSecretRepo.DeleteSecret(ctx, scope, owner, field)
+}
+
+func (r *errorSecretRepo) HasSecret(ctx context.Context, scope, owner, field string) (bool, error) {
+	if r.hasErr != nil {
+		return false, r.hasErr
+	}
+	return r.fakeSecretRepo.HasSecret(ctx, scope, owner, field)
 }
 
 // 2b. DeleteCookies failure injection tests
@@ -517,6 +550,91 @@ func TestMediaAuth_DeleteCookiesFailures(t *testing.T) {
 			t.Fatalf("expected nil result on failure, got %+v", res)
 		}
 	})
+}
+
+// 2c. Unavailable cipher allows deletion and reports presence truthfully (Requirements 1 & 2 & 5.G)
+func TestMediaAuth_DeleteCookiesWithUnavailableCipher(t *testing.T) {
+	settingsRepo := newFakeSettingsRepo()
+	secretRepo := newFakeSecretRepo()
+
+	// 1 & 2. Use a valid cipher/store to import cookies
+	validStore := securestore.NewStore(secretRepo, testCipher(t))
+	svc1 := NewService(settingsRepo, validStore, t.TempDir())
+	_, err := svc1.ImportCookies(context.Background(), []byte(validNetscapeSample))
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	_, err = svc1.UpdateSettings(context.Background(), UpdateSettingsRequest{Mode: ModeCookieFile})
+	if err != nil {
+		t.Fatalf("update settings failed: %v", err)
+	}
+
+	// 3. Confirm encrypted secret exists
+	has, err := secretRepo.HasSecret(context.Background(), SecretScope, SecretOwner, SecretField)
+	if err != nil || !has {
+		t.Fatalf("expected encrypted secret to exist in repository")
+	}
+
+	// 4. Simulate restart without encryption key by creating Store with SAME secretRepo but nil cipher
+	unavailStore := securestore.NewStore(secretRepo, nil)
+	if unavailStore.Available() {
+		t.Fatalf("expected unavailStore to be unavailable")
+	}
+	svc2 := NewService(settingsRepo, unavailStore, t.TempDir())
+
+	// 5. Confirm Has reports true truthfully even with unavailable cipher
+	truthfulSettings, err := svc2.GetSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSettings failed: %v", err)
+	}
+	if !truthfulSettings.HasCookieFile {
+		t.Errorf("expected HasCookieFile true when encrypted secret is present despite unavailable cipher")
+	}
+
+	// 6. Call DeleteCookies
+	delRes, err := svc2.DeleteCookies(context.Background())
+	if err != nil {
+		t.Fatalf("DeleteCookies failed with unavailable cipher: %v", err)
+	}
+
+	// 7. Verify deletion succeeds, encrypted DB secret is gone, mode becomes none, hasCookieFile=false
+	if delRes.HasCookieFile {
+		t.Errorf("expected HasCookieFile false after delete")
+	}
+	if delRes.Mode != ModeNone {
+		t.Errorf("expected mode none after delete, got %q", delRes.Mode)
+	}
+	hasAfter, _ := secretRepo.HasSecret(context.Background(), SecretScope, SecretOwner, SecretField)
+	if hasAfter {
+		t.Errorf("expected encrypted secret to be deleted from secretRepo")
+	}
+}
+
+// 2d. Repository lookup errors are not silently presented as no-cookie/default state (Requirements 2 & 5.H)
+func TestMediaAuth_RepositoryLookupErrorsPropagated(t *testing.T) {
+	settingsRepo := newFakeSettingsRepo()
+	errSecRepo := &errorSecretRepo{
+		fakeSecretRepo: *newFakeSecretRepo(),
+		hasErr:         errors.New("db connection timeout on HasSecret"),
+	}
+	store := securestore.NewStore(errSecRepo, testCipher(t))
+	svc := NewService(settingsRepo, store, t.TempDir())
+
+	_, err := svc.GetSettings(context.Background())
+	if err == nil {
+		t.Fatalf("expected GetSettings to return error when HasSecret fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "db connection timeout on HasSecret") {
+		t.Fatalf("expected underlying error message, got: %v", err)
+	}
+
+	_, err = svc.UpdateSettings(context.Background(), UpdateSettingsRequest{Mode: ModeCookieFile})
+	if err == nil {
+		t.Fatalf("expected UpdateSettings to return error when HasSecret fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "db connection timeout on HasSecret") {
+		t.Fatalf("expected underlying error message, got: %v", err)
+	}
 }
 
 // 12. Stored value goes through securestore

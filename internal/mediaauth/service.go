@@ -69,10 +69,14 @@ func (s *Service) GetSettings(ctx context.Context) (*Settings, error) {
 	defer s.mu.RUnlock()
 
 	hasCookieFile := false
-	if s.secretStore != nil && s.secretStore.Available() {
+	if s.secretStore != nil {
 		has, err := s.secretStore.Has(ctx, SecretScope, SecretOwner, SecretField)
-		if err == nil && has {
-			hasCookieFile = true
+		if err != nil {
+			if !errors.Is(err, securestore.ErrUnavailable) {
+				return nil, fmt.Errorf("failed to query encrypted cookie secret: %w", err)
+			}
+		} else {
+			hasCookieFile = has
 		}
 	}
 
@@ -86,7 +90,10 @@ func (s *Service) GetSettings(ctx context.Context) (*Settings, error) {
 	}
 
 	raw, err := s.repo.Get(ctx, SettingKeyMediaAuth)
-	if err != nil || strings.TrimSpace(raw) == "" {
+	if err != nil {
+		return nil, fmt.Errorf("failed to load media auth settings: %w", err)
+	}
+	if strings.TrimSpace(raw) == "" {
 		return res, nil
 	}
 
@@ -144,10 +151,14 @@ func (s *Service) UpdateSettings(ctx context.Context, req UpdateSettingsRequest)
 
 	case ModeCookieFile:
 		hasCookieFile := false
-		if s.secretStore != nil && s.secretStore.Available() {
+		if s.secretStore != nil {
 			has, err := s.secretStore.Has(ctx, SecretScope, SecretOwner, SecretField)
-			if err == nil && has {
-				hasCookieFile = true
+			if err != nil {
+				if !errors.Is(err, securestore.ErrUnavailable) {
+					return nil, fmt.Errorf("failed to query encrypted cookie secret: %w", err)
+				}
+			} else {
+				hasCookieFile = has
 			}
 		}
 		if !hasCookieFile {
@@ -169,7 +180,7 @@ func (s *Service) UpdateSettings(ctx context.Context, req UpdateSettingsRequest)
 	}
 
 	hasCookieFile := false
-	if s.secretStore != nil && s.secretStore.Available() {
+	if s.secretStore != nil {
 		has, _ := s.secretStore.Has(ctx, SecretScope, SecretOwner, SecretField)
 		hasCookieFile = has
 	}
@@ -226,16 +237,24 @@ func (s *Service) DeleteCookies(ctx context.Context) (*Settings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.secretStore != nil && s.secretStore.Available() {
-		if err := s.secretStore.Delete(ctx, SecretScope, SecretOwner, SecretField); err != nil {
-			return nil, fmt.Errorf("failed to delete encrypted cookie secret: %w", err)
-		}
+	if s.secretStore == nil {
+		return nil, ErrSecretStorageUnavailable
+	}
+
+	if err := s.secretStore.Delete(ctx, SecretScope, SecretOwner, SecretField); err != nil {
+		return nil, fmt.Errorf("failed to delete encrypted cookie secret: %w", err)
 	}
 
 	var stored StoredSettings
 	if s.repo != nil {
-		if raw, err := s.repo.Get(ctx, SettingKeyMediaAuth); err == nil && strings.TrimSpace(raw) != "" {
-			_ = json.Unmarshal([]byte(raw), &stored)
+		raw, err := s.repo.Get(ctx, SettingKeyMediaAuth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load media auth settings: %w", err)
+		}
+		if strings.TrimSpace(raw) != "" {
+			if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+				log.Printf("mediaauth: failed to unmarshal stored settings: %v", err)
+			}
 		}
 
 		if stored.Mode == ModeCookieFile {

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
@@ -281,5 +282,88 @@ func TestMediaAuthAPI_DeleteFailureReturns500(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 when mediaAuth is unavailable, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMediaAuthAPI_TruthfulPresenceAndDeletionWithoutCipher(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	settingsRepo := database.NewSQLiteSettingsRepository(db)
+	secretRepo := database.NewSQLiteSecretRepository(db)
+	catRepo := storage.NewSQLiteCategoryRepository(db.Conn())
+
+	// 1. Setup router with cipher to import cookies
+	key, _ := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	block, _ := aes.NewCipher(key)
+	aead, _ := cipher.NewGCM(block)
+	os.Setenv("V0.7_SETTINGS_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	c, _ := securestore.NewFromEnvironment()
+	_ = aead
+
+	storeWithCipher := securestore.NewStore(secretRepo, c)
+	svcWithCipher := mediaauth.NewService(settingsRepo, storeWithCipher, filepath.Join(tempDir, "auth"))
+	cfg := &config.Config{DownloadDir: tempDir, DataDir: tempDir}
+	routerWithCipher := api.NewRouter(cfg, nil, nil, nil, catRepo, svcWithCipher)
+
+	// Import cookies
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "cookies.txt")
+	_, _ = io.WriteString(part, "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\ts\tv\n")
+	_ = writer.Close()
+
+	reqImp := httptest.NewRequest(http.MethodPost, "/api/v1/media-auth/cookies", body)
+	reqImp.Header.Set("Content-Type", writer.FormDataContentType())
+	recImp := httptest.NewRecorder()
+	routerWithCipher.ServeHTTP(recImp, reqImp)
+	if recImp.Code != http.StatusOK {
+		t.Fatalf("import failed: %s", recImp.Body.String())
+	}
+
+	// 2. Setup second router pointing to SAME DB but WITHOUT cipher (nil cipher)
+	storeWithoutCipher := securestore.NewStore(secretRepo, nil)
+	svcWithoutCipher := mediaauth.NewService(settingsRepo, storeWithoutCipher, filepath.Join(tempDir, "auth"))
+	routerWithoutCipher := api.NewRouter(cfg, nil, nil, nil, catRepo, svcWithoutCipher)
+
+	// 3. Truthful GET reports hasCookieFile: true
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/v1/media-auth", nil)
+	recGet := httptest.NewRecorder()
+	routerWithoutCipher.ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("GET failed: %s", recGet.Body.String())
+	}
+	var getRes mediaauth.Settings
+	if err := json.NewDecoder(recGet.Body).Decode(&getRes); err != nil {
+		t.Fatal(err)
+	}
+	if !getRes.HasCookieFile {
+		t.Errorf("expected hasCookieFile: true even when cipher is unavailable")
+	}
+
+	// 4. DELETE /api/v1/media-auth/cookies succeeds and deletes the secret
+	reqDel := httptest.NewRequest(http.MethodDelete, "/api/v1/media-auth/cookies", nil)
+	recDel := httptest.NewRecorder()
+	routerWithoutCipher.ServeHTTP(recDel, reqDel)
+	if recDel.Code != http.StatusOK {
+		t.Fatalf("DELETE failed: %d %s", recDel.Code, recDel.Body.String())
+	}
+	var delRes mediaauth.Settings
+	if err := json.NewDecoder(recDel.Body).Decode(&delRes); err != nil {
+		t.Fatal(err)
+	}
+	if delRes.HasCookieFile {
+		t.Errorf("expected hasCookieFile: false after deletion")
+	}
+
+	// 5. Confirm DB record is completely deleted
+	hasSecret, err := secretRepo.HasSecret(context.Background(), mediaauth.SecretScope, mediaauth.SecretOwner, mediaauth.SecretField)
+	if err != nil || hasSecret {
+		t.Errorf("expected secret in database to be deleted, hasSecret=%v, err=%v", hasSecret, err)
 	}
 }
