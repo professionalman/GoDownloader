@@ -61,20 +61,28 @@ func appendSubtitleArgs(args []string, opts *job.SubtitleOptions, caps *job.Subt
 		mode = job.SubtitleModeSeparate
 	}
 
+	hasManual := len(opts.Languages) > 0
+	hasAuto := opts.IncludeAuto || opts.EnglishTranslation
+
 	switch mode {
 	case job.SubtitleModeSeparate:
-		args = append(args, "--write-subs")
-		if opts.IncludeAuto {
+		if hasManual {
+			args = append(args, "--write-subs")
+		}
+		if hasAuto {
 			args = append(args, "--write-auto-subs")
 		}
 	case job.SubtitleModeEmbed:
 		args = append(args, "--embed-subs")
-		if opts.IncludeAuto {
+		if hasAuto {
 			args = append(args, "--write-auto-subs")
 		}
 	case job.SubtitleModeBoth:
-		args = append(args, "--write-subs", "--embed-subs")
-		if opts.IncludeAuto {
+		if hasManual {
+			args = append(args, "--write-subs")
+		}
+		args = append(args, "--embed-subs")
+		if hasAuto {
 			args = append(args, "--write-auto-subs")
 		}
 	}

@@ -61,6 +61,10 @@ export function SubtitleSelector({
       if (prev.includes(lang)) {
         return prev.filter((l) => l !== lang);
       }
+      const track = tracks.find((t) => t.language === lang);
+      if (track && track.auto && !track.manual) {
+        setIncludeAuto(true);
+      }
       return [...prev, lang];
     });
   };

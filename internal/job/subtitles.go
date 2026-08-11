@@ -73,5 +73,21 @@ func ValidateSubtitleOptions(opts *SubtitleOptions, caps *SubtitleCapabilities) 
 		}
 	}
 
+	// Validate that auto-only tracks require IncludeAuto=true
+	if caps != nil && len(caps.Tracks) > 0 && !opts.IncludeAuto {
+		trackMap := make(map[string]SubtitleTrack, len(caps.Tracks))
+		for _, t := range caps.Tracks {
+			trackMap[t.Language] = t
+		}
+
+		for _, l := range opts.Languages {
+			if t, ok := trackMap[l]; ok {
+				if t.Auto && !t.Manual {
+					return fmt.Errorf("subtitle language %q is only available as an automatic caption; IncludeAuto must be enabled", l)
+				}
+			}
+		}
+	}
+
 	return nil
 }

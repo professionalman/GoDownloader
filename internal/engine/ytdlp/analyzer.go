@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -394,51 +395,18 @@ func normalizeSubtitles(rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[str
 	translationLanguageKey := ""
 
 	cleanSpoken := strings.ToLower(strings.TrimSpace(spokenLang))
-	isSpokenEnglish := cleanSpoken == "en" || strings.HasPrefix(cleanSpoken, "en-") || strings.HasPrefix(cleanSpoken, "en_")
 
-	// Determine if the original media has non-English audio/subtitles
-	hasNonEnglishOriginal := false
-	if cleanSpoken != "" && !isSpokenEnglish {
-		hasNonEnglishOriginal = true
-	} else {
-		// Check if there are non-English manual tracks or auto captions with -orig
-		hasNonEnglishManual := false
-		for k := range rawSubs {
-			lk := strings.ToLower(strings.TrimSpace(k))
-			if lk != "en" && !strings.HasPrefix(lk, "en-") && !strings.HasPrefix(lk, "en_") {
-				hasNonEnglishManual = true
-				break
-			}
-		}
-		hasAutoOrigNonEnglish := false
-		for k := range rawAuto {
-			lk := strings.ToLower(strings.TrimSpace(k))
-			if strings.HasSuffix(lk, "-orig") && !strings.HasPrefix(lk, "en") {
-				hasAutoOrigNonEnglish = true
-				break
-			}
-		}
-		if hasNonEnglishManual || hasAutoOrigNonEnglish {
-			hasNonEnglishOriginal = true
-		}
-	}
-
-	// Check if English auto-translation is exposed in automatic captions or explicitly translated subtitles
 	for k, entries := range rawAuto {
 		lk := strings.ToLower(strings.TrimSpace(k))
 		if lk == "en" || strings.HasPrefix(lk, "en-") || strings.HasPrefix(lk, "en_") {
-			isExplicitlyTranslated := false
 			for _, e := range entries {
-				ename := strings.ToLower(e.Name)
-				if strings.Contains(ename, "translat") {
-					isExplicitlyTranslated = true
+				if isEnglishTranslationEntry(e, k, rawSubs, rawAuto, cleanSpoken) {
+					englishTranslationAvailable = true
+					translationLanguageKey = strings.TrimSpace(k)
 					break
 				}
 			}
-
-			if hasNonEnglishOriginal || isExplicitlyTranslated {
-				englishTranslationAvailable = true
-				translationLanguageKey = strings.TrimSpace(k)
+			if englishTranslationAvailable {
 				break
 			}
 		}
@@ -449,4 +417,84 @@ func normalizeSubtitles(rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[str
 		EnglishTranslationAvailable: englishTranslationAvailable,
 		TranslationLanguageKey:      translationLanguageKey,
 	}
+}
+
+// isEnglishTranslationEntry checks if an automatic caption entry represents a genuine translated-to-English caption.
+func isEnglishTranslationEntry(entry ytdlpSubtitleEntry, langKey string, rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[string][]ytdlpSubtitleEntry, cleanSpoken string) bool {
+	lk := strings.ToLower(strings.TrimSpace(langKey))
+	if lk != "en" && !strings.HasPrefix(lk, "en-") && !strings.HasPrefix(lk, "en_") {
+		return false
+	}
+
+	// 1. Check entry name for explicit translation keywords
+	nameLower := strings.ToLower(entry.Name)
+	if strings.Contains(nameLower, "translat") || strings.Contains(nameLower, " from ") {
+		return true
+	}
+
+	// 2. Inspect URL parameters for YouTube timedtext translation markers (e.g. tlang=en)
+	if entry.URL != "" {
+		if parsedURL, err := url.Parse(entry.URL); err == nil {
+			q := parsedURL.Query()
+			tlang := strings.ToLower(strings.TrimSpace(q.Get("tlang")))
+			lang := strings.ToLower(strings.TrimSpace(q.Get("lang")))
+
+			if tlang == "en" || strings.HasPrefix(tlang, "en-") || strings.HasPrefix(tlang, "en_") {
+				return true
+			}
+			// If URL has lang=en and no tlang, it is definitely a native English auto-caption, not a translation.
+			if (lang == "en" || strings.HasPrefix(lang, "en-") || strings.HasPrefix(lang, "en_")) && tlang == "" {
+				return false
+			}
+		}
+	}
+
+	// 3. Check for presence of -orig tracks in rawAuto
+	hasNonEnglishOrig := false
+	hasEnglishOrig := false
+	for k := range rawAuto {
+		kLower := strings.ToLower(strings.TrimSpace(k))
+		if strings.HasSuffix(kLower, "-orig") {
+			if strings.HasPrefix(kLower, "en") {
+				hasEnglishOrig = true
+			} else {
+				hasNonEnglishOrig = true
+			}
+		}
+	}
+
+	if hasEnglishOrig {
+		return false
+	}
+	if hasNonEnglishOrig && !strings.HasSuffix(lk, "-orig") {
+		return true
+	}
+
+	// 4. If spoken language is explicitly known and non-English
+	isSpokenEnglish := cleanSpoken == "en" || strings.HasPrefix(cleanSpoken, "en-") || strings.HasPrefix(cleanSpoken, "en_")
+	if cleanSpoken != "" {
+		if isSpokenEnglish {
+			return false
+		}
+		if !strings.HasSuffix(lk, "-orig") {
+			return true
+		}
+	}
+
+	// 5. Check if there are non-English manual tracks
+	hasNonEnglishManual := false
+	hasEnglishManual := false
+	for k := range rawSubs {
+		kLower := strings.ToLower(strings.TrimSpace(k))
+		if kLower == "en" || strings.HasPrefix(kLower, "en-") || strings.HasPrefix(kLower, "en_") {
+			hasEnglishManual = true
+		} else {
+			hasNonEnglishManual = true
+		}
+	}
+	if hasNonEnglishManual && !hasEnglishManual && !strings.HasSuffix(lk, "-orig") {
+		return true
+	}
+
+	return false
 }

@@ -136,16 +136,17 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 		}
 	})
 
-	t.Run("Invalid subtitle format returns 400", func(t *testing.T) {
+	t.Run("Auto-only language without includeAuto returns 400", func(t *testing.T) {
 		j.Status = job.StatusAnalyzing
 		_ = jobRepo.Update(context.Background(), j)
 
 		body := `{
 			"formatId":"18",
 			"subtitleOptions": {
-				"languages": ["ja"],
+				"languages": ["en"],
+				"includeAuto": false,
 				"mode": "separate",
-				"format": "ass"
+				"format": "srt"
 			}
 		}`
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/jobs/%s/format", j.ID), bytes.NewBufferString(body))
@@ -155,6 +156,29 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400, got %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("Auto-only language with includeAuto returns 200", func(t *testing.T) {
+		j.Status = job.StatusAnalyzing
+		_ = jobRepo.Update(context.Background(), j)
+
+		body := `{
+			"formatId":"18",
+			"subtitleOptions": {
+				"languages": ["en"],
+				"includeAuto": true,
+				"mode": "separate",
+				"format": "srt"
+			}
+		}`
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/jobs/%s/format", j.ID), bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d, body = %s", rec.Code, rec.Body.String())
 		}
 	})
 }

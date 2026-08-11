@@ -422,6 +422,47 @@ func TestNormalizeSubtitles(t *testing.T) {
 				EnglishTranslationAvailable: false,
 			},
 		},
+		{
+			name: "25. native English auto-caption with lang=en in URL is NOT classified as English translation",
+			rawSubs: map[string][]ytdlpSubtitleEntry{
+				"en": {
+					{Ext: "vtt", Name: "English"},
+				},
+			},
+			rawAuto: map[string][]ytdlpSubtitleEntry{
+				"en": {
+					{Ext: "vtt", Name: "English (auto-generated)", URL: "https://www.youtube.com/api/timedtext?v=123&lang=en"},
+				},
+			},
+			spokenLang: "en",
+			wantCaps: &job.SubtitleCapabilities{
+				Tracks: []job.SubtitleTrack{
+					{Language: "en", Name: "English", Manual: true, Auto: true, Formats: []string{"vtt"}},
+				},
+				EnglishTranslationAvailable: false,
+			},
+		},
+		{
+			name:    "26. proven translated English with tlang=en in timedtext URL",
+			rawSubs: nil,
+			rawAuto: map[string][]ytdlpSubtitleEntry{
+				"ja": {
+					{Ext: "vtt", Name: "Japanese (auto-generated)", URL: "https://www.youtube.com/api/timedtext?v=123&lang=ja"},
+				},
+				"en": {
+					{Ext: "vtt", Name: "English (auto-generated)", URL: "https://www.youtube.com/api/timedtext?v=123&lang=ja&tlang=en"},
+				},
+			},
+			spokenLang: "",
+			wantCaps: &job.SubtitleCapabilities{
+				Tracks: []job.SubtitleTrack{
+					{Language: "en", Name: "English (auto-generated)", Manual: false, Auto: true, Formats: []string{"vtt"}},
+					{Language: "ja", Name: "Japanese (auto-generated)", Manual: false, Auto: true, Formats: []string{"vtt"}},
+				},
+				EnglishTranslationAvailable: true,
+				TranslationLanguageKey:      "en",
+			},
+		},
 	}
 
 	for _, tt := range tests {

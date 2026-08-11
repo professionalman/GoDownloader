@@ -104,7 +104,7 @@ describe('SubtitleSelector Component', () => {
     });
   });
 
-  it('9. toggles "Allow auto-generated subtitles"', () => {
+  it('9. automatically enables "Allow auto-generated subtitles" when selecting an auto-only track', () => {
     const caps: SubtitleCapabilities = {
       tracks: [
         { language: 'fr', name: 'French', manual: false, auto: true },
@@ -114,12 +114,8 @@ describe('SubtitleSelector Component', () => {
     const onChange = vi.fn();
     render(<SubtitleSelector subtitles={caps} onChange={onChange} />);
 
-    // Select French
+    // Select French (auto-only) -> should automatically enable includeAuto: true
     fireEvent.click(screen.getByLabelText(/French/i));
-
-    // Enable auto-generated subtitles
-    const autoToggle = screen.getByLabelText('Allow auto-generated subtitles');
-    fireEvent.click(autoToggle);
 
     expect(onChange).toHaveBeenLastCalledWith({
       languages: ['fr'],
@@ -128,6 +124,10 @@ describe('SubtitleSelector Component', () => {
       mode: 'separate',
       format: 'srt',
     });
+
+    // Check that the checkbox is checked in the UI
+    const autoToggle = screen.getByLabelText('Allow auto-generated subtitles') as HTMLInputElement;
+    expect(autoToggle.checked).toBe(true);
   });
 
   it('10 & 23. clearing selected languages resets options and sends undefined', () => {
