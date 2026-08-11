@@ -265,3 +265,21 @@ func TestMediaAuthAPI_SecretStoreUnavailableRejectsImport(t *testing.T) {
 		t.Fatalf("expected 503 when securestore is unavailable, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestMediaAuthAPI_DeleteFailureReturns500(t *testing.T) {
+	// Setup router with nil/broken backend to simulate internal error
+	cfg := &config.Config{
+		DownloadDir: t.TempDir(),
+		DataDir:     t.TempDir(),
+	}
+	// Handler without mediaAuth set
+	router := api.NewRouter(cfg, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/media-auth/cookies", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when mediaAuth is unavailable, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

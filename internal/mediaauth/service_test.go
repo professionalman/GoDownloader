@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,19 +295,105 @@ func TestMediaAuth_RemoveCookieResetsModeToNone(t *testing.T) {
 	}
 }
 
-// 8. Valid Netscape cookies.txt accepted
-func TestMediaAuth_ValidNetscapeFormat(t *testing.T) {
-	samples := []string{
-		"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
-		"# HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
-		"\xef\xbb\xbf# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n", // UTF-8 BOM
-		"\n\n# Netscape HTTP Cookie File\n# Comments\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
+// 8. Valid Netscape cookies.txt accepted and normalized
+func TestMediaAuth_ValidNetscapeFormatAndNormalization(t *testing.T) {
+	samples := []struct {
+		name     string
+		input    string
+		firstRow string
+	}{
+		{
+			name:     "Standard Netscape",
+			input:    "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
+			firstRow: "# Netscape HTTP Cookie File",
+		},
+		{
+			name:     "HTTP Cookie File header",
+			input:    "# HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
+			firstRow: "# HTTP Cookie File",
+		},
+		{
+			name:     "UTF-8 BOM stripped and header becomes first line",
+			input:    "\xef\xbb\xbf# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
+			firstRow: "# Netscape HTTP Cookie File",
+		},
+		{
+			name:     "Leading blank lines stripped so header is first line",
+			input:    "\r\n\n\n  \n# Netscape HTTP Cookie File\n# Comments\n.example.com\tTRUE\t/\tTRUE\t2147483647\tname\tval\n",
+			firstRow: "# Netscape HTTP Cookie File",
+		},
+		{
+			name:     "HttpOnly cookies preserved and recognized as valid cookie entries",
+			input:    "# Netscape HTTP Cookie File\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t2147483647\ttoken\tsecret123\n",
+			firstRow: "# Netscape HTTP Cookie File",
+		},
 	}
 
-	for i, s := range samples {
-		if err := ValidateCookieFile([]byte(s)); err != nil {
-			t.Errorf("sample %d should be valid, got error: %v", i, err)
-		}
+	for _, tt := range samples {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, err := NormalizeCookieFile([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("unexpected normalization error: %v", err)
+			}
+			if !strings.HasPrefix(string(normalized), tt.firstRow) {
+				t.Fatalf("expected normalized output to start with %q, got %q", tt.firstRow, string(normalized))
+			}
+			// Must start directly with '#'
+			if normalized[0] != '#' {
+				t.Fatalf("first byte of normalized file must be '#', got %c", normalized[0])
+			}
+		})
+	}
+}
+
+// 8b. BOM and leading blank line import materializes normalized temp file
+func TestMediaAuth_ImportNormalizesTempFile(t *testing.T) {
+	repo := newFakeSettingsRepo()
+	secretRepo := newFakeSecretRepo()
+	store := securestore.NewStore(secretRepo, testCipher(t))
+	svc := NewService(repo, store, t.TempDir())
+
+	rawInput := "\xef\xbb\xbf\r\n\r\n\n# Netscape HTTP Cookie File\r\n.example.com\tTRUE\t/\tTRUE\t2147483647\tauth_key\tval123\r\n"
+
+	_, err := svc.ImportCookies(context.Background(), []byte(rawInput))
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+
+	// Prepare auth args to materialize temp file
+	_, cleanup, err := svc.PrepareAuthArgs(context.Background())
+	if err != nil {
+		t.Fatalf("prepare auth args failed: %v", err)
+	}
+	defer cleanup()
+
+	// Update mode to cookie_file so PrepareAuthArgs materializes temp file
+	_, err = svc.UpdateSettings(context.Background(), UpdateSettingsRequest{Mode: ModeCookieFile})
+	if err != nil {
+		t.Fatalf("update settings failed: %v", err)
+	}
+
+	args, cleanup2, err := svc.PrepareAuthArgs(context.Background())
+	if err != nil {
+		t.Fatalf("prepare auth args in cookie_file mode failed: %v", err)
+	}
+	defer cleanup2()
+
+	if len(args) != 2 || args[0] != "--cookies" {
+		t.Fatalf("expected --cookies flag, got %v", args)
+	}
+
+	tempPath := args[1]
+	content, err := os.ReadFile(tempPath)
+	if err != nil {
+		t.Fatalf("failed to read materialized temp file: %v", err)
+	}
+
+	if !strings.HasPrefix(string(content), "# Netscape HTTP Cookie File\n") {
+		t.Fatalf("materialized temp file must start with '# Netscape HTTP Cookie File\\n', got: %q", string(content))
+	}
+	if content[0] != '#' {
+		t.Fatalf("first byte must be '#', got %q", content[0])
 	}
 }
 
@@ -333,6 +420,8 @@ func TestMediaAuth_InvalidFormatRejected(t *testing.T) {
 		"{\"cookies\": [\"token\"]}",
 		"[General]\nCookie=xyz",
 		"# Some random comment\nnot a cookie header",
+		"# Netscape HTTP Cookie File\n# Header only with no cookie entries\n# More comments\n",
+		"# HTTP Cookie File\n\n\n",
 	}
 	for _, inv := range invalids {
 		if err := ValidateCookieFile([]byte(inv)); err == nil {
@@ -344,10 +433,90 @@ func TestMediaAuth_InvalidFormatRejected(t *testing.T) {
 // 11. Oversized file rejected
 func TestMediaAuth_OversizedFileRejected(t *testing.T) {
 	oversized := make([]byte, MaxCookieFileSize+10)
-	copy(oversized, []byte("# Netscape HTTP Cookie File\n"))
+	copy(oversized, []byte("# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tk\tv\n"))
 	if err := ValidateCookieFile(oversized); err == nil {
 		t.Errorf("expected oversized cookie file to be rejected")
 	}
+}
+
+// Failure injection repo implementations
+type errorSettingsRepo struct {
+	fakeSettingsRepo
+	setErr error
+}
+
+func (r *errorSettingsRepo) Set(ctx context.Context, key, value string) error {
+	if r.setErr != nil {
+		return r.setErr
+	}
+	return r.fakeSettingsRepo.Set(ctx, key, value)
+}
+
+type errorSecretRepo struct {
+	fakeSecretRepo
+	deleteErr error
+}
+
+func (r *errorSecretRepo) DeleteSecret(ctx context.Context, scope, owner, field string) error {
+	if r.deleteErr != nil {
+		return r.deleteErr
+	}
+	return r.fakeSecretRepo.DeleteSecret(ctx, scope, owner, field)
+}
+
+// 2b. DeleteCookies failure injection tests
+func TestMediaAuth_DeleteCookiesFailures(t *testing.T) {
+	// 1. Secret delete failure is returned
+	t.Run("Secret delete error is returned", func(t *testing.T) {
+		settingsRepo := newFakeSettingsRepo()
+		errSecRepo := &errorSecretRepo{
+			fakeSecretRepo: *newFakeSecretRepo(),
+			deleteErr:      errors.New("db disk I/O error on secret delete"),
+		}
+		store := securestore.NewStore(errSecRepo, testCipher(t))
+		svc := NewService(settingsRepo, store, t.TempDir())
+
+		_, err := svc.ImportCookies(context.Background(), []byte(validNetscapeSample))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := svc.DeleteCookies(context.Background())
+		if err == nil {
+			t.Fatalf("expected error from DeleteCookies when secretStore.Delete fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "db disk I/O error on secret delete") {
+			t.Fatalf("expected error to contain underlying message, got %v", err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result on failure, got %+v", res)
+		}
+	})
+
+	// 2. Settings persistence failure on cookie_file -> none reset is returned
+	t.Run("Settings persistence error on reset is returned", func(t *testing.T) {
+		errSettingsRepo := &errorSettingsRepo{
+			fakeSettingsRepo: *newFakeSettingsRepo(),
+			setErr:           errors.New("database locked on settings update"),
+		}
+		secRepo := newFakeSecretRepo()
+		store := securestore.NewStore(secRepo, testCipher(t))
+		svc := NewService(errSettingsRepo, store, t.TempDir())
+
+		// Seed settings with cookie_file mode
+		errSettingsRepo.settings[SettingKeyMediaAuth] = `{"mode":"cookie_file"}`
+
+		res, err := svc.DeleteCookies(context.Background())
+		if err == nil {
+			t.Fatalf("expected error when setting repo fails to update, got nil")
+		}
+		if !strings.Contains(err.Error(), "database locked on settings update") {
+			t.Fatalf("expected error to contain underlying message, got %v", err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result on failure, got %+v", res)
+		}
+	})
 }
 
 // 12. Stored value goes through securestore

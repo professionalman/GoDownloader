@@ -105,9 +105,14 @@ describe('MediaAuthPanel Component', () => {
     expect(screen.getByRole('button', { name: /Import cookies.txt/i })).toBeInTheDocument();
   });
 
-  // 6 & 7. Import uses file upload and displays imported state without contents
-  it('imports cookies and displays imported state without exposing cookie contents', async () => {
+  // 6 & 7. First-time import flow preserves selection and allows saving cookie_file mode
+  it('imports cookies, keeps Imported cookies radio selected, and sends cookie_file mode on save', async () => {
+    // Real backend returns mode: 'none' on first import because it was not active before
     vi.mocked(api.importMediaCookies).mockResolvedValue({
+      mode: 'none',
+      hasCookieFile: true,
+    });
+    vi.mocked(api.updateMediaAuth).mockResolvedValue({
       mode: 'cookie_file',
       hasCookieFile: true,
     });
@@ -117,22 +122,38 @@ describe('MediaAuthPanel Component', () => {
       expect(screen.getByText('Media Authentication')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('radio', { name: /Imported cookies/i }));
+    const cookieRadio = screen.getByRole('radio', { name: /Imported cookies/i });
+    fireEvent.click(cookieRadio);
 
     const fileInput = screen.getByLabelText('Upload cookies file');
-    const dummyFile = new File(['# Netscape HTTP Cookie File\n'], 'cookies.txt', { type: 'text/plain' });
+    const dummyFile = new File(['# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tk\tv\n'], 'cookies.txt', { type: 'text/plain' });
 
     fireEvent.change(fileInput, { target: { files: [dummyFile] } });
 
     await waitFor(() => {
       expect(api.importMediaCookies).toHaveBeenCalledWith(dummyFile);
       expect(screen.getByText(/Cookies imported ✓/i)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /Replace cookies/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /Remove cookies/i })).toBeInTheDocument();
+      expect(cookieRadio).toBeChecked();
+    });
+
+    // Save button must be enabled
+    const saveBtn = screen.getByRole('button', { name: /Save Media Auth/i });
+    expect(saveBtn).not.toBeDisabled();
+
+    // Clicking save persists mode: 'cookie_file'
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(api.updateMediaAuth).toHaveBeenCalledWith({
+        mode: 'cookie_file',
+        browser: undefined,
+        profile: undefined,
+      });
+      expect(screen.getByText(/Media authentication settings saved/i)).toBeInTheDocument();
     });
 
     // 11. Verify no secret or cookie string is rendered
-    expect(screen.queryByText(/session_token/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/dummy_token/i)).not.toBeInTheDocument();
   });
 
   // 8. Replace works

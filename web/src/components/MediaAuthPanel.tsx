@@ -87,7 +87,7 @@ export function MediaAuthPanel() {
       setSuccess('');
       const res = await importMediaCookies(file);
       setHasCookieFile(res.hasCookieFile);
-      setMode(res.mode);
+      setMode('cookie_file');
       setSuccess('Cookies imported successfully.');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to import cookies');

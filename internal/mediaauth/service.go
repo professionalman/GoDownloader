@@ -191,11 +191,12 @@ func (s *Service) ImportCookies(ctx context.Context, cookieData []byte) (*Settin
 		return nil, ErrSecretStorageUnavailable
 	}
 
-	if err := ValidateCookieFile(cookieData); err != nil {
+	normalized, err := NormalizeCookieFile(cookieData)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := s.secretStore.Put(ctx, SecretScope, SecretOwner, SecretField, string(cookieData)); err != nil {
+	if err := s.secretStore.Put(ctx, SecretScope, SecretOwner, SecretField, string(normalized)); err != nil {
 		return nil, fmt.Errorf("failed to encrypt and store cookie data: %w", err)
 	}
 
@@ -225,8 +226,10 @@ func (s *Service) DeleteCookies(ctx context.Context) (*Settings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.secretStore != nil {
-		_ = s.secretStore.Delete(ctx, SecretScope, SecretOwner, SecretField)
+	if s.secretStore != nil && s.secretStore.Available() {
+		if err := s.secretStore.Delete(ctx, SecretScope, SecretOwner, SecretField); err != nil {
+			return nil, fmt.Errorf("failed to delete encrypted cookie secret: %w", err)
+		}
 	}
 
 	var stored StoredSettings
@@ -238,14 +241,17 @@ func (s *Service) DeleteCookies(ctx context.Context) (*Settings, error) {
 		if stored.Mode == ModeCookieFile {
 			stored.Mode = ModeNone
 			data, err := json.Marshal(stored)
-			if err == nil {
-				_ = s.repo.Set(ctx, SettingKeyMediaAuth, string(data))
+			if err != nil {
+				return nil, fmt.Errorf("failed to encode media auth settings: %w", err)
+			}
+			if err := s.repo.Set(ctx, SettingKeyMediaAuth, string(data)); err != nil {
+				return nil, fmt.Errorf("failed to reset media auth mode in settings: %w", err)
 			}
 		}
 	}
 
 	mode := stored.Mode
-	if mode == "" {
+	if mode == "" || mode == ModeCookieFile {
 		mode = ModeNone
 	}
 
@@ -357,6 +363,7 @@ func (s *Service) CleanupStaleTempFiles() error {
 		return fmt.Errorf("failed to read auth temp dir %s: %w", s.tempAuthDir, err)
 	}
 
+	cleanedCount := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue // Never touch directories
@@ -366,11 +373,15 @@ func (s *Service) CleanupStaleTempFiles() error {
 		if strings.HasPrefix(name, TempCookiePrefix) && strings.HasSuffix(name, TempCookieSuffix) {
 			fullPath := filepath.Join(s.tempAuthDir, name)
 			if err := os.Remove(fullPath); err != nil {
-				log.Printf("mediaauth: failed to remove stale cookie file %s: %v", fullPath, err)
+				log.Printf("mediaauth: failed to remove stale cookie file: %v", err)
 			} else {
-				log.Printf("mediaauth: cleaned up stale cookie file %s", fullPath)
+				cleanedCount++
 			}
 		}
+	}
+
+	if cleanedCount > 0 {
+		log.Printf("mediaauth: cleaned up %d stale cookie credential file(s)", cleanedCount)
 	}
 
 	return nil

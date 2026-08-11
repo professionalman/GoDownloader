@@ -90,47 +90,90 @@ func ValidateProfile(profile string) (string, error) {
 	return p, nil
 }
 
-// ValidateCookieFile validates that data is a non-empty, textual Netscape/Mozilla format cookie file.
-func ValidateCookieFile(data []byte) error {
+// NormalizeCookieFile validates and normalizes Netscape/Mozilla cookie file data.
+// It strips UTF-8 BOM, removes leading blank lines, ensures the Netscape header is the first physical line,
+// preserves cookie entries (including #HttpOnly_ prefixes), and ensures at least one valid cookie entry is present.
+func NormalizeCookieFile(data []byte) ([]byte, error) {
 	if len(data) == 0 {
-		return errors.New("cookie file is empty")
+		return nil, errors.New("cookie file is empty")
 	}
 	if len(data) > MaxCookieFileSize {
-		return fmt.Errorf("cookie file exceeds maximum allowed size of %d bytes", MaxCookieFileSize)
+		return nil, fmt.Errorf("cookie file exceeds maximum allowed size of %d bytes", MaxCookieFileSize)
 	}
 
 	// Strip optional UTF-8 BOM if present
 	cleanData := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	cleanData = bytes.TrimSpace(cleanData)
-	if len(cleanData) == 0 {
-		return errors.New("cookie file is empty")
+	if len(bytes.TrimSpace(cleanData)) == 0 {
+		return nil, errors.New("cookie file is empty")
 	}
 
 	// Verify text content (reject binary data containing null bytes)
 	if bytes.IndexByte(cleanData, 0) != -1 {
-		return errors.New("cookie file contains invalid binary data")
+		return nil, errors.New("cookie file contains invalid binary data")
 	}
 
-	// Validate Netscape/Mozilla header line
-	lines := strings.Split(string(cleanData), "\n")
-	var firstMeaningfulLine string
-	for _, line := range lines {
+	rawText := string(cleanData)
+	rawLines := strings.Split(rawText, "\n")
+
+	var normalizedLines []string
+	headerFound := false
+	hasCookieEntry := false
+
+	for _, rawLine := range rawLines {
+		line := strings.TrimRight(rawLine, "\r")
 		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			firstMeaningfulLine = trimmed
-			break
+
+		if !headerFound {
+			// Skip leading empty lines before header
+			if trimmed == "" {
+				continue
+			}
+
+			lowerHeader := strings.ToLower(trimmed)
+			if !strings.HasPrefix(lowerHeader, "# netscape http cookie file") &&
+				!strings.HasPrefix(lowerHeader, "# http cookie file") {
+				return nil, errors.New("invalid cookie file format: must be a Netscape/Mozilla HTTP cookie file starting with '# Netscape HTTP Cookie File' or '# HTTP Cookie File'")
+			}
+
+			headerFound = true
+			normalizedLines = append(normalizedLines, line)
+			continue
+		}
+
+		// Header is found, process subsequent lines
+		normalizedLines = append(normalizedLines, line)
+
+		if trimmed == "" {
+			continue
+		}
+
+		// Check if this line is a valid cookie data row (either non-comment or #HttpOnly_ prefixed)
+		if !strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "#HttpOnly_") {
+			fields := strings.Split(trimmed, "\t")
+			if len(fields) >= 4 || strings.Contains(trimmed, "\t") || len(strings.Fields(trimmed)) >= 4 {
+				hasCookieEntry = true
+			}
 		}
 	}
 
-	if firstMeaningfulLine == "" {
-		return errors.New("cookie file contains no content")
+	if !headerFound {
+		return nil, errors.New("cookie file contains no content")
 	}
 
-	lowerHeader := strings.ToLower(firstMeaningfulLine)
-	if !strings.HasPrefix(lowerHeader, "# netscape http cookie file") &&
-		!strings.HasPrefix(lowerHeader, "# http cookie file") {
-		return errors.New("invalid cookie file format: must be a Netscape/Mozilla HTTP cookie file starting with '# Netscape HTTP Cookie File' or '# HTTP Cookie File'")
+	if !hasCookieEntry {
+		return nil, errors.New("cookie file contains no cookie entries")
 	}
 
-	return nil
+	normalized := strings.Join(normalizedLines, "\n")
+	if !strings.HasSuffix(normalized, "\n") {
+		normalized += "\n"
+	}
+
+	return []byte(normalized), nil
+}
+
+// ValidateCookieFile validates that data is a valid Netscape/Mozilla format cookie file.
+func ValidateCookieFile(data []byte) error {
+	_, err := NormalizeCookieFile(data)
+	return err
 }
