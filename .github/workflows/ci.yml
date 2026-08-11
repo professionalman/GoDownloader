@@ -6,11 +6,13 @@ on:
       - main
       - feat/v0.7-lovable-integration
       - feat/v0.7.1-authenticated-media
+      - feat/v0.7.2-subtitles
   pull_request:
     branches:
       - main
       - feat/v0.7-lovable-integration
       - feat/v0.7.1-authenticated-media
+      - feat/v0.7.2-subtitles
 
 jobs:
   backend:
