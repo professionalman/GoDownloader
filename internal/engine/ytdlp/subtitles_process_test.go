@@ -279,3 +279,144 @@ func TestEngine_Start_EnglishTranslationOnly_RealChild(t *testing.T) {
 		t.Errorf("missing --convert-subs srt in argv: %v", args)
 	}
 }
+
+func TestEngine_Start_EnglishTranslationOnly_BothMode_RealChild(t *testing.T) {
+	binPath := buildFakeYtDlp(t)
+	tmpDir := t.TempDir()
+	argsFile := filepath.Join(tmpDir, "args_trans_both.txt")
+	t.Setenv("FAKE_YTDLP_RECORD_ARGS", argsFile)
+
+	eng := NewEngine(binPath, tmpDir)
+
+	j := &job.Job{
+		ID:     "trans_both_job",
+		Source: "https://example.com/watch?v=foreign_video",
+		Type:   job.TypeMedia,
+		MediaInfo: &job.MediaInfo{
+			SelectedFmt: "18",
+			Formats: []job.MediaFormat{
+				{FormatID: "18", VCodec: "avc1", ACodec: "mp4a"},
+			},
+			Subtitles: &job.SubtitleCapabilities{
+				Tracks: []job.SubtitleTrack{
+					{Language: "ja", Name: "Japanese", Manual: true, Formats: []string{"vtt"}},
+				},
+				EnglishTranslationAvailable: true,
+				TranslationLanguageKey:      "en",
+			},
+			SubtitleOptions: &job.SubtitleOptions{
+				Languages:          []string{},
+				IncludeAuto:        false,
+				EnglishTranslation: true,
+				Mode:               job.SubtitleModeBoth,
+				Format:             job.SubtitleFormatSRT,
+			},
+		},
+	}
+
+	_, err := eng.Start(context.Background(), j, tmpDir)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ := eng.Status(context.Background(), j)
+		if st != nil && st.Status == job.StatusCompleted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded args: %v", err)
+	}
+	args := strings.Split(string(data), "\n")
+
+	// Both mode must include --write-subs (for retention), --embed-subs, --write-auto-subs, and --convert-subs srt
+	if !slices.Contains(args, "--sub-langs") || !slices.Contains(args, "en") {
+		t.Errorf("expected --sub-langs en in argv: %v", args)
+	}
+	if !slices.Contains(args, "--write-subs") {
+		t.Errorf("missing --write-subs in argv for Both mode file retention: %v", args)
+	}
+	if !slices.Contains(args, "--embed-subs") {
+		t.Errorf("missing --embed-subs in argv for Both mode: %v", args)
+	}
+	if !slices.Contains(args, "--write-auto-subs") {
+		t.Errorf("missing --write-auto-subs in argv for English translation: %v", args)
+	}
+	if !slices.Contains(args, "--convert-subs") || !slices.Contains(args, "srt") {
+		t.Errorf("missing --convert-subs srt in argv: %v", args)
+	}
+}
+
+func TestEngine_Start_EnglishTranslationOnly_EmbedMode_RealChild(t *testing.T) {
+	binPath := buildFakeYtDlp(t)
+	tmpDir := t.TempDir()
+	argsFile := filepath.Join(tmpDir, "args_trans_embed.txt")
+	t.Setenv("FAKE_YTDLP_RECORD_ARGS", argsFile)
+
+	eng := NewEngine(binPath, tmpDir)
+
+	j := &job.Job{
+		ID:     "trans_embed_job",
+		Source: "https://example.com/watch?v=foreign_video",
+		Type:   job.TypeMedia,
+		MediaInfo: &job.MediaInfo{
+			SelectedFmt: "18",
+			Formats: []job.MediaFormat{
+				{FormatID: "18", VCodec: "avc1", ACodec: "mp4a"},
+			},
+			Subtitles: &job.SubtitleCapabilities{
+				Tracks: []job.SubtitleTrack{
+					{Language: "ja", Name: "Japanese", Manual: true, Formats: []string{"vtt"}},
+				},
+				EnglishTranslationAvailable: true,
+				TranslationLanguageKey:      "en",
+			},
+			SubtitleOptions: &job.SubtitleOptions{
+				Languages:          []string{},
+				IncludeAuto:        false,
+				EnglishTranslation: true,
+				Mode:               job.SubtitleModeEmbed,
+				Format:             job.SubtitleFormatSRT,
+			},
+		},
+	}
+
+	_, err := eng.Start(context.Background(), j, tmpDir)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ := eng.Status(context.Background(), j)
+		if st != nil && st.Status == job.StatusCompleted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded args: %v", err)
+	}
+	args := strings.Split(string(data), "\n")
+
+	// Embed mode must include --embed-subs and --write-auto-subs, but NOT --write-subs
+	if !slices.Contains(args, "--sub-langs") || !slices.Contains(args, "en") {
+		t.Errorf("expected --sub-langs en in argv: %v", args)
+	}
+	if !slices.Contains(args, "--embed-subs") {
+		t.Errorf("missing --embed-subs in argv for Embed mode: %v", args)
+	}
+	if !slices.Contains(args, "--write-auto-subs") {
+		t.Errorf("missing --write-auto-subs in argv for English translation: %v", args)
+	}
+	if slices.Contains(args, "--write-subs") {
+		t.Errorf("unexpected --write-subs in argv for Embed mode: %v", args)
+	}
+}

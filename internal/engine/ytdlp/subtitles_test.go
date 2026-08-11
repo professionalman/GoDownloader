@@ -212,7 +212,7 @@ func TestAppendSubtitleArgs(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:     "38d. both mode + English translation only",
+			name:     "38d. both mode + English translation only (includes --write-subs so file is retained)",
 			baseArgs: []string{"-f", "best"},
 			opts: &job.SubtitleOptions{
 				EnglishTranslation: true,
@@ -223,7 +223,39 @@ func TestAppendSubtitleArgs(t *testing.T) {
 				EnglishTranslationAvailable: true,
 				TranslationLanguageKey:      "en",
 			},
-			wantArgs: []string{"-f", "best", "--sub-langs", "en", "--embed-subs", "--write-auto-subs", "--convert-subs", "srt"},
+			wantArgs: []string{"-f", "best", "--sub-langs", "en", "--write-subs", "--embed-subs", "--write-auto-subs", "--convert-subs", "srt"},
+			wantErr:  false,
+		},
+		{
+			name:     "38d2. both mode + English translation only + VTT format",
+			baseArgs: []string{"-f", "best"},
+			opts: &job.SubtitleOptions{
+				EnglishTranslation: true,
+				Mode:               job.SubtitleModeBoth,
+				Format:             job.SubtitleFormatVTT,
+			},
+			caps: &job.SubtitleCapabilities{
+				EnglishTranslationAvailable: true,
+				TranslationLanguageKey:      "en",
+			},
+			wantArgs: []string{"-f", "best", "--sub-langs", "en", "--write-subs", "--embed-subs", "--write-auto-subs"},
+			wantErr:  false,
+		},
+		{
+			name:     "38d3. both mode + auto-only track (includes --write-subs so file is retained)",
+			baseArgs: []string{"-f", "best"},
+			opts: &job.SubtitleOptions{
+				Languages:   []string{"fr"},
+				IncludeAuto: true,
+				Mode:        job.SubtitleModeBoth,
+				Format:      job.SubtitleFormatVTT,
+			},
+			caps: &job.SubtitleCapabilities{
+				Tracks: []job.SubtitleTrack{
+					{Language: "fr", Manual: false, Auto: true},
+				},
+			},
+			wantArgs: []string{"-f", "best", "--sub-langs", "fr", "--write-subs", "--embed-subs", "--write-auto-subs"},
 			wantErr:  false,
 		},
 		{
