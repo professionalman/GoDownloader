@@ -22,6 +22,8 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  SubtitleOptions,
+  SelectFormatRequest,
 } from './types';
 
 const API_BASE = '/api/v1';
@@ -197,11 +199,19 @@ export async function deleteJob(id: string, deleteFiles: boolean): Promise<void>
   }
 }
 
-export async function selectFormat(jobId: string, formatId: string): Promise<Job> {
+export async function selectFormat(
+  jobId: string,
+  formatId: string,
+  subtitleOptions?: SubtitleOptions,
+): Promise<Job> {
+  const payload: SelectFormatRequest = { formatId };
+  if (subtitleOptions) {
+    payload.subtitleOptions = subtitleOptions;
+  }
   const res = await fetch(`${API_BASE}/jobs/${jobId}/format`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ formatId }),
+    body: JSON.stringify(payload),
   });
   return handleResponse<Job>(res);
 }

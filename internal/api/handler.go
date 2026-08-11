@@ -35,7 +35,8 @@ type createJobRequest struct {
 }
 
 type selectFormatRequest struct {
-	FormatID string `json:"formatId"`
+	FormatID        string               `json:"formatId"`
+	SubtitleOptions *job.SubtitleOptions `json:"subtitleOptions,omitempty"`
 }
 
 // apiError is the consistent error response format.
@@ -236,7 +237,7 @@ func (h *Handler) SelectFormat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := h.manager.SelectFormat(r.Context(), id, req.FormatID)
+	j, err := h.manager.SelectFormat(r.Context(), id, req.FormatID, req.SubtitleOptions)
 	if err != nil {
 		writeAppError(w, err)
 		return

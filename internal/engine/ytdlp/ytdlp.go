@@ -125,6 +125,16 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	// Apply format selection if specified (pairing video-only selections with bestaudio)
 	args = append(args, "-f", buildFormatSelector(j))
 
+	// Apply subtitle options if specified
+	if j.MediaInfo != nil && j.MediaInfo.SubtitleOptions != nil {
+		var err error
+		args, err = appendSubtitleArgs(args, j.MediaInfo.SubtitleOptions, j.MediaInfo.Subtitles)
+		if err != nil {
+			cleanup()
+			return "", fmt.Errorf("invalid subtitle options: %w", err)
+		}
+	}
+
 	args = append(args, j.Source)
 
 	// Create application-owned cancellable context (survives HTTP request)

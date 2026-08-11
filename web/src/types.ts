@@ -144,6 +144,30 @@ export interface MediaFormat {
   abr?: number;
 }
 
+export interface SubtitleTrack {
+  language: string;
+  name?: string;
+  manual: boolean;
+  auto: boolean;
+  formats?: string[];
+}
+
+export interface SubtitleCapabilities {
+  tracks: SubtitleTrack[];
+  englishTranslationAvailable: boolean;
+}
+
+export type SubtitleMode = 'separate' | 'embed' | 'both';
+export type SubtitleFormat = 'srt' | 'vtt';
+
+export interface SubtitleOptions {
+  languages: string[];
+  includeAuto: boolean;
+  englishTranslation: boolean;
+  mode: SubtitleMode;
+  format: SubtitleFormat;
+}
+
 export interface MediaInfo {
   title: string;
   duration: number;
@@ -152,6 +176,8 @@ export interface MediaInfo {
   formats: MediaFormat[];
   selectedFormat?: string;
   bestAudioFormat?: MediaFormat;
+  subtitles?: SubtitleCapabilities;
+  subtitleOptions?: SubtitleOptions;
 }
 
 export type TorrentFilePriority = 'skip' | 'normal' | 'high' | 'maximum';
@@ -380,6 +406,7 @@ export interface UpdateSettingsPayload {
 
 export interface SelectFormatRequest {
   formatId: string;
+  subtitleOptions?: SubtitleOptions;
 }
 
 export type MediaAuthMode = 'none' | 'browser' | 'cookie_file';

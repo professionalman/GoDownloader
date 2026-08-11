@@ -15,11 +15,21 @@ import (
 
 // ytdlpJSON is the raw JSON structure from yt-dlp --dump-json.
 type ytdlpJSON struct {
-	Title     string        `json:"title"`
-	Duration  float64       `json:"duration"`
-	Thumbnail string        `json:"thumbnail"`
-	URL       string        `json:"webpage_url"`
-	Formats   []ytdlpFormat `json:"formats"`
+	Title             string                          `json:"title"`
+	Duration          float64                         `json:"duration"`
+	Thumbnail         string                          `json:"thumbnail"`
+	URL               string                          `json:"webpage_url"`
+	Formats           []ytdlpFormat                   `json:"formats"`
+	Subtitles         map[string][]ytdlpSubtitleEntry `json:"subtitles"`
+	AutomaticCaptions map[string][]ytdlpSubtitleEntry `json:"automatic_captions"`
+	Language          string                          `json:"language"`
+}
+
+type ytdlpSubtitleEntry struct {
+	Ext      string `json:"ext"`
+	URL      string `json:"url"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
 }
 
 type ytdlpFormat struct {
@@ -92,6 +102,7 @@ func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *netw
 
 	formats := normalizeFormats(raw.Formats)
 	bestAudio := selectBestAudioFormat(raw.Formats, formats)
+	subtitles := normalizeSubtitles(raw.Subtitles, raw.AutomaticCaptions, raw.Language)
 
 	return &job.MediaInfo{
 		Title:           raw.Title,
@@ -100,6 +111,7 @@ func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *netw
 		URL:             raw.URL,
 		Formats:         formats,
 		BestAudioFormat: bestAudio,
+		Subtitles:       subtitles,
 	}, nil
 }
 
@@ -288,4 +300,153 @@ func audioCodecPriority(acodec string) int {
 		return 2
 	}
 	return 3
+}
+
+// normalizeSubtitles processes raw subtitle dictionaries into a clean, safe, deduplicated SubtitleCapabilities object.
+func normalizeSubtitles(rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[string][]ytdlpSubtitleEntry, spokenLang string) *job.SubtitleCapabilities {
+	tracksMap := make(map[string]*job.SubtitleTrack)
+	formatSets := make(map[string]map[string]struct{})
+
+	// 1. Process manual subtitles
+	for langKey, entries := range rawSubs {
+		lang := strings.TrimSpace(langKey)
+		if lang == "" {
+			continue
+		}
+		var name string
+		fset := make(map[string]struct{})
+		for _, e := range entries {
+			ext := strings.TrimSpace(e.Ext)
+			if ext != "" {
+				fset[ext] = struct{}{}
+			}
+			if name == "" && strings.TrimSpace(e.Name) != "" {
+				name = strings.TrimSpace(e.Name)
+			}
+		}
+
+		tracksMap[lang] = &job.SubtitleTrack{
+			Language: lang,
+			Name:     name,
+			Manual:   true,
+			Auto:     false,
+		}
+		formatSets[lang] = fset
+	}
+
+	// 2. Process automatic captions
+	for langKey, entries := range rawAuto {
+		lang := strings.TrimSpace(langKey)
+		if lang == "" {
+			continue
+		}
+		var name string
+		fset := make(map[string]struct{})
+		for _, e := range entries {
+			ext := strings.TrimSpace(e.Ext)
+			if ext != "" {
+				fset[ext] = struct{}{}
+			}
+			if name == "" && strings.TrimSpace(e.Name) != "" {
+				name = strings.TrimSpace(e.Name)
+			}
+		}
+
+		if existing, ok := tracksMap[lang]; ok {
+			existing.Auto = true
+			if existing.Name == "" && name != "" {
+				existing.Name = name
+			}
+			for ext := range fset {
+				formatSets[lang][ext] = struct{}{}
+			}
+		} else {
+			tracksMap[lang] = &job.SubtitleTrack{
+				Language: lang,
+				Name:     name,
+				Manual:   false,
+				Auto:     true,
+			}
+			formatSets[lang] = fset
+		}
+	}
+
+	// 3. Convert map to sorted slice
+	tracks := make([]job.SubtitleTrack, 0, len(tracksMap))
+	for lang, track := range tracksMap {
+		var formats []string
+		if fset, ok := formatSets[lang]; ok {
+			for ext := range fset {
+				formats = append(formats, ext)
+			}
+			sort.Strings(formats)
+		}
+		track.Formats = formats
+		tracks = append(tracks, *track)
+	}
+
+	sort.Slice(tracks, func(i, j int) bool {
+		return tracks[i].Language < tracks[j].Language
+	})
+
+	// 4. Discover English translation capability
+	englishTranslationAvailable := false
+	translationLanguageKey := ""
+
+	cleanSpoken := strings.ToLower(strings.TrimSpace(spokenLang))
+	isSpokenEnglish := cleanSpoken == "en" || strings.HasPrefix(cleanSpoken, "en-") || strings.HasPrefix(cleanSpoken, "en_")
+
+	// Determine if the original media has non-English audio/subtitles
+	hasNonEnglishOriginal := false
+	if cleanSpoken != "" && !isSpokenEnglish {
+		hasNonEnglishOriginal = true
+	} else {
+		// Check if there are non-English manual tracks or auto captions with -orig
+		hasNonEnglishManual := false
+		for k := range rawSubs {
+			lk := strings.ToLower(strings.TrimSpace(k))
+			if lk != "en" && !strings.HasPrefix(lk, "en-") && !strings.HasPrefix(lk, "en_") {
+				hasNonEnglishManual = true
+				break
+			}
+		}
+		hasAutoOrigNonEnglish := false
+		for k := range rawAuto {
+			lk := strings.ToLower(strings.TrimSpace(k))
+			if strings.HasSuffix(lk, "-orig") && !strings.HasPrefix(lk, "en") {
+				hasAutoOrigNonEnglish = true
+				break
+			}
+		}
+		if hasNonEnglishManual || hasAutoOrigNonEnglish {
+			hasNonEnglishOriginal = true
+		}
+	}
+
+	// Check if English auto-translation is exposed in automatic captions or explicitly translated subtitles
+	for k, entries := range rawAuto {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if lk == "en" || strings.HasPrefix(lk, "en-") || strings.HasPrefix(lk, "en_") {
+			isExplicitlyTranslated := false
+			for _, e := range entries {
+				ename := strings.ToLower(e.Name)
+				if strings.Contains(ename, "translat") {
+					isExplicitlyTranslated = true
+					break
+				}
+			}
+
+			if hasNonEnglishOriginal || isExplicitlyTranslated {
+				englishTranslationAvailable = true
+				translationLanguageKey = strings.TrimSpace(k)
+				break
+			}
+		}
+	}
+
+	return &job.SubtitleCapabilities{
+		Tracks:                      tracks,
+		EnglishTranslationAvailable: englishTranslationAvailable,
+		TranslationLanguageKey:      translationLanguageKey,
+	}
 }

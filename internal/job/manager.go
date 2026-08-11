@@ -704,7 +704,7 @@ func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) 
 }
 
 // SelectFormat selects a format for a media job and enqueues or starts the download.
-func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, error) {
+func (m *Manager) SelectFormat(ctx context.Context, id, formatID string, subtitleOpts ...*SubtitleOptions) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
 		return nil, err
@@ -734,8 +734,18 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string) (*Job, 
 		return nil, &AppError{Code: ErrInvalidRequest, Message: "invalid format ID"}
 	}
 
-	// Set selected format & transition to StatusQueued
+	// Validate subtitle options if provided
+	var subOpts *SubtitleOptions
+	if len(subtitleOpts) > 0 && subtitleOpts[0] != nil {
+		subOpts = subtitleOpts[0]
+		if err := ValidateSubtitleOptions(subOpts, j.MediaInfo.Subtitles); err != nil {
+			return nil, &AppError{Code: ErrInvalidRequest, Message: err.Error()}
+		}
+	}
+
+	// Set selected format & subtitle options & transition to StatusQueued
 	j.MediaInfo.SelectedFmt = formatID
+	j.MediaInfo.SubtitleOptions = subOpts
 	oldStatus := j.Status
 
 	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {

@@ -43,15 +43,59 @@ type MediaFormat struct {
 	ABR        float64 `json:"abr,omitempty"`
 }
 
+// SubtitleTrack represents a normalized subtitle track available for a media source.
+type SubtitleTrack struct {
+	Language string   `json:"language"`
+	Name     string   `json:"name,omitempty"`
+	Manual   bool     `json:"manual"`
+	Auto     bool     `json:"auto"`
+	Formats  []string `json:"formats,omitempty"`
+}
+
+// SubtitleCapabilities represents the subtitle capabilities discovered during analysis.
+type SubtitleCapabilities struct {
+	Tracks                      []SubtitleTrack `json:"tracks"`
+	EnglishTranslationAvailable bool            `json:"englishTranslationAvailable"`
+	TranslationLanguageKey      string          `json:"-"` // Internal identifier used for yt-dlp argv mapping
+}
+
+// SubtitleMode represents the output mode for downloaded subtitles.
+type SubtitleMode string
+
+const (
+	SubtitleModeSeparate SubtitleMode = "separate"
+	SubtitleModeEmbed    SubtitleMode = "embed"
+	SubtitleModeBoth     SubtitleMode = "both"
+)
+
+// SubtitleFormat represents the requested subtitle format.
+type SubtitleFormat string
+
+const (
+	SubtitleFormatSRT SubtitleFormat = "srt"
+	SubtitleFormatVTT SubtitleFormat = "vtt"
+)
+
+// SubtitleOptions holds the user's requested subtitle configuration for a media download.
+type SubtitleOptions struct {
+	Languages          []string       `json:"languages,omitempty"`
+	IncludeAuto        bool           `json:"includeAuto,omitempty"`
+	EnglishTranslation bool           `json:"englishTranslation,omitempty"`
+	Mode               SubtitleMode   `json:"mode,omitempty"`
+	Format             SubtitleFormat `json:"format,omitempty"`
+}
+
 // MediaInfo holds metadata extracted from a media source by yt-dlp.
 type MediaInfo struct {
-	Title           string        `json:"title"`
-	Duration        float64       `json:"duration"`
-	Thumbnail       string        `json:"thumbnail"`
-	URL             string        `json:"url"`
-	Formats         []MediaFormat `json:"formats"`
-	SelectedFmt     string        `json:"selectedFormat,omitempty"`
-	BestAudioFormat *MediaFormat  `json:"bestAudioFormat,omitempty"`
+	Title           string                `json:"title"`
+	Duration        float64               `json:"duration"`
+	Thumbnail       string                `json:"thumbnail"`
+	URL             string                `json:"url"`
+	Formats         []MediaFormat         `json:"formats"`
+	SelectedFmt     string                `json:"selectedFormat,omitempty"`
+	BestAudioFormat *MediaFormat          `json:"bestAudioFormat,omitempty"`
+	Subtitles       *SubtitleCapabilities `json:"subtitles,omitempty"`
+	SubtitleOptions *SubtitleOptions      `json:"subtitleOptions,omitempty"`
 }
 
 // TorrentFilePriority represents the priority level for a torrent file.

@@ -17,6 +17,7 @@ import type {
   JobNetworkPolicyOverride,
   SeedingPolicy,
   BulkAction,
+  SubtitleOptions,
 } from './types';
 import { removeJob, replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
 import { useJobSelection } from './hooks/useJobSelection';
@@ -389,9 +390,9 @@ function App() {
   }, []);
 
   const handleFormatSelected = useCallback(
-    async (jobId: string, formatId: string) => {
+    async (jobId: string, formatId: string, subtitleOptions?: SubtitleOptions) => {
       try {
-        const updated = await selectFormat(jobId, formatId);
+        const updated = await selectFormat(jobId, formatId, subtitleOptions);
         setJobs((currentJobs) => upsertJob(currentJobs, updated));
         setFormatJobId(null);
         fetchQueue();

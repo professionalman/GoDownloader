@@ -2,11 +2,12 @@ import React, { useState, useEffect, useRef, useId } from 'react';
 import {
   Video, Music, Check, ChevronDown, ChevronUp, X, Download, Loader2, Sparkles, ShieldCheck, Zap, Info, Volume2
 } from 'lucide-react';
-import type { Job, MediaFormat } from '../types';
+import type { Job, MediaFormat, SubtitleOptions } from '../types';
+import { SubtitleSelector } from './SubtitleSelector';
 
 export interface FormatSelectorProps {
   job: Job;
-  onSelect: (jobId: string, formatId: string) => Promise<void> | void;
+  onSelect: (jobId: string, formatId: string, subtitleOptions?: SubtitleOptions) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -276,6 +277,7 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
   });
 
   const [expandedCodecs, setExpandedCodecs] = useState<Record<string, boolean>>({});
+  const [subtitleOptions, setSubtitleOptions] = useState<SubtitleOptions | undefined>(undefined);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -329,7 +331,11 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
     try {
       setIsSubmitting(true);
       setError(null);
-      await onSelect(job.id, selectedFormatId);
+      if (subtitleOptions) {
+        await onSelect(job.id, selectedFormatId, subtitleOptions);
+      } else {
+        await onSelect(job.id, selectedFormatId);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to select format');
       setIsSubmitting(false);
@@ -714,6 +720,13 @@ export const FormatSelector: React.FC<FormatSelectorProps> = ({ job, onSelect, o
               )}
             </div>
           )}
+
+          {/* Subtitle Selector */}
+          <SubtitleSelector
+            subtitles={mediaInfo.subtitles}
+            onChange={setSubtitleOptions}
+            disabled={isSubmitting}
+          />
         </div>
 
         {/* Sticky Footer */}

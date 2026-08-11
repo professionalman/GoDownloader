@@ -426,4 +426,39 @@ describe('FormatSelector component', () => {
     expect(screen.getAllByText(/Video: Size unavailable/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Estimated total: Unknown/i).length).toBeGreaterThan(0);
   });
+
+  it('26. Submits selected subtitle options alongside selected format ID', async () => {
+    const jobWithSubs: Job = {
+      ...sampleJob,
+      mediaInfo: {
+        ...sampleJob.mediaInfo!,
+        subtitles: {
+          tracks: [
+            { language: 'ja', name: 'Japanese', manual: true, auto: false, formats: ['vtt'] },
+          ],
+          englishTranslationAvailable: true,
+        },
+      },
+    };
+
+    const onSelect = vi.fn();
+    render(<FormatSelector job={jobWithSubs} onSelect={onSelect} onClose={vi.fn()} />);
+
+    // Select Japanese subtitle
+    fireEvent.click(screen.getByLabelText(/Japanese/i));
+
+    // Submit download
+    const confirmBtn = screen.getByTestId('format-confirm-button');
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(onSelect).toHaveBeenCalledWith('job-101', 'f-2160p', {
+        languages: ['ja'],
+        includeAuto: false,
+        englishTranslation: false,
+        mode: 'separate',
+        format: 'srt',
+      });
+    });
+  });
 });
