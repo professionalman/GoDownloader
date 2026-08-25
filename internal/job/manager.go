@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -2692,6 +2693,25 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				j.CompletedBytes = fi.Size()
 			}
 			m.updateActiveJobFinalization(j.ID, j.FinalPath, j.Name)
+
+			// Finalize standalone subtitle sidecars if requested (Separate or Both mode)
+			if subErr := m.finalizeMediaSubtitles(ctx, j, srcFile); subErr != nil {
+				log.Printf("UpdateJobFromEngine: subtitle finalization failed for job %s: %v", j.ID, subErr)
+				j.Status = StatusFailed
+				j.Error = fmt.Sprintf("subtitle finalization failed: %v", subErr)
+				j.UpdatedAt = time.Now()
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+					return
+				}
+				m.removeActive(j.ID)
+				m.publish(EventJobFailed, j)
+				m.cleanupTerminalEngineState(j)
+				if m.scheduler != nil {
+					m.scheduler.Kick()
+				}
+				return
+			}
 		}
 
 		if j.Type == TypeDownload {
@@ -3813,5 +3833,119 @@ func (m *Manager) enqueueJob(ctx context.Context, j *Job, action QueueAction) er
 	if err != nil {
 		return fmt.Errorf("enqueue queue entry: %w", err)
 	}
+	return nil
+}
+
+// finalizeMediaSubtitles discovers and promotes standalone subtitle sidecar artifacts from WorkDir to DestinationDir.
+func (m *Manager) finalizeMediaSubtitles(ctx context.Context, j *Job, primarySrcFile string) error {
+	if j == nil || j.MediaInfo == nil || j.MediaInfo.SubtitleOptions == nil {
+		return nil
+	}
+
+	opts := j.MediaInfo.SubtitleOptions
+	if len(opts.Languages) == 0 && !opts.EnglishTranslation {
+		return nil
+	}
+
+	mode := opts.Mode
+	if mode == "" {
+		mode = SubtitleModeSeparate
+	}
+
+	// Only Separate and Both modes retain standalone subtitle files in the destination directory
+	if mode != SubtitleModeSeparate && mode != SubtitleModeBoth {
+		return nil
+	}
+
+	if j.WorkDir == "" {
+		return nil
+	}
+
+	cleanWorkDir := filepath.Clean(j.WorkDir)
+	entries, err := os.ReadDir(cleanWorkDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read workdir %s: %w", j.WorkDir, err)
+	}
+
+	// Determine eligible subtitle extension based on requested format
+	eligibleExt := ".srt"
+	if opts.Format == SubtitleFormatVTT {
+		eligibleExt = ".vtt"
+	}
+
+	primaryBase := filepath.Base(primarySrcFile)
+
+	var sidecars []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if name == primaryBase {
+			continue
+		}
+		if name == storage.WorkDirMarkerFilename || strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		nameLower := strings.ToLower(name)
+		// Exclude temporary/unrelated files
+		if strings.HasSuffix(nameLower, ".part") ||
+			strings.HasSuffix(nameLower, ".ytdl") ||
+			strings.HasSuffix(nameLower, ".tmp") ||
+			strings.HasSuffix(nameLower, ".temp") ||
+			strings.HasSuffix(nameLower, ".info.json") ||
+			strings.HasSuffix(nameLower, ".jpg") ||
+			strings.HasSuffix(nameLower, ".jpeg") ||
+			strings.HasSuffix(nameLower, ".png") ||
+			strings.HasSuffix(nameLower, ".webp") ||
+			strings.HasSuffix(nameLower, ".description") {
+			continue
+		}
+
+		// Constrain strictly to the requested subtitle format extension (.srt or .vtt)
+		if !strings.HasSuffix(nameLower, eligibleExt) {
+			continue
+		}
+
+		subPath := filepath.Join(cleanWorkDir, name)
+		cleanSub := filepath.Clean(subPath)
+
+		// Validate containment within WorkDir
+		rel, relErr := filepath.Rel(cleanWorkDir, cleanSub)
+		if relErr != nil || strings.HasPrefix(rel, "..") || rel == "." {
+			continue
+		}
+
+		// Validate that the artifact is a regular file
+		fi, statErr := os.Stat(cleanSub)
+		if statErr != nil || fi.IsDir() || !fi.Mode().IsRegular() {
+			continue
+		}
+
+		sidecars = append(sidecars, cleanSub)
+	}
+
+	// Sort sidecars deterministically
+	sort.Strings(sidecars)
+
+	for _, subFile := range sidecars {
+		if m.storageService != nil {
+			_, err := m.storageService.FinalizeFile(ctx, subFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
+			if err != nil {
+				return fmt.Errorf("failed to finalize subtitle file %s: %w", filepath.Base(subFile), err)
+			}
+		} else {
+			destPath := filepath.Join(j.DestinationDir, filepath.Base(subFile))
+			if err := storage.MoveOrCopyFile(subFile, destPath); err != nil {
+				return fmt.Errorf("failed to move subtitle file %s: %w", filepath.Base(subFile), err)
+			}
+		}
+	}
+
 	return nil
 }

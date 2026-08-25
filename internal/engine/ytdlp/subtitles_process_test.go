@@ -51,13 +51,15 @@ func TestEngine_Start_Subtitles_RealChild(t *testing.T) {
 	}
 
 	// Wait for process completion
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		st, _ := eng.Status(context.Background(), j)
-		if st != nil && st.Status == job.StatusCompleted {
-			break
+		if _, statErr := os.Stat(argsFile); statErr == nil {
+			st, _ := eng.Status(context.Background(), j)
+			if st != nil && (st.Status == job.StatusCompleted || st.Status == job.StatusFailed) {
+				break
+			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	data, err := os.ReadFile(argsFile)
@@ -151,13 +153,15 @@ func TestEngine_Start_AuthAndSubtitles_Composition_RealChild(t *testing.T) {
 	}
 
 	// Wait for process completion
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		st, _ := eng.Status(context.Background(), j)
-		if st != nil && st.Status == job.StatusCompleted {
-			break
+		if _, statErr := os.Stat(argsFile); statErr == nil {
+			st, _ := eng.Status(context.Background(), j)
+			if st != nil && (st.Status == job.StatusCompleted || st.Status == job.StatusFailed) {
+				break
+			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// 1. Verify cookie check occurred during execution
@@ -250,13 +254,15 @@ func TestEngine_Start_EnglishTranslationOnly_RealChild(t *testing.T) {
 	}
 
 	// Wait for process completion
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		st, _ := eng.Status(context.Background(), j)
-		if st != nil && st.Status == job.StatusCompleted {
-			break
+		if _, statErr := os.Stat(argsFile); statErr == nil {
+			st, _ := eng.Status(context.Background(), j)
+			if st != nil && (st.Status == job.StatusCompleted || st.Status == job.StatusFailed) {
+				break
+			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	data, err := os.ReadFile(argsFile)
@@ -319,20 +325,22 @@ func TestEngine_Start_EnglishTranslationOnly_BothMode_RealChild(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		st, _ := eng.Status(context.Background(), j)
-		if st != nil && st.Status == job.StatusCompleted {
-			break
+		if _, statErr := os.Stat(argsFile); statErr == nil {
+			st, _ := eng.Status(context.Background(), j)
+			if st != nil && (st.Status == job.StatusCompleted || st.Status == job.StatusFailed) {
+				break
+			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	data, err := os.ReadFile(argsFile)
+	data, err = os.ReadFile(argsFile)
 	if err != nil {
 		t.Fatalf("failed to read recorded args: %v", err)
 	}
-	args := strings.Split(string(data), "\n")
+	args = strings.Split(string(data), "\n")
 
 	// Both mode must include --write-subs (for retention), --embed-subs, --write-auto-subs, and --convert-subs srt
 	if !slices.Contains(args, "--sub-langs") || !slices.Contains(args, "en") {
@@ -391,13 +399,15 @@ func TestEngine_Start_EnglishTranslationOnly_EmbedMode_RealChild(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		st, _ := eng.Status(context.Background(), j)
-		if st != nil && st.Status == job.StatusCompleted {
-			break
+		if _, statErr := os.Stat(argsFile); statErr == nil {
+			st, _ := eng.Status(context.Background(), j)
+			if st != nil && (st.Status == job.StatusCompleted || st.Status == job.StatusFailed) {
+				break
+			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	data, err := os.ReadFile(argsFile)
