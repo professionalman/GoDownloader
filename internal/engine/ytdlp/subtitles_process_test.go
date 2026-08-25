@@ -325,7 +325,7 @@ func TestEngine_Start_EnglishTranslationOnly_BothMode_RealChild(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	deadline = time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, statErr := os.Stat(argsFile); statErr == nil {
 			st, _ := eng.Status(context.Background(), j)
@@ -336,11 +336,11 @@ func TestEngine_Start_EnglishTranslationOnly_BothMode_RealChild(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	data, err = os.ReadFile(argsFile)
+	data, err := os.ReadFile(argsFile)
 	if err != nil {
 		t.Fatalf("failed to read recorded args: %v", err)
 	}
-	args = strings.Split(string(data), "\n")
+	args := strings.Split(string(data), "\n")
 
 	// Both mode must include --write-subs (for retention), --embed-subs, --write-auto-subs, and --convert-subs srt
 	if !slices.Contains(args, "--sub-langs") || !slices.Contains(args, "en") {
@@ -399,7 +399,7 @@ func TestEngine_Start_EnglishTranslationOnly_EmbedMode_RealChild(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	deadline = time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, statErr := os.Stat(argsFile); statErr == nil {
 			st, _ := eng.Status(context.Background(), j)
