@@ -130,7 +130,7 @@ func TestNormalizeSubtitles(t *testing.T) {
 					{Ext: "vtt", Name: "Korean", URL: "https://example.com/auto/ko.vtt"},
 				},
 			},
-			spokenLang: "it",
+			spokenLang: "",
 			wantCaps: &job.SubtitleCapabilities{
 				Tracks: []job.SubtitleTrack{
 					{
@@ -163,7 +163,7 @@ func TestNormalizeSubtitles(t *testing.T) {
 					{Ext: "vtt", Name: "French", URL: "https://example.com/auto/fr.vtt"},
 				},
 			},
-			spokenLang: "ja",
+			spokenLang: "",
 			wantCaps: &job.SubtitleCapabilities{
 				Tracks: []job.SubtitleTrack{
 					{
@@ -340,7 +340,6 @@ func TestNormalizeSubtitles(t *testing.T) {
 			spokenLang: "ja",
 			wantCaps: &job.SubtitleCapabilities{
 				Tracks: []job.SubtitleTrack{
-					{Language: "en", Name: "English", Manual: false, Auto: true, Formats: []string{"vtt"}},
 					{Language: "ja", Name: "Japanese", Manual: true, Auto: true, Formats: []string{"vtt"}},
 				},
 				EnglishTranslationAvailable: true,
@@ -378,7 +377,7 @@ func TestNormalizeSubtitles(t *testing.T) {
 			spokenLang: "ja",
 			wantCaps: &job.SubtitleCapabilities{
 				Tracks: []job.SubtitleTrack{
-					{Language: "en", Name: "English", Manual: true, Auto: true, Formats: []string{"vtt"}},
+					{Language: "en", Name: "English", Manual: true, Auto: false, Formats: []string{"vtt"}},
 				},
 				EnglishTranslationAvailable: true,
 				TranslationLanguageKey:      "en",
@@ -395,15 +394,13 @@ func TestNormalizeSubtitles(t *testing.T) {
 			},
 			spokenLang: "fr",
 			wantCaps: &job.SubtitleCapabilities{
-				Tracks: []job.SubtitleTrack{
-					{Language: "en", Name: "English", Manual: false, Auto: true, Formats: []string{"srv3", "vtt"}},
-				},
+				Tracks:                      []job.SubtitleTrack{},
 				EnglishTranslationAvailable: true,
 				TranslationLanguageKey:      "en",
 			},
 		},
 		{
-			name:    "24. other translated languages do NOT become exposed UI translation choices",
+			name:    "24. other translated languages do NOT become exposed UI translation choices or normal tracks",
 			rawSubs: nil,
 			rawAuto: map[string][]ytdlpSubtitleEntry{
 				"hi": {
@@ -415,10 +412,7 @@ func TestNormalizeSubtitles(t *testing.T) {
 			},
 			spokenLang: "ja",
 			wantCaps: &job.SubtitleCapabilities{
-				Tracks: []job.SubtitleTrack{
-					{Language: "es", Name: "Spanish", Manual: false, Auto: true, Formats: []string{"vtt"}},
-					{Language: "hi", Name: "Hindi", Manual: false, Auto: true, Formats: []string{"vtt"}},
-				},
+				Tracks:                      []job.SubtitleTrack{},
 				EnglishTranslationAvailable: false,
 			},
 		},
@@ -456,8 +450,57 @@ func TestNormalizeSubtitles(t *testing.T) {
 			spokenLang: "",
 			wantCaps: &job.SubtitleCapabilities{
 				Tracks: []job.SubtitleTrack{
-					{Language: "en", Name: "English (auto-generated)", Manual: false, Auto: true, Formats: []string{"vtt"}},
 					{Language: "ja", Name: "Japanese (auto-generated)", Manual: false, Auto: true, Formats: []string{"vtt"}},
+				},
+				EnglishTranslationAvailable: true,
+				TranslationLanguageKey:      "en",
+			},
+		},
+		{
+			name: "27. realistic 100+ translated-variant fixture collapses to compact source-track set",
+			rawSubs: map[string][]ytdlpSubtitleEntry{
+				"en": {
+					{Ext: "vtt", Name: "English"},
+				},
+			},
+			rawAuto: map[string][]ytdlpSubtitleEntry{
+				"pa-orig": {
+					{Ext: "vtt", Name: "Punjabi (Original)", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa"},
+				},
+				"pa": {
+					{Ext: "vtt", Name: "Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa"},
+				},
+				"en": {
+					{Ext: "vtt", Name: "English from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=en"},
+				},
+				"af": {
+					{Ext: "vtt", Name: "Afrikaans from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=af"},
+				},
+				"ar": {
+					{Ext: "vtt", Name: "Arabic from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=ar"},
+				},
+				"de": {
+					{Ext: "vtt", Name: "German from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=de"},
+				},
+				"es": {
+					{Ext: "vtt", Name: "Spanish from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=es"},
+				},
+				"fr": {
+					{Ext: "vtt", Name: "French from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=fr"},
+				},
+				"hi": {
+					{Ext: "vtt", Name: "Hindi from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=hi"},
+				},
+				"ja": {
+					{Ext: "vtt", Name: "Japanese from Punjabi", URL: "https://www.youtube.com/api/timedtext?v=QwL0rLScmyU&lang=pa&tlang=ja"},
+				},
+			},
+			spokenLang: "",
+			wantCaps: &job.SubtitleCapabilities{
+				Tracks: []job.SubtitleTrack{
+					{Language: "en", Name: "English", Manual: true, Auto: false, Formats: []string{"vtt"}},
+					{Language: "pa", Name: "Punjabi", Manual: false, Auto: true, Formats: []string{"vtt"}},
+					{Language: "pa-orig", Name: "Punjabi (Original)", Manual: false, Auto: true, Formats: []string{"vtt"}},
 				},
 				EnglishTranslationAvailable: true,
 				TranslationLanguageKey:      "en",

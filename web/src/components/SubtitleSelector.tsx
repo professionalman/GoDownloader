@@ -4,6 +4,7 @@ import type {
   SubtitleOptions,
   SubtitleMode,
   SubtitleFormat,
+  SubtitleTrack,
 } from '../types';
 
 export interface SubtitleSelectorProps {
@@ -27,6 +28,10 @@ export function SubtitleSelector({
   const englishTranslationAvailable = !!subtitles?.englishTranslationAvailable;
   const hasSubtitles = tracks.length > 0 || englishTranslationAvailable;
   const hasSelection = selectedLanguages.length > 0 || englishTranslation;
+
+  const availableTracks = tracks.filter((t) => t.manual);
+  const autoOnlyTracks = tracks.filter((t) => !t.manual && t.auto);
+  const hasAutoTracks = autoOnlyTracks.length > 0 || tracks.some((t) => t.auto);
 
   // Notify parent whenever options change
   useEffect(() => {
@@ -55,6 +60,20 @@ export function SubtitleSelector({
     );
   }
 
+  const handleToggleIncludeAuto = (checked: boolean) => {
+    if (disabled) return;
+    setIncludeAuto(checked);
+    if (!checked) {
+      // Clear any selected auto-only tracks automatically
+      setSelectedLanguages((prev) =>
+        prev.filter((lang) => {
+          const track = tracks.find((t) => t.language === lang);
+          return track?.manual;
+        })
+      );
+    }
+  };
+
   const handleToggleLanguage = (lang: string) => {
     if (disabled) return;
     setSelectedLanguages((prev) => {
@@ -74,6 +93,37 @@ export function SubtitleSelector({
     if (manual) return 'Manual';
     if (auto) return 'Auto-generated';
     return 'Available';
+  };
+
+  const renderTrackCard = (track: SubtitleTrack) => {
+    const isChecked = selectedLanguages.includes(track.language);
+    const badge = getTrackBadgeLabel(track.manual, track.auto);
+    return (
+      <label
+        key={track.language}
+        className={`flex items-center justify-between p-2 rounded-md border text-xs cursor-pointer transition-colors ${
+          isChecked
+            ? 'border-primary/50 bg-primary/10 text-foreground'
+            : 'border-border/40 bg-card hover:bg-accent/40 text-foreground/80'
+        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      >
+        <div className="flex items-center space-x-2 truncate pr-2">
+          <input
+            type="checkbox"
+            checked={isChecked}
+            onChange={() => handleToggleLanguage(track.language)}
+            disabled={disabled}
+            className="rounded border-border text-primary focus:ring-primary h-3.5 w-3.5"
+          />
+          <span className="font-medium truncate">
+            {track.name ? `${track.name} (${track.language})` : track.language}
+          </span>
+        </div>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0">
+          {badge}
+        </span>
+      </label>
+    );
   };
 
   return (
@@ -97,55 +147,38 @@ export function SubtitleSelector({
         )}
       </div>
 
-      {/* Available tracks list */}
-      {tracks.length > 0 && (
+      {/* Available manual/default tracks list */}
+      {availableTracks.length > 0 && (
         <div className="space-y-2">
           <div className="text-xs font-medium text-foreground/80">Available subtitles</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
-            {tracks.map((track) => {
-              const isChecked = selectedLanguages.includes(track.language);
-              const badge = getTrackBadgeLabel(track.manual, track.auto);
-              return (
-                <label
-                  key={track.language}
-                  className={`flex items-center justify-between p-2 rounded-md border text-xs cursor-pointer transition-colors ${
-                    isChecked
-                      ? 'border-primary/50 bg-primary/10 text-foreground'
-                      : 'border-border/40 bg-card hover:bg-accent/40 text-foreground/80'
-                  } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  <div className="flex items-center space-x-2 truncate pr-2">
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => handleToggleLanguage(track.language)}
-                      disabled={disabled}
-                      className="rounded border-border text-primary focus:ring-primary h-3.5 w-3.5"
-                    />
-                    <span className="font-medium truncate">
-                      {track.name ? `${track.name} (${track.language})` : track.language}
-                    </span>
-                  </div>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0">
-                    {badge}
-                  </span>
-                </label>
-              );
-            })}
+            {availableTracks.map(renderTrackCard)}
           </div>
+        </div>
+      )}
 
-          {/* Auto captions toggle */}
-          <div className="pt-1">
-            <label className="flex items-center space-x-2 text-xs text-muted-foreground cursor-pointer">
-              <input
-                type="checkbox"
-                checked={includeAuto}
-                onChange={(e) => setIncludeAuto(e.target.checked)}
-                disabled={disabled}
-                className="rounded border-border text-primary focus:ring-primary h-3.5 w-3.5"
-              />
-              <span>Allow auto-generated subtitles</span>
-            </label>
+      {/* Auto captions toggle */}
+      {hasAutoTracks && (
+        <div className="pt-1">
+          <label className="flex items-center space-x-2 text-xs text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeAuto}
+              onChange={(e) => handleToggleIncludeAuto(e.target.checked)}
+              disabled={disabled}
+              className="rounded border-border text-primary focus:ring-primary h-3.5 w-3.5"
+            />
+            <span>Allow auto-generated subtitles</span>
+          </label>
+        </div>
+      )}
+
+      {/* Auto-generated tracks list (only shown when includeAuto is enabled) */}
+      {includeAuto && autoOnlyTracks.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-foreground/80">Auto-generated subtitles</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+            {autoOnlyTracks.map(renderTrackCard)}
           </div>
         </div>
       )}

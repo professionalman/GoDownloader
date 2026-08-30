@@ -307,6 +307,7 @@ func audioCodecPriority(acodec string) int {
 func normalizeSubtitles(rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[string][]ytdlpSubtitleEntry, spokenLang string) *job.SubtitleCapabilities {
 	tracksMap := make(map[string]*job.SubtitleTrack)
 	formatSets := make(map[string]map[string]struct{})
+	cleanSpoken := strings.ToLower(strings.TrimSpace(spokenLang))
 
 	// 1. Process manual subtitles
 	for langKey, entries := range rawSubs {
@@ -335,12 +336,18 @@ func normalizeSubtitles(rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[str
 		formatSets[lang] = fset
 	}
 
-	// 2. Process automatic captions
+	// 2. Process automatic captions — filter out translated auto-captions so only genuine native/source auto tracks enter Tracks
 	for langKey, entries := range rawAuto {
 		lang := strings.TrimSpace(langKey)
 		if lang == "" {
 			continue
 		}
+
+		// Filter out auto-translated caption variants
+		if !isNativeAutoCaption(lang, entries, rawSubs, rawAuto, cleanSpoken) {
+			continue
+		}
+
 		var name string
 		fset := make(map[string]struct{})
 		for _, e := range entries {
@@ -393,8 +400,6 @@ func normalizeSubtitles(rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[str
 	// 4. Discover English translation capability
 	englishTranslationAvailable := false
 	translationLanguageKey := ""
-
-	cleanSpoken := strings.ToLower(strings.TrimSpace(spokenLang))
 
 	for k, entries := range rawAuto {
 		lk := strings.ToLower(strings.TrimSpace(k))
@@ -497,4 +502,122 @@ func isEnglishTranslationEntry(entry ytdlpSubtitleEntry, langKey string, rawSubs
 	}
 
 	return false
+}
+
+// isNativeAutoCaption determines if an entry in raw.AutomaticCaptions represents a genuine native/source auto-caption track.
+func isNativeAutoCaption(langKey string, entries []ytdlpSubtitleEntry, rawSubs map[string][]ytdlpSubtitleEntry, rawAuto map[string][]ytdlpSubtitleEntry, cleanSpoken string) bool {
+	lk := strings.ToLower(strings.TrimSpace(langKey))
+	if lk == "" {
+		return false
+	}
+
+	// 1. Explicit native markers in language key
+	// If the key explicitly ends with "-orig" (e.g. "pa-orig", "en-orig"), it is an original source caption.
+	if strings.HasSuffix(lk, "-orig") {
+		return true
+	}
+
+	// 2. Check each entry's URL and Name for translation indicators
+	hasTlang := false
+	hasTranslationName := false
+	hasOriginalName := false
+
+	for _, e := range entries {
+		nameLower := strings.ToLower(e.Name)
+		if strings.Contains(nameLower, " from ") || strings.Contains(nameLower, "translat") {
+			hasTranslationName = true
+		}
+		if strings.Contains(nameLower, "original") {
+			hasOriginalName = true
+		}
+
+		if e.URL != "" {
+			if parsedURL, err := url.Parse(e.URL); err == nil {
+				q := parsedURL.Query()
+				tlang := strings.ToLower(strings.TrimSpace(q.Get("tlang")))
+				if tlang != "" {
+					hasTlang = true
+				}
+			}
+		}
+	}
+
+	// If any entry has a tlang parameter in its URL, it is an auto-translation
+	if hasTlang {
+		return false
+	}
+
+	// If entry name mentions "from <language>" or "translated", it is an auto-translation
+	if hasTranslationName {
+		return false
+	}
+
+	// If entry name explicitly contains "original", it is native
+	if hasOriginalName {
+		return true
+	}
+
+	// 3. Inspect if rawAuto contains any "-orig" tracks
+	// If rawAuto has a "-orig" track (e.g. "pa-orig"), then other non-orig tracks that differ in language
+	// are translations.
+	var origLangs []string
+	for k := range rawAuto {
+		kLower := strings.ToLower(strings.TrimSpace(k))
+		if strings.HasSuffix(kLower, "-orig") {
+			origLangs = append(origLangs, strings.TrimSuffix(kLower, "-orig"))
+		}
+	}
+
+	if len(origLangs) > 0 {
+		baseLang := lk
+		if idx := strings.Index(lk, "-"); idx > 0 {
+			baseLang = lk[:idx]
+		}
+		for _, o := range origLangs {
+			if lk == o || baseLang == o {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 4. Check spoken language metadata if available
+	if cleanSpoken != "" {
+		baseSpoken := cleanSpoken
+		if idx := strings.Index(cleanSpoken, "-"); idx > 0 {
+			baseSpoken = cleanSpoken[:idx]
+		}
+		baseLang := lk
+		if idx := strings.Index(lk, "-"); idx > 0 {
+			baseLang = lk[:idx]
+		}
+
+		if lk == cleanSpoken || baseLang == baseSpoken {
+			return true
+		}
+		return false
+	}
+
+	// 5. Check if there are non-English manual tracks
+	var manualLangs []string
+	for k := range rawSubs {
+		manualLangs = append(manualLangs, strings.ToLower(strings.TrimSpace(k)))
+	}
+	if len(manualLangs) > 0 {
+		baseLang := lk
+		if idx := strings.Index(lk, "-"); idx > 0 {
+			baseLang = lk[:idx]
+		}
+		for _, m := range manualLangs {
+			baseManual := m
+			if idx := strings.Index(m, "-"); idx > 0 {
+				baseManual = m[:idx]
+			}
+			if lk == m || baseLang == baseManual {
+				return true
+			}
+		}
+	}
+
+	return true
 }
