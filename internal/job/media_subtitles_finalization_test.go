@@ -838,4 +838,214 @@ func TestMediaSubtitlesFinalization(t *testing.T) {
 			t.Errorf("WorkDir was not cleaned after successful finalization")
 		}
 	})
+
+	t.Run("17. Symlink .srt pointing outside WorkDir is rejected and not promoted", func(t *testing.T) {
+		mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+		ctx := context.Background()
+
+		workDir := filepath.Join(dataDir, "temp_media_symlink_out")
+		_ = os.MkdirAll(workDir, 0755)
+		_ = storageSrv.PrepareWorkDir(ctx, "job_symlink_out", workDir)
+
+		outsideDir := filepath.Join(dataDir, "outside_secret_dir")
+		_ = os.MkdirAll(outsideDir, 0755)
+		outsideSecret := filepath.Join(outsideDir, "secret.srt")
+		_ = os.WriteFile(outsideSecret, []byte("SECRET CONTENT"), 0644)
+
+		mediaFile := filepath.Join(workDir, "movie.mkv")
+		_ = os.WriteFile(mediaFile, []byte("media content"), 0644)
+
+		symlinkPath := filepath.Join(workDir, "malicious.en.srt")
+		if err := os.Symlink(outsideSecret, symlinkPath); err != nil {
+			t.Skipf("skipping symlink test on platform/environment without symlink permissions: %v", err)
+		}
+
+		j := &Job{
+			ID:             "job_symlink_out",
+			Source:         "https://example.com/watch?v=symlink_out",
+			Name:           "Symlink Outside Test",
+			Status:         StatusDownloading,
+			Engine:         "ytdlp",
+			EngineID:       "ytdlp_symlink_out_gid",
+			Type:           TypeMedia,
+			DestinationDir: downloadDir,
+			WorkDir:        workDir,
+			MediaInfo: &MediaInfo{
+				SelectedFmt: "18",
+				SubtitleOptions: &SubtitleOptions{
+					Languages: []string{"en"},
+					Mode:      SubtitleModeSeparate,
+					Format:    SubtitleFormatSRT,
+				},
+			},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		_ = jobRepo.Create(ctx, j)
+
+		mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{
+			Status:     StatusCompleted,
+			Progress:   100,
+			OutputPath: mediaFile,
+		}, true)
+
+		updated, _ := jobRepo.GetByID(ctx, j.ID)
+		if updated.Status != StatusCompleted {
+			t.Fatalf("expected StatusCompleted, got %s (err: %s)", updated.Status, updated.Error)
+		}
+
+		// Verify media exists in destination
+		if _, err := os.Stat(filepath.Join(downloadDir, "movie.mkv")); err != nil {
+			t.Errorf("expected media file in destination: %v", err)
+		}
+
+		// Verify symlink was NOT finalized to destination
+		if _, err := os.Stat(filepath.Join(downloadDir, "malicious.en.srt")); !os.IsNotExist(err) {
+			t.Errorf("symlink pointing outside workdir must NOT be promoted to destination")
+		}
+	})
+
+	t.Run("18. Symlink .srt pointing inside WorkDir is rejected under strict no-symlinks policy", func(t *testing.T) {
+		mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+		ctx := context.Background()
+
+		workDir := filepath.Join(dataDir, "temp_media_symlink_in")
+		_ = os.MkdirAll(workDir, 0755)
+		_ = storageSrv.PrepareWorkDir(ctx, "job_symlink_in", workDir)
+
+		mediaFile := filepath.Join(workDir, "movie.mkv")
+		_ = os.WriteFile(mediaFile, []byte("media content"), 0644)
+
+		realSub := filepath.Join(workDir, "real.en.srt")
+		_ = os.WriteFile(realSub, []byte("subtitle payload"), 0644)
+
+		symlinkPath := filepath.Join(workDir, "symlink.en.srt")
+		if err := os.Symlink(realSub, symlinkPath); err != nil {
+			t.Skipf("skipping symlink test on platform/environment without symlink permissions: %v", err)
+		}
+
+		j := &Job{
+			ID:             "job_symlink_in",
+			Source:         "https://example.com/watch?v=symlink_in",
+			Name:           "Symlink Inside Test",
+			Status:         StatusDownloading,
+			Engine:         "ytdlp",
+			EngineID:       "ytdlp_symlink_in_gid",
+			Type:           TypeMedia,
+			DestinationDir: downloadDir,
+			WorkDir:        workDir,
+			MediaInfo: &MediaInfo{
+				SelectedFmt: "18",
+				SubtitleOptions: &SubtitleOptions{
+					Languages: []string{"en"},
+					Mode:      SubtitleModeSeparate,
+					Format:    SubtitleFormatSRT,
+				},
+			},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		_ = jobRepo.Create(ctx, j)
+
+		mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{
+			Status:     StatusCompleted,
+			Progress:   100,
+			OutputPath: mediaFile,
+		}, true)
+
+		updated, _ := jobRepo.GetByID(ctx, j.ID)
+		if updated.Status != StatusCompleted {
+			t.Fatalf("expected StatusCompleted, got %s (err: %s)", updated.Status, updated.Error)
+		}
+
+		// Real subtitle file promoted
+		if _, err := os.Stat(filepath.Join(downloadDir, "real.en.srt")); err != nil {
+			t.Errorf("expected real subtitle in destination: %v", err)
+		}
+
+		// Symlink file NOT promoted
+		if _, err := os.Stat(filepath.Join(downloadDir, "symlink.en.srt")); !os.IsNotExist(err) {
+			t.Errorf("symlink pointing inside workdir must NOT be promoted to destination")
+		}
+	})
+
+	t.Run("19. File with leading double-dots filename like ..safe.en.srt is promoted and not falsely treated as traversal", func(t *testing.T) {
+		mgr, jobRepo, _, storageSrv, downloadDir, dataDir := setupStorageTestEnv(t)
+		ctx := context.Background()
+
+		workDir := filepath.Join(dataDir, "temp_media_dots")
+		_ = os.MkdirAll(workDir, 0755)
+		_ = storageSrv.PrepareWorkDir(ctx, "job_dots", workDir)
+
+		mediaFile := filepath.Join(workDir, "movie.mkv")
+		_ = os.WriteFile(mediaFile, []byte("media content"), 0644)
+
+		dotSubFile := filepath.Join(workDir, "..safe.en.srt")
+		_ = os.WriteFile(dotSubFile, []byte("subtitle payload for double dot filename"), 0644)
+
+		j := &Job{
+			ID:             "job_dots",
+			Source:         "https://example.com/watch?v=dots",
+			Name:           "Dots Filename Test",
+			Status:         StatusDownloading,
+			Engine:         "ytdlp",
+			EngineID:       "ytdlp_dots_gid",
+			Type:           TypeMedia,
+			DestinationDir: downloadDir,
+			WorkDir:        workDir,
+			MediaInfo: &MediaInfo{
+				SelectedFmt: "18",
+				SubtitleOptions: &SubtitleOptions{
+					Languages: []string{"en"},
+					Mode:      SubtitleModeSeparate,
+					Format:    SubtitleFormatSRT,
+				},
+			},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		_ = jobRepo.Create(ctx, j)
+
+		mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{
+			Status:     StatusCompleted,
+			Progress:   100,
+			OutputPath: mediaFile,
+		}, true)
+
+		updated, _ := jobRepo.GetByID(ctx, j.ID)
+		if updated.Status != StatusCompleted {
+			t.Fatalf("expected StatusCompleted, got %s (err: %s)", updated.Status, updated.Error)
+		}
+
+		// Double-dot safe subtitle file should be promoted
+		if _, err := os.Stat(filepath.Join(downloadDir, "..safe.en.srt")); err != nil {
+			t.Errorf("expected ..safe.en.srt in destination: %v", err)
+		}
+	})
+
+	t.Run("20. Unit tests for isContainedPath helper", func(t *testing.T) {
+		baseDir := filepath.Join(os.TempDir(), "base_test_dir")
+
+		tests := []struct {
+			name   string
+			target string
+			want   bool
+		}{
+			{name: "direct child", target: filepath.Join(baseDir, "file.srt"), want: true},
+			{name: "nested child", target: filepath.Join(baseDir, "sub", "file.srt"), want: true},
+			{name: "dot-prefixed filename", target: filepath.Join(baseDir, "..safe.srt"), want: true},
+			{name: "parent traversal", target: filepath.Join(baseDir, "..", "outside.srt"), want: false},
+			{name: "same directory .", target: baseDir, want: false},
+			{name: "parent directory ..", target: filepath.Dir(baseDir), want: false},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				got := isContainedPath(baseDir, tc.target)
+				if got != tc.want {
+					t.Errorf("isContainedPath(%q, %q) = %v; want %v", baseDir, tc.target, got, tc.want)
+				}
+			})
+		}
+	})
 }

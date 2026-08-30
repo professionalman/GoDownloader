@@ -3836,6 +3836,104 @@ func (m *Manager) enqueueJob(ctx context.Context, j *Job, action QueueAction) er
 	return nil
 }
 
+// isContainedPath checks whether targetPath is strictly inside baseDir without escaping via parent directory traversal.
+func isContainedPath(baseDir, targetPath string) bool {
+	cleanBase := filepath.Clean(baseDir)
+	cleanTarget := filepath.Clean(targetPath)
+
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil {
+		return false
+	}
+	if filepath.IsAbs(rel) {
+		return false
+	}
+	if rel == "." || rel == ".." {
+		return false
+	}
+	if strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+// validateSubtitleSidecar validates that a candidate in cleanWorkDir is a legitimate, regular, non-symlink subtitle artifact safely contained within workDir.
+func validateSubtitleSidecar(cleanWorkDir, realWorkDir, name, eligibleExt, primaryBase string) (string, bool) {
+	if name == primaryBase {
+		return "", false
+	}
+	if name == storage.WorkDirMarkerFilename {
+		return "", false
+	}
+	if name == "." || name == ".." {
+		return "", false
+	}
+
+	nameLower := strings.ToLower(name)
+	// Exclude temporary/metadata files
+	if strings.HasSuffix(nameLower, ".part") ||
+		strings.HasSuffix(nameLower, ".ytdl") ||
+		strings.HasSuffix(nameLower, ".tmp") ||
+		strings.HasSuffix(nameLower, ".temp") ||
+		strings.HasSuffix(nameLower, ".info.json") ||
+		strings.HasSuffix(nameLower, ".jpg") ||
+		strings.HasSuffix(nameLower, ".jpeg") ||
+		strings.HasSuffix(nameLower, ".png") ||
+		strings.HasSuffix(nameLower, ".webp") ||
+		strings.HasSuffix(nameLower, ".description") {
+		return "", false
+	}
+
+	// Constrain strictly to the requested subtitle format extension (.srt or .vtt)
+	if !strings.HasSuffix(nameLower, eligibleExt) {
+		return "", false
+	}
+
+	subPath := filepath.Join(cleanWorkDir, name)
+	cleanSub := filepath.Clean(subPath)
+
+	// 1. Lexical containment check on raw path
+	if !isContainedPath(cleanWorkDir, cleanSub) {
+		return "", false
+	}
+
+	// 2. Lstat check before following any link
+	lfi, lstatErr := os.Lstat(cleanSub)
+	if lstatErr != nil {
+		return "", false
+	}
+
+	// Reject symlinks directly (safest policy, no product need for subtitle symlinks)
+	if lfi.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+
+	// Must be a regular file at the entry level
+	if lfi.IsDir() || !lfi.Mode().IsRegular() {
+		return "", false
+	}
+
+	// 3. Resolve canonical path
+	realSub, evalErr := filepath.EvalSymlinks(cleanSub)
+	if evalErr != nil {
+		return "", false
+	}
+	realSub = filepath.Clean(realSub)
+
+	// 4. Resolved containment check against real workdir
+	if !isContainedPath(realWorkDir, realSub) {
+		return "", false
+	}
+
+	// 5. Stat the resolved target to verify it is regular
+	rfi, statErr := os.Stat(realSub)
+	if statErr != nil || rfi.IsDir() || !rfi.Mode().IsRegular() {
+		return "", false
+	}
+
+	return cleanSub, true
+}
+
 // finalizeMediaSubtitles discovers and promotes standalone subtitle sidecar artifacts from WorkDir to DestinationDir.
 func (m *Manager) finalizeMediaSubtitles(ctx context.Context, j *Job, primarySrcFile string) error {
 	if j == nil || j.MediaInfo == nil || j.MediaInfo.SubtitleOptions == nil {
@@ -3862,6 +3960,12 @@ func (m *Manager) finalizeMediaSubtitles(ctx context.Context, j *Job, primarySrc
 	}
 
 	cleanWorkDir := filepath.Clean(j.WorkDir)
+	realWorkDir, evalErr := filepath.EvalSymlinks(cleanWorkDir)
+	if evalErr != nil {
+		realWorkDir = cleanWorkDir
+	}
+	realWorkDir = filepath.Clean(realWorkDir)
+
 	entries, err := os.ReadDir(cleanWorkDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -3880,54 +3984,9 @@ func (m *Manager) finalizeMediaSubtitles(ctx context.Context, j *Job, primarySrc
 
 	var sidecars []string
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+		if validPath, ok := validateSubtitleSidecar(cleanWorkDir, realWorkDir, entry.Name(), eligibleExt, primaryBase); ok {
+			sidecars = append(sidecars, validPath)
 		}
-
-		name := entry.Name()
-		if name == primaryBase {
-			continue
-		}
-		if name == storage.WorkDirMarkerFilename || strings.HasPrefix(name, ".") {
-			continue
-		}
-
-		nameLower := strings.ToLower(name)
-		// Exclude temporary/unrelated files
-		if strings.HasSuffix(nameLower, ".part") ||
-			strings.HasSuffix(nameLower, ".ytdl") ||
-			strings.HasSuffix(nameLower, ".tmp") ||
-			strings.HasSuffix(nameLower, ".temp") ||
-			strings.HasSuffix(nameLower, ".info.json") ||
-			strings.HasSuffix(nameLower, ".jpg") ||
-			strings.HasSuffix(nameLower, ".jpeg") ||
-			strings.HasSuffix(nameLower, ".png") ||
-			strings.HasSuffix(nameLower, ".webp") ||
-			strings.HasSuffix(nameLower, ".description") {
-			continue
-		}
-
-		// Constrain strictly to the requested subtitle format extension (.srt or .vtt)
-		if !strings.HasSuffix(nameLower, eligibleExt) {
-			continue
-		}
-
-		subPath := filepath.Join(cleanWorkDir, name)
-		cleanSub := filepath.Clean(subPath)
-
-		// Validate containment within WorkDir
-		rel, relErr := filepath.Rel(cleanWorkDir, cleanSub)
-		if relErr != nil || strings.HasPrefix(rel, "..") || rel == "." {
-			continue
-		}
-
-		// Validate that the artifact is a regular file
-		fi, statErr := os.Stat(cleanSub)
-		if statErr != nil || fi.IsDir() || !fi.Mode().IsRegular() {
-			continue
-		}
-
-		sidecars = append(sidecars, cleanSub)
 	}
 
 	// Sort sidecars deterministically
