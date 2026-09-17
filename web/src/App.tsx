@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { DownloadForm } from './components/DownloadForm';
 import { DownloadsPanel } from './components/DownloadsPanel';
 import { QueueSection } from './components/QueueSection';
@@ -19,10 +19,11 @@ import type {
   BulkAction,
   SubtitleOptions,
 } from './types';
-import { removeJob, replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
+import { removeJob, replaceJobsFromInitialLoad, reconcileJobsFromSnapshot, upsertJob, upsertJobs } from './jobState';
 import { useJobSelection } from './hooks/useJobSelection';
 import {
   getJobs,
+  getSyncSnapshot,
   createJob,
   createBatchJobs,
   bulkAction,
@@ -66,6 +67,10 @@ function App() {
   const [torrentJobId, setTorrentJobId] = useState<string | null>(null);
   const [deleteJobId, setDeleteJobId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+  const lastAppliedCursorRef = useRef<number>(0);
+  const rehydrationGenRef = useRef<number>(0);
+  const activeEsRef = useRef<EventSource | null>(null);
+  const [streamTrigger, setStreamTrigger] = useState<number>(0);
 
   const fetchQueue = useCallback(async () => {
     try {
@@ -85,44 +90,100 @@ function App() {
     }
   }, []);
 
-  // Fetch initial data on mount
+  // Fetch initial authoritative data on mount
   useEffect(() => {
     let cancelled = false;
     setInitialLoading(true);
 
-    getJobs()
-      .then((loadedJobs) => {
+    getSyncSnapshot()
+      .then((snapshot) => {
         if (!cancelled) {
-          setJobs((currentJobs) =>
-            replaceJobsFromInitialLoad(currentJobs, loadedJobs)
-          );
+          lastAppliedCursorRef.current = snapshot.cursor;
+          setJobs(snapshot.jobs);
+          setQueueSnapshot(snapshot.queue);
+          if (snapshot.cursor > 0) {
+            setStreamTrigger((t) => t + 1);
+          }
         }
       })
       .catch((err) => {
+        getJobs()
+          .then((loadedJobs) => {
+            if (!cancelled) {
+              setJobs((currentJobs) =>
+                replaceJobsFromInitialLoad(currentJobs, loadedJobs)
+              );
+            }
+          })
+          .catch(() => {});
         if (!cancelled) setError(err.message);
       })
       .finally(() => {
         if (!cancelled) setInitialLoading(false);
       });
 
-    fetchQueue();
     fetchSettings();
 
     return () => {
       cancelled = true;
     };
-  }, [fetchQueue, fetchSettings]);
+  }, [fetchSettings]);
 
-  // Connect SSE for live progress
-  useEffect(() => {
-    const es = connectSSE((eventType: string, updatedJob: Job) => {
-      if (eventType === 'job.deleted') {
-        setJobs((currentJobs) => removeJob(currentJobs, updatedJob.id));
-      } else {
-        setJobs((currentJobs) => upsertJob(currentJobs, updatedJob));
+  const handleEvent = useCallback((eventType: string, updatedJob: Job, seq?: number) => {
+    if (seq !== undefined && seq > 0) {
+      if (seq <= lastAppliedCursorRef.current) {
+        // Idempotent deduplication: already applied
+        return;
       }
-      fetchQueue();
-    });
+      lastAppliedCursorRef.current = seq;
+    }
+
+    if (eventType === 'job.deleted') {
+      setJobs((currentJobs) => removeJob(currentJobs, updatedJob.id));
+    } else {
+      setJobs((currentJobs) => upsertJob(currentJobs, updatedJob));
+    }
+    fetchQueue();
+  }, [fetchQueue]);
+
+  const handleSyncRequired = useCallback(async () => {
+    const gen = ++rehydrationGenRef.current;
+    setConnectionState('reconnecting');
+
+    if (activeEsRef.current) {
+      try {
+        activeEsRef.current.close();
+      } catch {
+        // ignore
+      }
+      activeEsRef.current = null;
+    }
+
+    try {
+      const snapshot = await getSyncSnapshot();
+      if (gen !== rehydrationGenRef.current) {
+        // Superseded by newer rehydration request
+        return;
+      }
+      setJobs((currentJobs) => reconcileJobsFromSnapshot(currentJobs, snapshot.jobs));
+      setQueueSnapshot(snapshot.queue);
+      lastAppliedCursorRef.current = snapshot.cursor;
+
+      // Trigger reconnection from authoritative snapshot cursor
+      setStreamTrigger((t) => t + 1);
+    } catch (err) {
+      console.error('Failed to rehydrate state from sync snapshot:', err);
+    }
+  }, []);
+
+  // Connect SSE for live progress and bounded replay
+  useEffect(() => {
+    const es = connectSSE(
+      handleEvent,
+      handleSyncRequired,
+      () => lastAppliedCursorRef.current
+    );
+    activeEsRef.current = es;
 
     const handleOpen = () => setConnectionState('connected');
     const handleError = () => setConnectionState('reconnecting');
@@ -134,8 +195,11 @@ function App() {
       es.removeEventListener('open', handleOpen);
       es.removeEventListener('error', handleError);
       es.close();
+      if (activeEsRef.current === es) {
+        activeEsRef.current = null;
+      }
     };
-  }, [fetchQueue]);
+  }, [streamTrigger, handleEvent, handleSyncRequired]);
 
   const handleDownload = useCallback(
     async (

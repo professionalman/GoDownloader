@@ -151,9 +151,36 @@ func GenerateUniqueFilename(dstDir, filename string) string {
 	}
 }
 
-// MoveOrCopyFile moves src to dst, replacing dst safely if it exists (for ConflictPolicyOverwrite),
-// with fallback to atomic copy+move for cross-device/filesystem moves or OS rename limitations (e.g. Windows).
-func MoveOrCopyFile(src, dst string) error {
+// ResolveFinalPath calculates the final destination path for a file under policy without moving it.
+func ResolveFinalPath(srcPath, destinationDir string, policy FilenameConflictPolicy) (string, error) {
+	filename := filepath.Base(srcPath)
+	targetPath := filepath.Join(destinationDir, filename)
+
+	exists := false
+	if _, err := os.Stat(targetPath); err == nil {
+		exists = true
+	}
+
+	finalFilename := filename
+	switch policy {
+	case ConflictPolicyFail:
+		if exists {
+			return "", fmt.Errorf("%w: destination file %s already exists", ErrFileConflict, targetPath)
+		}
+	case ConflictPolicyOverwrite:
+		// Overwrite existing file
+	case ConflictPolicyRename, ConflictPolicyEngineManaged, "":
+		if exists {
+			finalFilename = GenerateUniqueFilename(destinationDir, filename)
+		}
+	}
+
+	return filepath.Join(destinationDir, finalFilename), nil
+}
+
+// MoveOrCopyFileExact moves src to dst.
+// If dst exists and allowOverwrite is false, it returns ErrFileConflict without modifying dst or removing src.
+func MoveOrCopyFileExact(src, dst string, allowOverwrite bool) error {
 	if src == dst {
 		return nil
 	}
@@ -167,6 +194,9 @@ func MoveOrCopyFile(src, dst string) error {
 	if fi, err := os.Stat(dst); err == nil {
 		if fi.IsDir() {
 			return fmt.Errorf("%w: target destination %s is a directory", ErrFileConflict, dst)
+		}
+		if !allowOverwrite {
+			return fmt.Errorf("%w: destination file %s already exists", ErrFileConflict, dst)
 		}
 	}
 
@@ -213,6 +243,10 @@ func MoveOrCopyFile(src, dst string) error {
 	var backupPath string
 	hasBackup := false
 	if _, err := os.Stat(dst); err == nil {
+		if !allowOverwrite {
+			os.Remove(tempPath)
+			return fmt.Errorf("%w: destination file %s already exists", ErrFileConflict, dst)
+		}
 		backupPath = dst + ".bak-" + hex.EncodeToString(randBuf)
 		if err := renameFunc(dst, backupPath); err != nil {
 			os.Remove(tempPath)
@@ -239,4 +273,10 @@ func MoveOrCopyFile(src, dst string) error {
 	}
 	os.Remove(src)
 	return nil
+}
+
+// MoveOrCopyFile moves src to dst, replacing dst safely if it exists (for ConflictPolicyOverwrite),
+// with fallback to atomic copy+move for cross-device/filesystem moves or OS rename limitations (e.g. Windows).
+func MoveOrCopyFile(src, dst string) error {
+	return MoveOrCopyFileExact(src, dst, true)
 }

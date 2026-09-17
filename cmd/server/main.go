@@ -110,12 +110,16 @@ func main() {
 
 	// Initialize job manager & scheduler
 	manager := job.NewManager(repo, registry, bus, cfg.DownloadDir, torrentRepo, cfg.DataDir)
+	sseHandler.SetCursorProvider(manager)
 	manager.SetMetadataTimeoutSeconds(cfg.QBitMetadataTimeoutSeconds)
 	manager.SetQueueRepository(queueRepo)
 	manager.SetSettingsService(settingsService)
 	manager.SetStorageService(storageService)
 	manager.SetCategoryRepository(catRepo)
 	manager.SetTrackerEntryProvider(trackerService)
+
+	execRepo := database.NewSQLiteExecutionRepository(db)
+	manager.SetExecutionRepository(execRepo)
 
 	scheduler := job.NewScheduler(repo, queueRepo, settingsService.EffectiveMaxConcurrentDownloads, manager.DispatchQueuedJob)
 	manager.SetScheduler(scheduler)

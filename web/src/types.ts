@@ -430,3 +430,10 @@ export interface ApiError {
     message: string;
   };
 }
+
+export interface SyncSnapshot {
+  cursor: number;
+  jobs: Job[];
+  queue: QueueSnapshot;
+  timestamp: string;
+}

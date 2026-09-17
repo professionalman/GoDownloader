@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -110,6 +111,16 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, j)
 }
 
+// GetSyncSnapshot handles GET /api/v1/sync/snapshot
+func (h *Handler) GetSyncSnapshot(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := h.manager.GetSyncSnapshot(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, job.ErrInternalError, "failed to get sync snapshot: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
 // GetJobs handles GET /api/v1/jobs
 func (h *Handler) GetJobs(w http.ResponseWriter, r *http.Request) {
 	jobs, err := h.manager.List(r.Context())
@@ -122,6 +133,8 @@ func (h *Handler) GetJobs(w http.ResponseWriter, r *http.Request) {
 		jobs = []job.Job{}
 	}
 
+	cursor := h.manager.GetCurrentCursor(r.Context())
+	w.Header().Set("X-Cursor", strconv.FormatInt(cursor, 10))
 	writeJSON(w, http.StatusOK, jobs)
 }
 

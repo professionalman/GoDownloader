@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,22 +17,38 @@ import (
 
 // DB wraps a SQLite connection.
 type DB struct {
-	conn *sql.DB
+	conn            *sql.DB
+	path            string
+	hadExistingFile bool
+}
+
+// Path returns the database file path.
+func (db *DB) Path() string {
+	return db.path
 }
 
 // New opens a SQLite database at dbPath and runs migrations.
 func New(dbPath string) (*DB, error) {
+	hadExistingFile := false
+	if dbPath != "" && dbPath != ":memory:" && !strings.Contains(dbPath, "mode=memory") {
+		if fi, err := os.Stat(dbPath); err == nil && fi.Size() > 0 {
+			hadExistingFile = true
+		}
+	}
+
 	conn, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	if err := conn.Ping(); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	db := &DB{conn: conn}
+	db := &DB{conn: conn, path: dbPath, hadExistingFile: hadExistingFile}
 	if err := db.migrate(); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
@@ -85,8 +104,248 @@ func (db *DB) migrate() error {
 	if err := db.migrateToV07NetworkControls(); err != nil {
 		return fmt.Errorf("migrate to V0.7 network controls: %w", err)
 	}
+	if err := db.migrateToV08Fnd1(); err != nil {
+		return fmt.Errorf("migrate to V0.8 FND-1 durable execution schema: %w", err)
+	}
 
 	return nil
+}
+
+// IsUsableSQLiteBackup checks whether the file at path exists, is non-empty,
+// passes SQLite PRAGMA quick_check, and contains the required pre-migration jobs table.
+func IsUsableSQLiteBackup(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() == 0 {
+		return false
+	}
+
+	bakConn, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return false
+	}
+	defer bakConn.Close()
+
+	var quickCheck string
+	if err := bakConn.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil || quickCheck != "ok" {
+		return false
+	}
+
+	var hasJobs int
+	if err := bakConn.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='jobs'").Scan(&hasJobs); err != nil || hasJobs == 0 {
+		return false
+	}
+
+	return true
+}
+
+func (db *DB) migrateToV08Fnd1() error {
+	// Pre-migration check: skip if already migrated
+	var preCheckDone int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM app_settings WHERE key = 'v08_fnd1_migrated'`).Scan(&preCheckDone); err == nil && preCheckDone > 0 {
+		return nil
+	}
+
+	// Back up existing database before semantic migration (ROADMAP requirement)
+	if db.hadExistingFile && db.path != "" && db.path != ":memory:" && !strings.Contains(db.path, "mode=memory") {
+		backupPath := db.path + ".pre-v08.bak"
+		if !IsUsableSQLiteBackup(backupPath) {
+			_ = os.Remove(backupPath)
+			cleanBackupPath := strings.ReplaceAll(filepath.ToSlash(backupPath), "'", "''")
+			if _, err := db.conn.Exec("VACUUM INTO '" + cleanBackupPath + "'"); err != nil {
+				return fmt.Errorf("create pre-migration backup %s: %w", backupPath, err)
+			}
+			if !IsUsableSQLiteBackup(backupPath) {
+				return fmt.Errorf("pre-migration backup %s failed integrity verification", backupPath)
+			}
+		}
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin V0.8 FND-1 migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	var migrationDone int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM app_settings WHERE key = 'v08_fnd1_migrated'`).Scan(&migrationDone); err != nil {
+		return fmt.Errorf("read V0.8 FND-1 migration marker: %w", err)
+	}
+
+	addColumn := func(table, name, ddl string) error {
+		rows, err := tx.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			return err
+		}
+		found := false
+		for rows.Next() {
+			var cid, notNull, pk int
+			var colName, typ string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &colName, &typ, &notNull, &defaultValue, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			if colName == name {
+				found = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+		_, err = tx.Exec("ALTER TABLE " + table + " ADD COLUMN " + ddl)
+		return err
+	}
+
+	// 1. Extend job_queue with retry metadata columns
+	queueColumns := []struct{ name, ddl string }{
+		{"retry_count", "retry_count INTEGER NOT NULL DEFAULT 0"},
+		{"not_before", "not_before DATETIME"},
+	}
+	for _, col := range queueColumns {
+		if err := addColumn("job_queue", col.name, col.ddl); err != nil {
+			return fmt.Errorf("add job_queue.%s: %w", col.name, err)
+		}
+	}
+
+	// 2. Create job_executions table
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS job_executions (
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		attempt_number INTEGER NOT NULL DEFAULT 1,
+		engine_family TEXT NOT NULL,
+		runtime_mode TEXT NOT NULL DEFAULT '',
+		engine_correlation_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'active',
+		failure_classification TEXT NOT NULL DEFAULT '',
+		failure_detail TEXT NOT NULL DEFAULT '',
+		started_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		completed_at DATETIME,
+		FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("create job_executions: %w", err)
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_job_executions_job_attempt
+		ON job_executions(job_id, attempt_number)`); err != nil {
+		return fmt.Errorf("create index idx_job_executions_job_attempt: %w", err)
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_job_executions_correlation
+		ON job_executions(engine_family, engine_correlation_id)`); err != nil {
+		return fmt.Errorf("create index idx_job_executions_correlation: %w", err)
+	}
+
+	// 3. Create http_checkpoints table
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS http_checkpoints (
+		job_id TEXT PRIMARY KEY,
+		execution_id TEXT,
+		checkpoint_version INTEGER NOT NULL DEFAULT 1,
+		effective_url TEXT NOT NULL DEFAULT '',
+		etag TEXT NOT NULL DEFAULT '',
+		last_modified TEXT NOT NULL DEFAULT '',
+		content_length INTEGER NOT NULL DEFAULT 0,
+		range_supported BOOLEAN NOT NULL DEFAULT 0,
+		staging_path TEXT NOT NULL DEFAULT '',
+		verified_bytes INTEGER NOT NULL DEFAULT 0,
+		updated_at DATETIME NOT NULL,
+		FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+		FOREIGN KEY (execution_id) REFERENCES job_executions(id) ON DELETE SET NULL
+	)`); err != nil {
+		return fmt.Errorf("create http_checkpoints: %w", err)
+	}
+
+	// 4. Create http_checkpoint_segments table
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS http_checkpoint_segments (
+		job_id TEXT NOT NULL,
+		segment_index INTEGER NOT NULL,
+		start_offset INTEGER NOT NULL,
+		current_offset INTEGER NOT NULL,
+		end_offset INTEGER NOT NULL,
+		verified_bytes INTEGER NOT NULL DEFAULT 0,
+		completed BOOLEAN NOT NULL DEFAULT 0,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (job_id, segment_index),
+		FOREIGN KEY (job_id) REFERENCES http_checkpoints(job_id) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("create http_checkpoint_segments: %w", err)
+	}
+
+	// 5. Create tool_records table (Tool Ledger)
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS tool_records (
+		name TEXT NOT NULL,
+		version TEXT NOT NULL,
+		platform_arch TEXT NOT NULL DEFAULT '',
+		ownership_mode TEXT NOT NULL DEFAULT 'system',
+		executable_path TEXT NOT NULL DEFAULT '',
+		sha256 TEXT NOT NULL DEFAULT '',
+		verification_status TEXT NOT NULL DEFAULT 'unverified',
+		status TEXT NOT NULL DEFAULT 'active',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (name, version)
+	)`); err != nil {
+		return fmt.Errorf("create tool_records: %w", err)
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_tool_records_name_status
+		ON tool_records(name, status)`); err != nil {
+		return fmt.Errorf("create index idx_tool_records_name_status: %w", err)
+	}
+
+	// 6. Create event_cursors table (StateSync sequence)
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS event_cursors (
+		scope TEXT PRIMARY KEY,
+		sequence_number INTEGER NOT NULL DEFAULT 0,
+		updated_at DATETIME NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create event_cursors: %w", err)
+	}
+
+	// 7. Create finalization_records table (FinalizationJournal)
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS finalization_records (
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		execution_id TEXT,
+		staging_path TEXT NOT NULL,
+		destination_path TEXT NOT NULL,
+		expected_size INTEGER NOT NULL DEFAULT 0,
+		expected_digest TEXT NOT NULL DEFAULT '',
+		conflict_policy TEXT NOT NULL DEFAULT 'rename',
+		phase TEXT NOT NULL DEFAULT 'prepared',
+		cleanup_path TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		completed_at DATETIME,
+		FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+		FOREIGN KEY (execution_id) REFERENCES job_executions(id) ON DELETE SET NULL
+	)`); err != nil {
+		return fmt.Errorf("create finalization_records: %w", err)
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_finalization_records_phase
+		ON finalization_records(phase)`); err != nil {
+		return fmt.Errorf("create index idx_finalization_records_phase: %w", err)
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_finalization_records_job_id
+		ON finalization_records(job_id)`); err != nil {
+		return fmt.Errorf("create index idx_finalization_records_job_id: %w", err)
+	}
+
+	// 8. Record migration completion marker if first run
+	if migrationDone == 0 {
+		if _, err := tx.Exec(`INSERT INTO app_settings (key, value, updated_at)
+			VALUES ('v08_fnd1_migrated', '1', ?)`, time.Now()); err != nil {
+			return fmt.Errorf("write V0.8 FND-1 migration marker: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (db *DB) migrateToV07NetworkControls() error {

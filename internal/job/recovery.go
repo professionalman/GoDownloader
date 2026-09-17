@@ -10,8 +10,17 @@ import (
 	"time"
 )
 
+// Recover runs startup recovery for all recoverable jobs and pending finalizations.
+func (m *Manager) Recover(ctx context.Context) {
+	m.recover(ctx)
+}
+
 // recover attempts to reconnect to running engine downloads on startup.
 func (m *Manager) recover(ctx context.Context) {
+	if m.execRepo != nil {
+		m.reconcileFinalizationJournal(ctx)
+	}
+
 	jobs, err := m.repo.ListRecoverable(ctx)
 	if err != nil {
 		log.Printf("recovery: failed to list recoverable jobs: %v", err)

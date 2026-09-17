@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"downloader/internal/networkpolicy"
@@ -33,6 +34,7 @@ type Manager struct {
 	dataDir        string
 	torrentRepo    ITorrentRepository
 	queueRepo      IQueueRepository
+	execRepo       IExecutionRepository
 	settings       *settings.SettingsService
 	storageService storage.IStorageService
 	categoryRepo   storage.ICategoryRepository
@@ -49,6 +51,8 @@ type Manager struct {
 	reconcileCancel context.CancelFunc
 
 	monitor *Monitor
+
+	fallbackCursor int64
 }
 
 // NewManager creates a new job manager.
@@ -135,6 +139,11 @@ func (m *Manager) SetCategoryRepository(catRepo storage.ICategoryRepository) {
 	m.categoryRepo = catRepo
 }
 
+// SetExecutionRepository wires the execution/finalization repository.
+func (m *Manager) SetExecutionRepository(execRepo IExecutionRepository) {
+	m.execRepo = execRepo
+}
+
 type ITrackerEntryProvider interface {
 	EnabledEntries(ctx context.Context) ([]string, error)
 }
@@ -152,6 +161,7 @@ func (m *Manager) SetScheduler(s *Scheduler) {
 	m.scheduler = s
 	if s != nil {
 		s.SetEventBus(m.bus)
+		s.SetPublishFunc(m.publish)
 		s.SetEngineRegistry(m.engines)
 		s.SetAddActiveFunc(m.addActive)
 		s.SetPrepareActiveJobFunc(m.prepareJobForActivation)
@@ -2502,6 +2512,59 @@ func (m *Manager) List(ctx context.Context) ([]Job, error) {
 	return jobs, nil
 }
 
+// SyncSnapshot provides an authoritative snapshot of server jobs and queue state
+// along with the monotonic cursor watermark.
+type SyncSnapshot struct {
+	Cursor    int64          `json:"cursor"`
+	Jobs      []Job          `json:"jobs"`
+	Queue     *QueueSnapshot `json:"queue"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
+// GetSyncSnapshot retrieves an authoritative snapshot of all jobs and queue state
+// along with the monotonic cursor watermark, using conservative lower-bound optimistic reading.
+func (m *Manager) GetSyncSnapshot(ctx context.Context) (*SyncSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var finalCursor int64
+	var jobs []Job
+	var queue *QueueSnapshot
+	var err error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		c1 := m.GetCurrentCursor(ctx)
+		jobs, err = m.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot list jobs: %w", err)
+		}
+		queue, err = m.GetQueueSnapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot get queue: %w", err)
+		}
+		c2 := m.GetCurrentCursor(ctx)
+
+		if c1 == c2 {
+			finalCursor = c1
+			break
+		}
+		// If cursor changed during read, c1 is the conservative lower-bound watermark
+		finalCursor = c1
+	}
+
+	if jobs == nil {
+		jobs = []Job{}
+	}
+
+	return &SyncSnapshot{
+		Cursor:    finalCursor,
+		Jobs:      jobs,
+		Queue:     queue,
+		Timestamp: time.Now().UTC(),
+	}, nil
+}
+
 func (m *Manager) hydrateTorrentState(ctx context.Context, j *Job) error {
 	if j == nil || j.Type != TypeTorrent || m.torrentRepo == nil {
 		return nil
@@ -2663,55 +2726,8 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				}
 				return
 			}
-
-			if m.storageService != nil {
-				finalPath, err := m.storageService.FinalizeFile(ctx, srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
-				if err != nil {
-					log.Printf("UpdateJobFromEngine: media finalization failed for job %s: %v", j.ID, err)
-					j.Status = StatusFailed
-					j.Error = fmt.Sprintf("file finalization failed: %v", err)
-					j.UpdatedAt = time.Now()
-					if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-						log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
-						return
-					}
-					m.removeActive(j.ID)
-					m.publish(EventJobFailed, j)
-					m.cleanupTerminalEngineState(j)
-					if m.scheduler != nil {
-						m.scheduler.Kick()
-					}
-					return
-				}
-				j.FinalPath = finalPath
-			} else {
-				j.FinalPath = srcFile
-			}
-			j.Name = filepath.Base(j.FinalPath)
-			if fi, statErr := os.Stat(j.FinalPath); statErr == nil && fi.Size() > 0 {
-				j.TotalBytes = fi.Size()
-				j.CompletedBytes = fi.Size()
-			}
-			m.updateActiveJobFinalization(j.ID, j.FinalPath, j.Name)
-
-			// Finalize standalone subtitle sidecars if requested (Separate or Both mode)
-			if subErr := m.finalizeMediaSubtitles(ctx, j, srcFile); subErr != nil {
-				log.Printf("UpdateJobFromEngine: subtitle finalization failed for job %s: %v", j.ID, subErr)
-				j.Status = StatusFailed
-				j.Error = fmt.Sprintf("subtitle finalization failed: %v", subErr)
-				j.UpdatedAt = time.Now()
-				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
-					return
-				}
-				m.removeActive(j.ID)
-				m.publish(EventJobFailed, j)
-				m.cleanupTerminalEngineState(j)
-				if m.scheduler != nil {
-					m.scheduler.Kick()
-				}
-				return
-			}
+			m.finalizeMediaArtifact(ctx, j, srcFile, fi.Size())
+			return
 		}
 
 		if j.Type == TypeDownload {
@@ -2845,11 +2861,16 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		} else {
 			if persistNow {
 				m.repo.Update(ctx, j)
+				m.mu.Lock()
+				m.activeJobs[j.ID] = j
+				m.mu.Unlock()
+				m.publish(EventJobUpdated, j)
+			} else {
+				m.mu.Lock()
+				m.activeJobs[j.ID] = j
+				m.mu.Unlock()
+				m.publishProgress(j)
 			}
-			m.mu.Lock()
-			m.activeJobs[j.ID] = j
-			m.mu.Unlock()
-			m.publish(EventJobUpdated, j)
 		}
 		return
 	}
@@ -2865,9 +2886,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 
 	if persistNow {
 		m.repo.Update(ctx, j)
+		m.publish(EventJobUpdated, j)
+	} else {
+		m.publishProgress(j)
 	}
-
-	m.publish(EventJobUpdated, j)
 }
 
 // --- V0.5 Queue & Settings APIs ---
@@ -2971,6 +2993,16 @@ func (m *Manager) ReorderQueue(ctx context.Context, priority JobPriority, jobIDs
 
 	if m.scheduler != nil {
 		m.scheduler.Kick()
+	}
+
+	if len(jobIDs) > 0 {
+		if j, err := m.repo.GetByID(ctx, jobIDs[0]); err == nil && j != nil {
+			m.publish(EventJobUpdated, j)
+		} else {
+			m.AdvanceEventCursor(ctx)
+		}
+	} else {
+		m.AdvanceEventCursor(ctx)
 	}
 	return nil
 }
@@ -3803,14 +3835,70 @@ func (m *Manager) processPendingEngineCleanups(ctx context.Context) {
 	}
 }
 
-func (m *Manager) publish(eventType string, j *Job) {
+// GetCurrentCursor returns the latest monotonic sequence number for global events.
+func (m *Manager) GetCurrentCursor(ctx context.Context) int64 {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.execRepo != nil {
+		seq, err := m.execRepo.GetEventCursor(ctx, "global")
+		if err == nil {
+			return seq
+		}
+		log.Printf("GetCurrentCursor: failed to query execRepo cursor: %v", err)
+	}
+	return atomic.LoadInt64(&m.fallbackCursor)
+}
+
+// AdvanceEventCursor atomically increments and returns the next monotonic sequence number for global events.
+func (m *Manager) AdvanceEventCursor(ctx context.Context) int64 {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.execRepo != nil {
+		seq, err := m.execRepo.AdvanceEventCursor(ctx, "global")
+		if err == nil {
+			return seq
+		}
+		log.Printf("AdvanceEventCursor: failed to advance execRepo cursor: %v", err)
+	}
+	return atomic.AddInt64(&m.fallbackCursor, 1)
+}
+
+// publishProgress publishes an ephemeral (unsequenced) progress update tick to the event bus.
+// It does NOT write to SQLite and does NOT advance the durable event cursor or enter the replay buffer.
+func (m *Manager) publishProgress(j *Job) {
 	if j == nil || m.bus == nil {
 		return
 	}
 	jobCopy := cloneJobSeedingState(j)
 	m.bus.Publish(Event{
-		Type: eventType,
-		Job:  jobCopy,
+		Sequence: 0,
+		Type:     EventJobUpdated,
+		Job:      jobCopy,
+	})
+}
+
+// publish publishes a durable state mutation event with a monotonically increasing cursor.
+func (m *Manager) publish(eventType string, j *Job) {
+	m.publishWithData(eventType, j, nil)
+}
+
+// publishWithData publishes a durable state mutation event with custom payload and a monotonic cursor.
+func (m *Manager) publishWithData(eventType string, j *Job, data any) {
+	if m.bus == nil {
+		return
+	}
+	seq := m.AdvanceEventCursor(context.Background())
+	var jobCopy Job
+	if j != nil {
+		jobCopy = cloneJobSeedingState(j)
+	}
+	m.bus.Publish(Event{
+		Sequence: seq,
+		Type:     eventType,
+		Job:      jobCopy,
+		Data:     data,
 	})
 }
 

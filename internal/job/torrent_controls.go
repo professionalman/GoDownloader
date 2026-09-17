@@ -152,10 +152,9 @@ func (m *Manager) UpdateSeedingPolicy(ctx context.Context, id string, policy net
 }
 
 func (m *Manager) publishSeedingPolicyUpdated(id string, j *Job) {
-	eventJob := cloneJobSeedingState(j)
-	m.bus.Publish(Event{Type: EventJobSeedingPolicyUpdated, Job: eventJob, Data: map[string]any{
-		"jobId": id, "seedingPolicy": cloneSeedingPolicy(eventJob.SeedingPolicy),
-	}})
+	m.publishWithData(EventJobSeedingPolicyUpdated, j, map[string]any{
+		"jobId": id, "seedingPolicy": cloneSeedingPolicy(j.SeedingPolicy),
+	})
 }
 
 func seedingThresholdReason(policy networkpolicy.SeedingPolicy, ratio float64, seconds int64) string {

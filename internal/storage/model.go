@@ -57,7 +57,9 @@ type IStorageService interface {
 	ResolveDestination(ctx context.Context, categoryID, customDest string, policy FilenameConflictPolicy, jobID string, isMedia bool) (*StorageResolution, error)
 	PrepareWorkDir(ctx context.Context, jobID, workDir string) error
 	Preflight(ctx context.Context, destinationDir, workDir string, totalBytes, completedBytes int64) error
+	ResolveFinalPath(srcPath, destinationDir string, policy FilenameConflictPolicy) (string, error)
 	FinalizeFile(ctx context.Context, srcPath, destinationDir string, policy FilenameConflictPolicy) (finalPath string, err error)
+	FinalizeFileToPath(ctx context.Context, srcPath, exactDestPath string, allowOverwrite bool) error
 	CleanupWorkDir(ctx context.Context, jobID, workDir string) error
 	CleanupStaleWorkDirs(ctx context.Context, activeJobIDs map[string]bool) error
 }

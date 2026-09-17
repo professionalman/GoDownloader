@@ -225,6 +225,36 @@ func (s *StorageService) Preflight(ctx context.Context, destinationDir, workDir 
 	return nil
 }
 
+// ResolveFinalPath determines the final destination path for a file under policy without moving it.
+func (s *StorageService) ResolveFinalPath(srcPath, destinationDir string, policy FilenameConflictPolicy) (string, error) {
+	finalizationMu.Lock()
+	defer finalizationMu.Unlock()
+
+	return ResolveFinalPath(srcPath, destinationDir, policy)
+}
+
+// FinalizeFileToPath moves srcPath to exactDestPath without re-resolving or selecting an alternate path.
+// If exactDestPath exists and allowOverwrite is false, it returns ErrFileConflict, preserving both source and destination.
+func (s *StorageService) FinalizeFileToPath(ctx context.Context, srcPath, exactDestPath string, allowOverwrite bool) error {
+	finalizationMu.Lock()
+	defer finalizationMu.Unlock()
+
+	if _, err := os.Stat(srcPath); err != nil {
+		return fmt.Errorf("%w: source file %s does not exist: %v", ErrStorageError, srcPath, err)
+	}
+
+	destDir := filepath.Dir(exactDestPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("%w: failed to create destination directory %s: %v", ErrStorageError, destDir, err)
+	}
+
+	if err := MoveOrCopyFileExact(srcPath, exactDestPath, allowOverwrite); err != nil {
+		return fmt.Errorf("%w: failed to move file to final destination %s: %v", ErrStorageError, exactDestPath, err)
+	}
+
+	return nil
+}
+
 // FinalizeFile safely moves a completed file from srcPath to destinationDir according to policy.
 func (s *StorageService) FinalizeFile(ctx context.Context, srcPath, destinationDir string, policy FilenameConflictPolicy) (string, error) {
 	finalizationMu.Lock()
@@ -238,31 +268,13 @@ func (s *StorageService) FinalizeFile(ctx context.Context, srcPath, destinationD
 		return "", fmt.Errorf("%w: failed to create destination directory %s: %v", ErrStorageError, destinationDir, err)
 	}
 
-	filename := filepath.Base(srcPath)
-	targetPath := filepath.Join(destinationDir, filename)
-
-	exists := false
-	if _, err := os.Stat(targetPath); err == nil {
-		exists = true
+	finalPath, err := ResolveFinalPath(srcPath, destinationDir, policy)
+	if err != nil {
+		return "", err
 	}
 
-	finalFilename := filename
-	switch policy {
-	case ConflictPolicyFail:
-		if exists {
-			return "", fmt.Errorf("%w: destination file %s already exists", ErrFileConflict, targetPath)
-		}
-	case ConflictPolicyOverwrite:
-		// Overwrite existing file
-	case ConflictPolicyRename, ConflictPolicyEngineManaged, "":
-		if exists {
-			finalFilename = GenerateUniqueFilename(destinationDir, filename)
-		}
-	}
-
-	finalPath := filepath.Join(destinationDir, finalFilename)
-
-	if err := MoveOrCopyFile(srcPath, finalPath); err != nil {
+	allowOverwrite := (policy == ConflictPolicyOverwrite)
+	if err := MoveOrCopyFileExact(srcPath, finalPath, allowOverwrite); err != nil {
 		return "", fmt.Errorf("%w: failed to move file to final destination %s: %v", ErrStorageError, finalPath, err)
 	}
 

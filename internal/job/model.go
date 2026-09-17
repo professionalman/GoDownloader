@@ -247,6 +247,8 @@ type QueueEntry struct {
 	JobID      string      `json:"jobId"`
 	Position   int64       `json:"position"`
 	Action     QueueAction `json:"action"`
+	RetryCount int         `json:"retryCount,omitempty"`
+	NotBefore  *time.Time  `json:"notBefore,omitempty"`
 	EnqueuedAt time.Time   `json:"enqueuedAt"`
 	UpdatedAt  time.Time   `json:"updatedAt"`
 }
@@ -256,6 +258,8 @@ type QueuedJob struct {
 	JobID         string      `json:"jobId"`
 	Position      int64       `json:"position"`
 	Action        QueueAction `json:"action"`
+	RetryCount    int         `json:"retryCount,omitempty"`
+	NotBefore     *time.Time  `json:"notBefore,omitempty"`
 	EnqueuedAt    time.Time   `json:"enqueuedAt"`
 	UpdatedAt     time.Time   `json:"updatedAt"`
 	WaitingReason string      `json:"waitingReason,omitempty"`

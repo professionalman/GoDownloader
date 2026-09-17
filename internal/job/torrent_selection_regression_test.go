@@ -56,6 +56,14 @@ func (m *regressionMockStorage) FinalizeFile(ctx context.Context, srcPath, desti
 	return srcPath, nil
 }
 
+func (m *regressionMockStorage) ResolveFinalPath(srcPath, destinationDir string, policy storage.FilenameConflictPolicy) (string, error) {
+	return storage.ResolveFinalPath(srcPath, destinationDir, policy)
+}
+
+func (m *regressionMockStorage) FinalizeFileToPath(ctx context.Context, srcPath, exactDestPath string, allowOverwrite bool) error {
+	return nil
+}
+
 func (m *regressionMockStorage) CleanupWorkDir(ctx context.Context, jobID, workDir string) error {
 	return nil
 }

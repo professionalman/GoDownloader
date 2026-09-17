@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Job, JobStatus } from './types';
-import { deduplicateJobsById, replaceJobsFromInitialLoad, upsertJob, upsertJobs } from './jobState';
+import { deduplicateJobsById, replaceJobsFromInitialLoad, reconcileJobsFromSnapshot, upsertJob, upsertJobs } from './jobState';
 
 function makeJob(id: string, updatedAt: string, status: JobStatus = 'queued', source = `https://example.com/${id}`): Job {
   return { id, updatedAt, status, source, name: id } as Job;
@@ -68,5 +68,25 @@ describe('Job state reconciliation', () => {
     const second = makeJob('b', '2026-08-01T08:01:00Z', 'queued', source);
 
     expect(upsertJobs([], [first, second])).toEqual([first, second]);
+  });
+
+  it('reconcileJobsFromSnapshot prunes deleted jobs while preserving newer in-memory updates', () => {
+    const deletedJob = makeJob('deleted-job', '2026-08-01T08:00:00Z', 'completed');
+    const liveJob = makeJob('live-job', '2026-08-01T08:05:00Z', 'downloading');
+    const currentJobs = [deletedJob, liveJob];
+
+    const snapshotLiveJob = makeJob('live-job', '2026-08-01T08:04:00Z', 'queued');
+    const snapshotNewJob = makeJob('fresh-job', '2026-08-01T08:06:00Z', 'queued');
+    const snapshotJobs = [snapshotLiveJob, snapshotNewJob];
+
+    const result = reconcileJobsFromSnapshot(currentJobs, snapshotJobs);
+
+    // deleted-job MUST be pruned (not in snapshot)
+    expect(result.map((j) => j.id)).toEqual(['live-job', 'fresh-job']);
+    // live-job in memory was newer (08:05 vs 08:04), so newer in-memory state is preserved
+    expect(result[0].status).toBe('downloading');
+    expect(result[0].updatedAt).toBe('2026-08-01T08:05:00Z');
+    // fresh-job from snapshot is included
+    expect(result[1].id).toBe('fresh-job');
   });
 });

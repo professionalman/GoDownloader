@@ -29,13 +29,15 @@ type IEventBus interface {
 
 // Event represents an internal event published by the job system.
 type Event struct {
-	Type string
-	Job  Job
-	Data any
+	Sequence int64  `json:"sequence,omitempty"`
+	Type     string `json:"type"`
+	Job      Job    `json:"job"`
+	Data     any    `json:"data,omitempty"`
 }
 
 // Event types.
 const (
+	EventSyncRequired            = "sync.required"
 	EventJobCreated              = "job.created"
 	EventJobUpdated              = "job.updated"
 	EventJobCompleted            = "job.completed"

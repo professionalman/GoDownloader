@@ -281,6 +281,18 @@ func (r *SQLiteJobRepository) DeleteJobCascade(ctx context.Context, jobID string
 	}
 	defer tx.Rollback()
 
+	if _, err := tx.ExecContext(ctx, `DELETE FROM http_checkpoint_segments WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from http_checkpoint_segments: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM http_checkpoints WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from http_checkpoints: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM finalization_records WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from finalization_records: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_executions WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete from job_executions: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM job_queue WHERE job_id = ?`, jobID); err != nil {
 		return fmt.Errorf("delete from job_queue: %w", err)
 	}

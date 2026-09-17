@@ -206,11 +206,11 @@ func (m *Manager) UpdateNetworkLimits(ctx context.Context, id string, update Net
 		}
 		return nil, &AppError{Code: ErrInternalError, Message: "failed to persist network policy"}
 	}
-	m.bus.Publish(Event{Type: EventJobNetworkUpdated, Job: *j, Data: map[string]any{
+	m.publishWithData(EventJobNetworkUpdated, j, map[string]any{
 		"jobId": id, "networkPolicy": j.NetworkPolicy,
 		"effectiveDownloadLimitBytesPerSecond": j.EffectiveDownloadLimitBytesPerSecond,
 		"effectiveUploadLimitBytesPerSecond":   j.EffectiveUploadLimitBytesPerSecond,
-	}})
+	})
 	return j, nil
 }
 

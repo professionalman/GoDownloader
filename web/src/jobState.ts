@@ -61,6 +61,19 @@ export function replaceJobsFromInitialLoad(currentJobs: readonly Job[], loadedJo
   return upsertJobs(deduplicateJobsById(loadedJobs), currentJobs);
 }
 
+export function reconcileJobsFromSnapshot(currentJobs: readonly Job[], snapshotJobs: readonly Job[]): Job[] {
+  const currentMap = new Map(currentJobs.map((job) => [job.id, job]));
+  const deduplicatedSnapshot = deduplicateJobsById(snapshotJobs);
+
+  return deduplicatedSnapshot.map((snapJob) => {
+    const current = currentMap.get(snapJob.id);
+    if (!current) {
+      return snapJob;
+    }
+    return newerJob(current, snapJob);
+  });
+}
+
 export function removeJob(currentJobs: readonly Job[], jobId: string): Job[] {
   return currentJobs.filter((job) => job.id !== jobId);
 }

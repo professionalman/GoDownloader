@@ -24,6 +24,7 @@ import type {
   UpdateMediaAuthPayload,
   SubtitleOptions,
   SelectFormatRequest,
+  SyncSnapshot,
 } from './types';
 
 const API_BASE = '/api/v1';
@@ -216,13 +217,28 @@ export async function selectFormat(
   return handleResponse<Job>(res);
 }
 
-export function connectSSE(onEvent: (eventType: string, job: Job) => void): EventSource {
-  const es = new EventSource(`${API_BASE}/events`);
+export async function getSyncSnapshot(): Promise<SyncSnapshot> {
+  const res = await fetch(`${API_BASE}/sync/snapshot`);
+  return handleResponse<SyncSnapshot>(res);
+}
+
+export function connectSSE(
+  onEvent: (eventType: string, job: Job, seq?: number) => void,
+  onSyncRequired?: (payload: { cursor: number; reason: string }) => void,
+  getCursor?: () => number | undefined
+): EventSource {
+  const cursorVal = typeof getCursor === 'function' ? getCursor() : undefined;
+  const url = cursorVal !== undefined && cursorVal >= 0
+    ? `${API_BASE}/events?cursor=${encodeURIComponent(cursorVal)}`
+    : `${API_BASE}/events`;
+
+  const es = new EventSource(url);
 
   const handler = (e: MessageEvent) => {
     try {
       const job: Job = JSON.parse(e.data);
-      onEvent(e.type, job);
+      const seq = e.lastEventId ? parseInt(e.lastEventId, 10) : undefined;
+      onEvent(e.type, job, Number.isNaN(seq) ? undefined : seq);
     } catch {
       // ignore parse errors
     }
@@ -234,6 +250,22 @@ export function connectSSE(onEvent: (eventType: string, job: Job) => void): Even
   es.addEventListener('job.failed', handler);
   es.addEventListener('job.cancelled', handler);
   es.addEventListener('job.deleted', handler);
+
+  if (onSyncRequired) {
+    es.addEventListener('sync.required', (e: MessageEvent) => {
+      try {
+        es.close();
+      } catch {
+        // ignore
+      }
+      try {
+        const payload = JSON.parse(e.data);
+        onSyncRequired(payload);
+      } catch {
+        onSyncRequired({ cursor: 0, reason: 'unknown' });
+      }
+    });
+  }
 
   es.onerror = () => {
     // EventSource will auto-reconnect

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"downloader/internal/job"
 )
@@ -23,14 +24,16 @@ func NewSQLiteQueueRepository(db *DB) *SQLiteQueueRepository {
 
 // Enqueue inserts or updates a job's queue entry.
 func (r *SQLiteQueueRepository) Enqueue(ctx context.Context, entry *job.QueueEntry) error {
-	query := `INSERT INTO job_queue (job_id, position, action, enqueued_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+	query := `INSERT INTO job_queue (job_id, position, action, retry_count, not_before, enqueued_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(job_id) DO UPDATE SET
 			position=excluded.position,
 			action=excluded.action,
+			retry_count=excluded.retry_count,
+			not_before=excluded.not_before,
 			updated_at=excluded.updated_at`
 	_, err := r.db.conn.ExecContext(ctx, query,
-		entry.JobID, entry.Position, entry.Action, entry.EnqueuedAt, entry.UpdatedAt,
+		entry.JobID, entry.Position, entry.Action, entry.RetryCount, entry.NotBefore, entry.EnqueuedAt, entry.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("enqueue job %s: %w", entry.JobID, err)
@@ -40,10 +43,10 @@ func (r *SQLiteQueueRepository) Enqueue(ctx context.Context, entry *job.QueueEnt
 
 // Get retrieves a queue entry by JobID. Returns nil if not found.
 func (r *SQLiteQueueRepository) Get(ctx context.Context, jobID string) (*job.QueueEntry, error) {
-	query := `SELECT job_id, position, action, enqueued_at, updated_at FROM job_queue WHERE job_id = ?`
+	query := `SELECT job_id, position, action, retry_count, not_before, enqueued_at, updated_at FROM job_queue WHERE job_id = ?`
 	var entry job.QueueEntry
 	err := r.db.conn.QueryRowContext(ctx, query, jobID).Scan(
-		&entry.JobID, &entry.Position, &entry.Action, &entry.EnqueuedAt, &entry.UpdatedAt,
+		&entry.JobID, &entry.Position, &entry.Action, &entry.RetryCount, &entry.NotBefore, &entry.EnqueuedAt, &entry.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -79,10 +82,10 @@ func (r *SQLiteQueueRepository) NextPosition(ctx context.Context, priority job.J
 
 // NextRunnable retrieves the highest-priority runnable queued job (status = 'queued').
 func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context) (*job.QueuedJob, error) {
-	query := fmt.Sprintf(`SELECT %s, q.position, q.action, q.enqueued_at, q.updated_at
+	query := fmt.Sprintf(`SELECT %s, q.position, q.action, q.retry_count, q.not_before, q.enqueued_at, q.updated_at
 		FROM jobs j
 		JOIN job_queue q ON j.id = q.job_id
-		WHERE j.status = 'queued'
+		WHERE j.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)
 		ORDER BY
 			CASE j.priority
 				WHEN 'high' THEN 0
@@ -95,7 +98,7 @@ func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context) (*job.QueuedJo
 			j.id ASC
 		LIMIT 1`, jobColumnsPrefix("j."))
 
-	row := r.db.conn.QueryRowContext(ctx, query)
+	row := r.db.conn.QueryRowContext(ctx, query, time.Now())
 	qj, err := scanQueuedJob(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -108,7 +111,7 @@ func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context) (*job.QueuedJo
 
 // List retrieves all queued/paused jobs with their queue entries, ordered by priority lane and position.
 func (r *SQLiteQueueRepository) List(ctx context.Context) ([]job.QueuedJob, error) {
-	query := fmt.Sprintf(`SELECT %s, q.position, q.action, q.enqueued_at, q.updated_at
+	query := fmt.Sprintf(`SELECT %s, q.position, q.action, q.retry_count, q.not_before, q.enqueued_at, q.updated_at
 		FROM jobs j
 		JOIN job_queue q ON j.id = q.job_id
 		ORDER BY
@@ -183,7 +186,7 @@ func scanQueuedJob(scanner interface{ Scan(...interface{}) error }) (job.QueuedJ
 		&j.Error, &j.Engine, &j.EngineID,
 		&j.Type, &mediaInfoJSON, &j.Priority, &j.BatchID,
 		&j.CreatedAt, &j.UpdatedAt,
-		&qj.Position, &qj.Action, &qj.EnqueuedAt, &queueUpdatedAt,
+		&qj.Position, &qj.Action, &qj.RetryCount, &qj.NotBefore, &qj.EnqueuedAt, &queueUpdatedAt,
 	)
 	if err != nil {
 		return qj, err

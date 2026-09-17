@@ -21,6 +21,9 @@ type AddActiveFunc func(j *Job)
 // PrepareActiveJobFunc defines the callback for hydrating/preparing a job before active registration.
 type PrepareActiveJobFunc func(ctx context.Context, job *Job) error
 
+// PublishFunc defines a callback for publishing sequenced job events.
+type PublishFunc func(eventType string, j *Job)
+
 // ReconciliationKind distinguishes external execution failure from state persistence failure.
 type ReconciliationKind string
 
@@ -52,6 +55,7 @@ type Scheduler struct {
 	getLimit           SchedulerLimitFunc
 	dispatchFn         SchedulerDispatchFunc
 	bus                IEventBus
+	publishFn          PublishFunc
 	engines            IEngineRegistry
 	addActiveFn        AddActiveFunc
 	prepareActiveJobFn PrepareActiveJobFunc
@@ -107,6 +111,19 @@ func (s *Scheduler) SetAddActiveFunc(fn AddActiveFunc) {
 // SetPrepareActiveJobFunc injects the callback to prepare/hydrate a job before active registration.
 func (s *Scheduler) SetPrepareActiveJobFunc(fn PrepareActiveJobFunc) {
 	s.prepareActiveJobFn = fn
+}
+
+// SetPublishFunc injects the sequenced event publisher from Manager.
+func (s *Scheduler) SetPublishFunc(fn PublishFunc) {
+	s.publishFn = fn
+}
+
+func (s *Scheduler) publish(eventType string, j *Job) {
+	if s.publishFn != nil {
+		s.publishFn(eventType, j)
+	} else if s.bus != nil {
+		s.bus.Publish(Event{Type: eventType, Job: *j})
+	}
 }
 
 // SetReconciliationRetryDelay configures initial and max delay for automatic reconciliation retries.
@@ -411,6 +428,11 @@ func (s *Scheduler) reconcileJob(ctx context.Context, jobID string) {
 	}
 }
 
+// ReconcileStatePersistenceForTest exposes state persistence reconciliation for testing.
+func (s *Scheduler) ReconcileStatePersistenceForTest(ctx context.Context, res DispatchReservation) {
+	s.reconcileStatePersistence(ctx, res)
+}
+
 func (s *Scheduler) reconcileStatePersistence(ctx context.Context, res DispatchReservation) {
 	current, err := s.repo.GetByID(ctx, res.JobID)
 	if err != nil || current == nil {
@@ -433,13 +455,9 @@ func (s *Scheduler) reconcileStatePersistence(ctx context.Context, res DispatchR
 		if delErr := s.queueRepo.Delete(ctx, current.ID); delErr != nil {
 			log.Printf("scheduler: state reconciliation failed to delete queue entry for %s: %v", current.ID, delErr)
 		}
-		if s.bus != nil {
-			s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
-		}
+		s.publish(EventJobFailed, current)
 	} else if res.TargetStatus == StatusPaused {
-		if s.bus != nil {
-			s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
-		}
+		s.publish(EventJobUpdated, current)
 	}
 
 	s.releaseInFlight(current.ID)
@@ -671,9 +689,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 				if delErr := s.queueRepo.Delete(s.ctx, next.JobID); delErr != nil {
 					log.Printf("scheduler: failed to delete queue entry for failed job %s: %v", next.JobID, delErr)
 				}
-				if s.bus != nil {
-					s.bus.Publish(Event{Type: EventJobFailed, Job: *current})
-				}
+				s.publish(EventJobFailed, current)
 			}
 		} else {
 			targetErr := fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
@@ -695,9 +711,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 					Err:          updateErr,
 				}
 			} else {
-				if s.bus != nil {
-					s.bus.Publish(Event{Type: EventJobUpdated, Job: *current})
-				}
+				s.publish(EventJobUpdated, current)
 			}
 		}
 	}
