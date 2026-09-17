@@ -64,6 +64,26 @@ func (r *fakeSecretRepo) HasSecret(ctx context.Context, scope, owner, field stri
 	return ok, nil
 }
 
+func (r *fakeSecretRepo) CountSecrets(ctx context.Context) (int, error) {
+	return len(r.secrets), nil
+}
+
+func (r *fakeSecretRepo) GetAllSecrets(ctx context.Context) ([]securestore.EncryptedRecord, error) {
+	var records []securestore.EncryptedRecord
+	for k, v := range r.secrets {
+		parts := strings.Split(k, "/")
+		if len(parts) == 3 {
+			records = append(records, securestore.EncryptedRecord{
+				Scope:      parts[0],
+				Owner:      parts[1],
+				Field:      parts[2],
+				Ciphertext: v,
+			})
+		}
+	}
+	return records, nil
+}
+
 func testCipher(t *testing.T) *securestore.Cipher {
 	t.Helper()
 	key, _ := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")

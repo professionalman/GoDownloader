@@ -5,11 +5,21 @@ import (
 	"errors"
 )
 
+// EncryptedRecord represents a raw encrypted secret entry from the database.
+type EncryptedRecord struct {
+	Scope      string
+	Owner      string
+	Field      string
+	Ciphertext []byte
+}
+
 type Repository interface {
 	GetSecret(ctx context.Context, scope, owner, field string) ([]byte, error)
 	SetSecret(ctx context.Context, scope, owner, field string, ciphertext []byte) error
 	DeleteSecret(ctx context.Context, scope, owner, field string) error
 	HasSecret(ctx context.Context, scope, owner, field string) (bool, error)
+	CountSecrets(ctx context.Context) (int, error)
+	GetAllSecrets(ctx context.Context) ([]EncryptedRecord, error)
 }
 
 type Store struct {

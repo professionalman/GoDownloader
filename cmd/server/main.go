@@ -54,11 +54,13 @@ func main() {
 	trackerRepo := database.NewSQLiteTrackerRepository(db)
 	catRepo := storage.NewSQLiteCategoryRepository(db.Conn())
 
-	// Initialize settings service
-	cipher, keyErr := securestore.NewFromEnvironment()
+	// Initialize master key and secure store
+	keyMgr := securestore.NewDefaultMasterKeyManager()
+	cipher, keyStatus, keyErr := keyMgr.ResolveCipher(ctx, secretRepo)
 	if keyErr != nil {
-		log.Printf("settings encryption unavailable: %v", keyErr)
+		log.Fatalf("Master key initialization failed: %v", keyErr)
 	}
+	log.Printf("settings encryption active (provider=%s, status=%s)", keyMgr.ProviderName(), keyStatus)
 	secretStore := securestore.NewStore(secretRepo, cipher)
 	settingsService := settings.NewSettingsService(settingsRepo, cfg.DownloadDir, cfg.DataDir, secretStore)
 

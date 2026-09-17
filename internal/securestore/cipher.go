@@ -18,14 +18,10 @@ type Cipher struct {
 	aead cipher.AEAD
 }
 
-func NewFromEnvironment() (*Cipher, error) {
-	raw := os.Getenv("V0.7_SETTINGS_ENCRYPTION_KEY")
-	if raw == "" {
-		return &Cipher{}, nil
-	}
-	key, err := decodeKey(raw)
-	if err != nil {
-		return nil, err
+// NewCipher constructs a Cipher from a raw 32-byte AES-256 key.
+func NewCipher(key []byte) (*Cipher, error) {
+	if len(key) != 32 {
+		return nil, errors.New("encryption key must be exactly 32 bytes")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -36,6 +32,18 @@ func NewFromEnvironment() (*Cipher, error) {
 		return nil, fmt.Errorf("initialize settings encryption: %w", err)
 	}
 	return &Cipher{aead: aead}, nil
+}
+
+func NewFromEnvironment() (*Cipher, error) {
+	raw := os.Getenv("V0.7_SETTINGS_ENCRYPTION_KEY")
+	if raw == "" {
+		return &Cipher{}, nil
+	}
+	key, err := decodeKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	return NewCipher(key)
 }
 
 func decodeKey(raw string) ([]byte, error) {

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"downloader/internal/securestore"
 )
 
 type SQLiteSecretRepository struct{ db *DB }
@@ -48,4 +50,34 @@ func (r *SQLiteSecretRepository) HasSecret(ctx context.Context, scope, owner, fi
 	err := r.db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM encrypted_secrets
 		WHERE scope=? AND owner_id=? AND field_name=?`, scope, owner, field).Scan(&count)
 	return count > 0, err
+}
+
+func (r *SQLiteSecretRepository) CountSecrets(ctx context.Context) (int, error) {
+	var count int
+	err := r.db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM encrypted_secrets`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count encrypted secrets: %w", err)
+	}
+	return count, nil
+}
+
+func (r *SQLiteSecretRepository) GetAllSecrets(ctx context.Context) ([]securestore.EncryptedRecord, error) {
+	rows, err := r.db.conn.QueryContext(ctx, `SELECT scope, owner_id, field_name, ciphertext FROM encrypted_secrets`)
+	if err != nil {
+		return nil, fmt.Errorf("query all encrypted secrets: %w", err)
+	}
+	defer rows.Close()
+
+	var records []securestore.EncryptedRecord
+	for rows.Next() {
+		var rec securestore.EncryptedRecord
+		if err := rows.Scan(&rec.Scope, &rec.Owner, &rec.Field, &rec.Ciphertext); err != nil {
+			return nil, fmt.Errorf("scan encrypted secret: %w", err)
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate encrypted secrets: %w", err)
+	}
+	return records, nil
 }
