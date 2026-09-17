@@ -43,6 +43,7 @@ import {
   uploadTorrent,
   setJobPriority,
   connectSSE,
+  initSession,
 } from './api';
 import './App.css';
 
@@ -95,7 +96,8 @@ function App() {
     let cancelled = false;
     setInitialLoading(true);
 
-    getSyncSnapshot()
+    initSession()
+      .then(() => getSyncSnapshot())
       .then((snapshot) => {
         if (!cancelled) {
           lastAppliedCursorRef.current = snapshot.cursor;
@@ -186,7 +188,12 @@ function App() {
     activeEsRef.current = es;
 
     const handleOpen = () => setConnectionState('connected');
-    const handleError = () => setConnectionState('reconnecting');
+    const handleError = () => {
+      setConnectionState('reconnecting');
+      if (activeEsRef.current === es) {
+        handleSyncRequired();
+      }
+    };
 
     es.addEventListener('open', handleOpen);
     es.addEventListener('error', handleError);
@@ -194,8 +201,8 @@ function App() {
     return () => {
       es.removeEventListener('open', handleOpen);
       es.removeEventListener('error', handleError);
-      es.close();
       if (activeEsRef.current === es) {
+        es.close();
         activeEsRef.current = null;
       }
     };

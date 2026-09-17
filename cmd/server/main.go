@@ -127,8 +127,14 @@ func main() {
 	manager.StartBackgroundTasks(ctx)
 	defer manager.Stop()
 
-	// Setup router
-	router := api.NewRouter(cfg, manager, sseHandler, settingsService, catRepo, trackerService, mediaAuthService)
+	// Enforce loopback binding policy
+	if err := api.CheckNonLoopbackBind(cfg.ListenAddr); err != nil {
+		log.Fatalf("Security violation: %v", err)
+	}
+
+	// Setup security and router
+	secManager := api.NewSecurityManager(cfg)
+	router := api.NewRouter(cfg, manager, sseHandler, settingsService, secManager, catRepo, trackerService, mediaAuthService)
 
 	// Start server
 	server := &http.Server{
@@ -151,7 +157,7 @@ func main() {
 		server.Close()
 	}()
 
-	log.Printf("Server running at http://localhost%s", cfg.ListenAddr)
+	log.Printf("Server running at http://%s", cfg.ListenAddr)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}

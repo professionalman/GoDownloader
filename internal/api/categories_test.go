@@ -48,6 +48,7 @@ func setupAPITestRouter(t *testing.T) (http.Handler, storage.ICategoryRepository
 	cfg := &config.Config{
 		DownloadDir: downloadDir,
 		DataDir:     dataDir,
+		DisableAuth: true,
 	}
 
 	router := api.NewRouter(cfg, mgr, nil, settingsSvc, catRepo)

@@ -21,8 +21,11 @@ import (
 func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEHandler, settingsService *settings.SettingsService, dependencies ...any) http.Handler {
 	r := mux.NewRouter()
 	h := NewHandler(manager, settingsService)
+	var secManager *SecurityManager
 	for _, dependency := range dependencies {
 		switch value := dependency.(type) {
+		case *SecurityManager:
+			secManager = value
 		case storage.ICategoryRepository:
 			h.SetCategoryRepository(value)
 		case *tracker.Service:
@@ -31,9 +34,28 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 			h.SetMediaAuthService(value)
 		}
 	}
+	if secManager == nil {
+		secManager = NewSecurityManager(cfg)
+	}
+
+	// Global root middleware: Host header validation (blocks DNS rebinding attacks)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if !secManager.ValidateHost(req) {
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "invalid host header")
+				return
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
 
 	// API routes
 	api := r.PathPrefix("/api/v1").Subrouter()
+	api.Use(secManager.SecurityMiddleware)
+
+	// Session bootstrap endpoint
+	api.HandleFunc("/auth/session", secManager.SessionBootstrapHandler).Methods("GET")
+
 	api.HandleFunc("/sync/snapshot", h.GetSyncSnapshot).Methods("GET")
 	api.HandleFunc("/jobs/batch", h.CreateBatchJobs).Methods("POST")
 	api.HandleFunc("/jobs/bulk", h.BulkAction).Methods("POST")
@@ -98,18 +120,18 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	spa := spaHandler{staticPath: cfg.WebDir, indexPath: "index.html"}
 	r.PathPrefix("/").Handler(spa)
 
-	// CORS - local same-origin & local dev origins only
+	// CORS - local loopback & local dev origins only
 	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8080", "http://127.0.0.1:8080"},
+		AllowOriginFunc:  secManager.isAllowedOriginString,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowedHeaders:   []string{"Content-Type", "X-CSRF-Token", "Last-Event-ID"},
 		AllowCredentials: true,
 	})
 
 	return c.Handler(r)
 }
 
-// spaHandler serves the React SPA.
+// spaHandler serves the React SPA static files.
 type spaHandler struct {
 	staticPath string
 	indexPath  string

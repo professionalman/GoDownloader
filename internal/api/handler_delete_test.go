@@ -48,6 +48,7 @@ func setupDeleteAPITestRouter(t *testing.T) (http.Handler, job.IJobRepository, *
 	cfg := &config.Config{
 		DownloadDir: downloadDir,
 		DataDir:     dataDir,
+		DisableAuth: true,
 	}
 
 	router := api.NewRouter(cfg, mgr, nil, settingsSvc, catRepo)

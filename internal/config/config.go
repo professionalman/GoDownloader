@@ -21,6 +21,8 @@ type Config struct {
 	QBitTimeout                int
 	QBitMetadataTimeoutSeconds int
 	DataDir                    string
+	DisableAuth                bool
+	DevMode                    bool
 }
 
 // New creates a Config populated from environment variables with sensible defaults.
@@ -67,6 +69,8 @@ func New() *Config {
 		QBitTimeout:                qbitTimeout,
 		QBitMetadataTimeoutSeconds: qbitMetaTimeout,
 		DataDir:                    absDataDir,
+		DisableAuth:                getEnv("DISABLE_AUTH", "") == "1",
+		DevMode:                    getEnv("GODOWNLOADER_DEV_MODE", "") == "1" || getEnv("GODOWNLOADER_DEV_MODE", "") == "true",
 	}
 }
 

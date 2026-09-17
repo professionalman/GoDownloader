@@ -75,6 +75,7 @@ func setupMediaAuthAPITestRouter(t *testing.T, withCipher bool) (http.Handler, *
 	cfg := &config.Config{
 		DownloadDir: downloadDir,
 		DataDir:     dataDir,
+		DisableAuth: true,
 	}
 
 	router := api.NewRouter(cfg, mgr, nil, settingsSvc, catRepo, mediaAuthSvc)
@@ -272,6 +273,7 @@ func TestMediaAuthAPI_DeleteFailureReturns500(t *testing.T) {
 	cfg := &config.Config{
 		DownloadDir: t.TempDir(),
 		DataDir:     t.TempDir(),
+		DisableAuth: true,
 	}
 	// Handler without mediaAuth set
 	router := api.NewRouter(cfg, nil, nil, nil)
@@ -308,7 +310,7 @@ func TestMediaAuthAPI_TruthfulPresenceAndDeletionWithoutCipher(t *testing.T) {
 
 	storeWithCipher := securestore.NewStore(secretRepo, c)
 	svcWithCipher := mediaauth.NewService(settingsRepo, storeWithCipher, filepath.Join(tempDir, "auth"))
-	cfg := &config.Config{DownloadDir: tempDir, DataDir: tempDir}
+	cfg := &config.Config{DownloadDir: tempDir, DataDir: tempDir, DisableAuth: true}
 	routerWithCipher := api.NewRouter(cfg, nil, nil, nil, catRepo, svcWithCipher)
 
 	// Import cookies

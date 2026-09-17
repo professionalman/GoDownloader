@@ -55,6 +55,7 @@ func setupStateSyncAPIRouter(t *testing.T) (http.Handler, *database.SQLiteJobRep
 	cfg := &config.Config{
 		DownloadDir: downloadDir,
 		DataDir:     dataDir,
+		DisableAuth: true,
 	}
 
 	router := api.NewRouter(cfg, mgr, sseHandler, settingsSvc, catRepo)
