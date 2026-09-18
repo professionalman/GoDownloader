@@ -14,11 +14,13 @@ import (
 
 	"downloader/internal/job"
 	"downloader/internal/networkpolicy"
+	"downloader/internal/process"
 )
 
 // downloadState tracks an active yt-dlp download process.
 type downloadState struct {
 	cancel              context.CancelFunc
+	proc                *process.ManagedProcess
 	progress            progressInfo
 	mu                  sync.Mutex
 	done                bool
@@ -40,6 +42,7 @@ type Engine struct {
 	ytdlpPath    string
 	ffmpegPath   string
 	authProvider job.IMediaAuthProvider
+	supervisor   process.ISupervisor
 
 	mu        sync.RWMutex
 	downloads map[string]*downloadState // keyed by job ID
@@ -54,7 +57,15 @@ func NewEngine(ytdlpPath, ffmpegPath string) *Engine {
 		ytdlpPath:  ytdlpPath,
 		ffmpegPath: ffmpegPath,
 		downloads:  make(map[string]*downloadState),
+		supervisor: process.NewSupervisor(),
 	}
+}
+
+// SetProcessSupervisor configures the process supervisor for child process trees.
+func (e *Engine) SetProcessSupervisor(s process.ISupervisor) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.supervisor = s
 }
 
 // SetAuthProvider configures the media authentication provider.
@@ -211,7 +222,7 @@ func (e *Engine) Resume(ctx context.Context, j *job.Job) error {
 	return fmt.Errorf("resume is not supported for media downloads")
 }
 
-// Cancel stops a running yt-dlp download by cancelling its context.
+// Cancel stops a running yt-dlp download by cancelling its context and terminating its process tree.
 func (e *Engine) Cancel(ctx context.Context, j *job.Job) error {
 	e.mu.RLock()
 	state, exists := e.downloads[j.ID]
@@ -222,6 +233,11 @@ func (e *Engine) Cancel(ctx context.Context, j *job.Job) error {
 	}
 
 	state.cancel()
+	state.mu.Lock()
+	if state.proc != nil {
+		_ = state.proc.Terminate()
+	}
+	state.mu.Unlock()
 	return nil
 }
 
@@ -460,7 +476,7 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 	if cleanup != nil {
 		defer cleanup()
 	}
-	cmd := exec.CommandContext(ctx, e.ytdlpPath, args...)
+	cmd := exec.Command(e.ytdlpPath, args...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -474,12 +490,30 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 		return
 	}
 
-	if err := cmd.Start(); err != nil {
-		e.markFailed(state, fmt.Sprintf("failed to start yt-dlp: %v", err))
+	e.mu.RLock()
+	supervisor := e.supervisor
+	e.mu.RUnlock()
+
+	if supervisor == nil {
+		supervisor = process.NewSupervisor()
+	}
+
+	proc, err := supervisor.StartOwned(ctx, cmd, process.ProcessSpec{
+		ID:      jobID,
+		JobID:   jobID,
+		Tool:    "yt-dlp",
+		Purpose: "download",
+	})
+	if err != nil {
+		e.markFailed(state, fmt.Sprintf("failed to start supervised yt-dlp: %v", err))
 		return
 	}
 
-	log.Printf("ytdlp: started download for job %s (pid=%d, workDir=%s)", jobID, cmd.Process.Pid, downloadDir)
+	state.mu.Lock()
+	state.proc = proc
+	state.mu.Unlock()
+
+	log.Printf("ytdlp: started download for job %s (pid=%d, workDir=%s)", jobID, proc.PID(), downloadDir)
 
 	var stderrLines []string
 	var stderrMu sync.Mutex
@@ -510,15 +544,15 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 
 	wg.Wait()
 
-	// Wait for process to exit
-	err = cmd.Wait()
+	// Wait for process tree to exit
+	err = proc.Wait()
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
 	if err != nil {
 		state.done = true
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || proc.WasTerminated() {
 			state.cancelled = true
 			state.err = ""
 			log.Printf("ytdlp: job %s was cancelled", jobID)
@@ -590,9 +624,17 @@ func (e *Engine) Cleanup(jobID string) {
 func (e *Engine) Shutdown() {
 	e.mu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(e.downloads))
+	procs := make([]*process.ManagedProcess, 0, len(e.downloads))
 	for id, state := range e.downloads {
-		if state != nil && state.cancel != nil {
-			cancels = append(cancels, state.cancel)
+		if state != nil {
+			if state.cancel != nil {
+				cancels = append(cancels, state.cancel)
+			}
+			state.mu.Lock()
+			if state.proc != nil {
+				procs = append(procs, state.proc)
+			}
+			state.mu.Unlock()
 		}
 		delete(e.downloads, id)
 	}
@@ -600,6 +642,9 @@ func (e *Engine) Shutdown() {
 
 	for _, cancel := range cancels {
 		cancel()
+	}
+	for _, proc := range procs {
+		_ = proc.Terminate()
 	}
 }
 

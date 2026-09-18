@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"downloader/internal/api"
 	"downloader/internal/config"
@@ -20,6 +21,7 @@ import (
 	"downloader/internal/events"
 	"downloader/internal/job"
 	"downloader/internal/mediaauth"
+	"downloader/internal/process"
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
@@ -98,7 +100,10 @@ func main() {
 	registry := engine.NewRegistry()
 	registry.Register("aria2", eng)
 
-	// Initialize yt-dlp engine using resolved paths
+	// Initialize ProcessSupervisor for application-owned child process trees
+	processSupervisor := process.NewSupervisor()
+
+	// Initialize yt-dlp engine using resolved paths and process supervision
 	resolvedYtdlpPath := cfg.YtdlpPath
 	if ytdlpInfo != nil && ytdlpInfo.Available() {
 		resolvedYtdlpPath = ytdlpInfo.ExecutablePath
@@ -110,6 +115,7 @@ func main() {
 
 	ytdlpEng := ytdlp.NewEngine(resolvedYtdlpPath, resolvedFFmpegPath)
 	ytdlpEng.SetAuthProvider(mediaAuthService)
+	ytdlpEng.SetProcessSupervisor(processSupervisor)
 	if ytdlpEng.Available() {
 		registry.Register("ytdlp", ytdlpEng)
 		log.Printf("yt-dlp engine: available (provenance=%s, version=%s, path=%s)", ytdlpInfo.Provenance, ytdlpInfo.Version, resolvedYtdlpPath)
@@ -151,6 +157,15 @@ func main() {
 	scheduler := job.NewScheduler(repo, queueRepo, settingsService.EffectiveMaxConcurrentDownloads, manager.DispatchQueuedJob)
 	manager.SetScheduler(scheduler)
 
+	// Supervisor shutdown deferred before manager.Stop so manager.Stop runs FIRST,
+	// followed by processSupervisor.Shutdown terminating any remaining owned process trees.
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := processSupervisor.Shutdown(shutdownCtx); err != nil {
+			log.Printf("process supervisor shutdown: %v", err)
+		}
+	}()
 	manager.StartBackgroundTasks(ctx)
 	defer manager.Stop()
 
