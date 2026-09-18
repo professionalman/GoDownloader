@@ -18,6 +18,9 @@ type SchedulerLimitFunc func(ctx context.Context) int
 // AddActiveFunc defines the callback for adding a job to Manager's active set.
 type AddActiveFunc func(j *Job)
 
+// ClockFunc returns the current evaluation time.
+type ClockFunc func() time.Time
+
 // PrepareActiveJobFunc defines the callback for hydrating/preparing a job before active registration.
 type PrepareActiveJobFunc func(ctx context.Context, job *Job) error
 
@@ -62,6 +65,7 @@ type Scheduler struct {
 
 	mu                         sync.Mutex
 	inFlight                   map[string]*DispatchReservation
+	clockFn                    ClockFunc
 	reconciliationRetryInitial time.Duration
 	reconciliationRetryMax     time.Duration
 	reconciliationRetryCurrent time.Duration
@@ -85,6 +89,7 @@ func NewScheduler(
 		queueRepo:                  queueRepo,
 		getLimit:                   getLimit,
 		dispatchFn:                 dispatchFn,
+		clockFn:                    time.Now,
 		inFlight:                   make(map[string]*DispatchReservation),
 		kickCh:                     make(chan struct{}, 1),
 		reconciliationRetryInitial: defaultReconciliationRetryDelay,
@@ -116,6 +121,23 @@ func (s *Scheduler) SetPrepareActiveJobFunc(fn PrepareActiveJobFunc) {
 // SetPublishFunc injects the sequenced event publisher from Manager.
 func (s *Scheduler) SetPublishFunc(fn PublishFunc) {
 	s.publishFn = fn
+}
+
+// SetClock configures a custom time source for deterministic evaluation in tests.
+func (s *Scheduler) SetClock(fn ClockFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clockFn = fn
+}
+
+func (s *Scheduler) now() time.Time {
+	s.mu.Lock()
+	fn := s.clockFn
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return time.Now()
 }
 
 func (s *Scheduler) publish(eventType string, j *Job) {
@@ -374,7 +396,8 @@ func (s *Scheduler) schedule() {
 			return
 		}
 
-		next, err := s.queueRepo.NextRunnable(s.ctx)
+		now := s.now()
+		next, err := s.queueRepo.NextRunnable(s.ctx, now)
 		if err != nil {
 			log.Printf("scheduler: failed to query next runnable job: %v", err)
 			return

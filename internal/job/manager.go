@@ -2423,7 +2423,19 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 	}
 
 	// Standard download retry
-	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
+	retryCount := 1
+	if m.queueRepo != nil {
+		if prevEntry, err := m.queueRepo.Get(ctx, j.ID); err == nil && prevEntry != nil && prevEntry.RetryCount > 0 {
+			retryCount = prevEntry.RetryCount + 1
+		}
+	}
+	if retryCount == 1 && m.execRepo != nil {
+		if exec, err := m.execRepo.GetLatestExecution(ctx, j.ID); err == nil && exec != nil && exec.AttemptNumber > 0 {
+			retryCount = exec.AttemptNumber
+		}
+	}
+
+	if err := m.enqueueJobWithMetadata(ctx, j, QueueActionStart, retryCount, nil); err != nil {
 		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue retry job: %v", err)}
 	}
 
@@ -2479,6 +2491,55 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 		m.addActive(j)
 		m.publish(EventJobUpdated, j)
 		return j, nil
+	}
+
+	m.publish(EventJobUpdated, j)
+
+	if m.scheduler != nil {
+		m.scheduler.Kick()
+	}
+
+	return j, nil
+}
+
+// ScheduleRetry enqueues a failed, paused, or queued job for retry with a future not_before time.
+func (m *Manager) ScheduleRetry(ctx context.Context, id string, delay time.Duration) (*Job, error) {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if j.Status != StatusFailed && j.Status != StatusPaused && j.Status != StatusQueued {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot schedule retry for job in status %s", j.Status)}
+	}
+
+	retryCount := 1
+	if m.queueRepo != nil {
+		if prevEntry, err := m.queueRepo.Get(ctx, j.ID); err == nil && prevEntry != nil && prevEntry.RetryCount > 0 {
+			retryCount = prevEntry.RetryCount + 1
+		}
+	}
+	if retryCount == 1 && m.execRepo != nil {
+		if exec, err := m.execRepo.GetLatestExecution(ctx, j.ID); err == nil && exec != nil && exec.AttemptNumber > 0 {
+			retryCount = exec.AttemptNumber
+		}
+	}
+
+	notBefore := time.Now().Add(delay)
+	action := QueueActionStart
+	if j.EngineID != "" {
+		action = QueueActionResume
+	}
+
+	if err := m.enqueueJobWithMetadata(ctx, j, action, retryCount, &notBefore); err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue delayed retry: %v", err)}
+	}
+
+	j.Error = ""
+	j.Status = StatusQueued
+	j.UpdatedAt = time.Now()
+	if err := m.repo.Update(ctx, j); err != nil {
+		return nil, fmt.Errorf("update job status: %w", err)
 	}
 
 	m.publish(EventJobUpdated, j)
@@ -3062,10 +3123,87 @@ func (m *Manager) SetJobPriority(ctx context.Context, id string, p JobPriority) 
 	return j, nil
 }
 
-// BulkAction performs a lifecycle operation (pause, resume, cancel, retry) best-effort on up to 100 job IDs.
+// RunNow promotes a queued or paused download to immediate dispatch precedence.
+// It sets position = 0, clears any retry delay (not_before = nil), updates paused jobs to queued,
+// sequences StateSync event emissions, and kicks the scheduler.
+// It returns an error if the job is already active or in a terminal state.
+func (m *Manager) RunNow(ctx context.Context, id string) (*Job, error) {
+	j, err := m.getJobOrError(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	switch j.Status {
+	case StatusQueued:
+		// Valid state
+	case StatusPaused:
+		// Valid state, will transition to queued
+	case StatusDownloading, StatusProcessing, StatusSeeding:
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("job %s is already active (status=%s)", id, j.Status)}
+	case StatusCompleted, StatusCancelled:
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot run %s job", j.Status)}
+	case StatusFailed:
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot run failed job %s; use retry", id)}
+	default:
+		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot run job %s in status %s", id, j.Status)}
+	}
+
+	if m.queueRepo == nil {
+		return j, nil
+	}
+
+	entry, err := m.queueRepo.Get(ctx, id)
+	if err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to get queue entry: %v", err)}
+	}
+
+	now := time.Now()
+	if entry == nil {
+		action := QueueActionStart
+		if j.Status == StatusPaused && j.EngineID != "" {
+			action = QueueActionResume
+		}
+		entry = &QueueEntry{
+			JobID:      id,
+			Position:   RunNowPositionSentinel,
+			Action:     action,
+			EnqueuedAt: now,
+			UpdatedAt:  now,
+		}
+	} else {
+		if j.Status == StatusPaused && j.EngineID != "" {
+			entry.Action = QueueActionResume
+		}
+		entry.Position = RunNowPositionSentinel
+		entry.NotBefore = nil
+		entry.UpdatedAt = now
+	}
+
+	if err := m.queueRepo.Enqueue(ctx, entry); err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to update queue entry: %v", err)}
+	}
+
+	if j.Status == StatusPaused {
+		j.Status = StatusQueued
+		j.UpdatedAt = now
+		if err := m.repo.Update(ctx, j); err != nil {
+			return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to update job status: %v", err)}
+		}
+	}
+
+	m.publish(EventJobUpdated, j)
+
+	if m.scheduler != nil {
+		m.scheduler.Kick()
+	}
+
+	return j, nil
+}
+
+// BulkAction performs a lifecycle operation (pause, resume, cancel, retry, run_now) best-effort on up to 100 job IDs.
 func (m *Manager) BulkAction(ctx context.Context, req BulkActionRequest) (*BulkActionResponse, error) {
 	action := strings.ToLower(strings.TrimSpace(req.Action))
-	if action != "pause" && action != "resume" && action != "cancel" && action != "retry" {
+	if action != "pause" && action != "resume" && action != "cancel" && action != "retry" && action != "run_now" && action != "run-now" {
 		return nil, &AppError{Code: ErrUnsupportedAction, Message: fmt.Sprintf("unsupported bulk action: %s", req.Action)}
 	}
 	if len(req.JobIDs) == 0 {
@@ -3102,6 +3240,8 @@ func (m *Manager) BulkAction(ctx context.Context, req BulkActionRequest) (*BulkA
 			updatedJ, err = m.Cancel(ctx, id)
 		case "retry":
 			updatedJ, err = m.Retry(ctx, id)
+		case "run_now", "run-now":
+			updatedJ, err = m.RunNow(ctx, id)
 		}
 
 		if err != nil {
@@ -3131,6 +3271,11 @@ func (m *Manager) BulkAction(ctx context.Context, req BulkActionRequest) (*BulkA
 // GetScheduler returns the wired Scheduler instance.
 func (m *Manager) GetScheduler() *Scheduler {
 	return m.scheduler
+}
+
+// GetEngineRegistry returns the wired engine registry.
+func (m *Manager) GetEngineRegistry() IEngineRegistry {
+	return m.engines
 }
 
 func (m *Manager) calculatePersistedSelectedTorrentBytes(ctx context.Context, jobID string) (int64, error) {
@@ -3394,6 +3539,28 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 			Action:   qj.Action,
 			Kind:     DispatchFailureExternalExecutionPersistence,
 			Err:      err,
+		}
+	}
+
+	if m.execRepo != nil {
+		attemptNum := 1
+		if qj.RetryCount > 0 {
+			attemptNum = qj.RetryCount + 1
+		} else if latest, err := m.execRepo.GetLatestExecution(ctx, j.ID); err == nil && latest != nil && latest.AttemptNumber > 0 {
+			attemptNum = latest.AttemptNumber + 1
+		}
+		exec := &JobExecution{
+			ID:                  uuid.New().String(),
+			JobID:               j.ID,
+			AttemptNumber:       attemptNum,
+			EngineFamily:        EngineFamily(j.Engine),
+			RuntimeMode:         RuntimeModeManaged,
+			EngineCorrelationID: j.EngineID,
+			Status:              ExecutionStatusActive,
+			StartedAt:           time.Now(),
+		}
+		if err := m.execRepo.CreateExecution(ctx, exec); err != nil {
+			log.Printf("dispatchQueuedJob: failed to record execution attempt for job %s: %v", j.ID, err)
 		}
 	}
 
@@ -3903,6 +4070,10 @@ func (m *Manager) publishWithData(eventType string, j *Job, data any) {
 }
 
 func (m *Manager) enqueueJob(ctx context.Context, j *Job, action QueueAction) error {
+	return m.enqueueJobWithMetadata(ctx, j, action, 0, nil)
+}
+
+func (m *Manager) enqueueJobWithMetadata(ctx context.Context, j *Job, action QueueAction, retryCount int, notBefore *time.Time) error {
 	if m.queueRepo == nil {
 		return nil
 	}
@@ -3915,6 +4086,8 @@ func (m *Manager) enqueueJob(ctx context.Context, j *Job, action QueueAction) er
 		JobID:      j.ID,
 		Position:   nextPos,
 		Action:     action,
+		RetryCount: retryCount,
+		NotBefore:  notBefore,
 		EnqueuedAt: now,
 		UpdatedAt:  now,
 	})

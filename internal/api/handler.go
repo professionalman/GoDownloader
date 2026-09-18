@@ -194,6 +194,19 @@ func (h *Handler) RetryJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j)
 }
 
+// RunNowJob handles POST /api/v1/jobs/{id}/run-now
+func (h *Handler) RunNowJob(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	j, err := h.manager.RunNow(r.Context(), id)
+	if err != nil {
+		writeAppError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, j)
+}
+
 // CancelJob handles POST /api/v1/jobs/{id}/cancel
 func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]

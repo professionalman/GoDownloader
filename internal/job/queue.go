@@ -1,6 +1,9 @@
 package job
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // IQueueRepository defines the persistence interface for the job queue.
 type IQueueRepository interface {
@@ -8,7 +11,7 @@ type IQueueRepository interface {
 	Get(ctx context.Context, jobID string) (*QueueEntry, error)
 	Delete(ctx context.Context, jobID string) error
 
-	NextRunnable(ctx context.Context) (*QueuedJob, error)
+	NextRunnable(ctx context.Context, evalTime ...time.Time) (*QueuedJob, error)
 	List(ctx context.Context) ([]QueuedJob, error)
 
 	NextPosition(ctx context.Context, priority JobPriority) (int64, error)

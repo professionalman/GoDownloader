@@ -2237,7 +2237,7 @@ func (f *fakeQueueRepo) Delete(ctx context.Context, jobID string) error {
 	delete(f.entries, jobID)
 	return nil
 }
-func (f *fakeQueueRepo) NextRunnable(ctx context.Context) (*QueuedJob, error) {
+func (f *fakeQueueRepo) NextRunnable(ctx context.Context, evalTime ...time.Time) (*QueuedJob, error) {
 	if f.entries == nil {
 		return nil, nil
 	}

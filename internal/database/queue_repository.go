@@ -81,32 +81,43 @@ func (r *SQLiteQueueRepository) NextPosition(ctx context.Context, priority job.J
 }
 
 // NextRunnable retrieves the highest-priority runnable queued job (status = 'queued').
-func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context) (*job.QueuedJob, error) {
+// It filters eligible jobs (status = queued and not_before <= now), and evaluates
+// priority, deterministic aging, FIFO ties, and Run Now overrides using job.SelectNextRunnable.
+func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context, evalTime ...time.Time) (*job.QueuedJob, error) {
+	now := time.Now()
+	if len(evalTime) > 0 && !evalTime[0].IsZero() {
+		now = evalTime[0]
+	}
+
 	query := fmt.Sprintf(`SELECT %s, q.position, q.action, q.retry_count, q.not_before, q.enqueued_at, q.updated_at
 		FROM jobs j
 		JOIN job_queue q ON j.id = q.job_id
-		WHERE j.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)
-		ORDER BY
-			CASE j.priority
-				WHEN 'high' THEN 0
-				WHEN 'normal' THEN 1
-				WHEN 'low' THEN 2
-				ELSE 1
-			END ASC,
-			q.position ASC,
-			q.enqueued_at ASC,
-			j.id ASC
-		LIMIT 1`, jobColumnsPrefix("j."))
+		WHERE j.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)`, jobColumnsPrefix("j."))
 
-	row := r.db.conn.QueryRowContext(ctx, query, time.Now())
-	qj, err := scanQueuedJob(row)
-	if err == sql.ErrNoRows {
+	rows, err := r.db.conn.QueryContext(ctx, query, now)
+	if err != nil {
+		return nil, fmt.Errorf("query runnable jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []job.QueuedJob
+	for rows.Next() {
+		qj, scanErr := scanQueuedJob(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan runnable job: %w", scanErr)
+		}
+		candidates = append(candidates, qj)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runnable jobs: %w", err)
+	}
+
+	if len(candidates) == 0 {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("next runnable job: %w", err)
-	}
-	return &qj, nil
+
+	best := job.SelectNextRunnable(candidates, now, job.DefaultAgingConfig())
+	return best, nil
 }
 
 // List retrieves all queued/paused jobs with their queue entries, ordered by priority lane and position.
@@ -178,7 +189,6 @@ func scanQueuedJob(scanner interface{ Scan(...interface{}) error }) (job.QueuedJ
 	var qj job.QueuedJob
 	var j job.Job
 	var mediaInfoJSON string
-	var queueUpdatedAt interface{}
 	err := scanner.Scan(
 		&j.ID, &j.Source, &j.Name, &j.Status,
 		&j.TotalBytes, &j.CompletedBytes, &j.Progress,
@@ -186,7 +196,7 @@ func scanQueuedJob(scanner interface{ Scan(...interface{}) error }) (job.QueuedJ
 		&j.Error, &j.Engine, &j.EngineID,
 		&j.Type, &mediaInfoJSON, &j.Priority, &j.BatchID,
 		&j.CreatedAt, &j.UpdatedAt,
-		&qj.Position, &qj.Action, &qj.RetryCount, &qj.NotBefore, &qj.EnqueuedAt, &queueUpdatedAt,
+		&qj.Position, &qj.Action, &qj.RetryCount, &qj.NotBefore, &qj.EnqueuedAt, &qj.UpdatedAt,
 	)
 	if err != nil {
 		return qj, err
@@ -199,6 +209,9 @@ func scanQueuedJob(scanner interface{ Scan(...interface{}) error }) (job.QueuedJ
 	}
 	if j.Priority == "" {
 		j.Priority = job.JobPriorityNormal
+	}
+	if qj.UpdatedAt.IsZero() {
+		qj.UpdatedAt = j.UpdatedAt
 	}
 	qj.JobID = j.ID
 	qj.Job = j
