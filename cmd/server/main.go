@@ -23,6 +23,7 @@ import (
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
+	"downloader/internal/toolmanager"
 	"downloader/internal/tracker"
 )
 
@@ -53,6 +54,7 @@ func main() {
 	secretRepo := database.NewSQLiteSecretRepository(db)
 	trackerRepo := database.NewSQLiteTrackerRepository(db)
 	catRepo := storage.NewSQLiteCategoryRepository(db.Conn())
+	execRepo := database.NewSQLiteExecutionRepository(db)
 
 	// Initialize master key and secure store
 	keyMgr := securestore.NewDefaultMasterKeyManager()
@@ -63,6 +65,22 @@ func main() {
 	log.Printf("settings encryption active (provider=%s, status=%s)", keyMgr.ProviderName(), keyStatus)
 	secretStore := securestore.NewStore(secretRepo, cipher)
 	settingsService := settings.NewSettingsService(settingsRepo, cfg.DownloadDir, cfg.DataDir, secretStore)
+
+	// Initialize ToolManager & resolve external tools
+	toolMgr := toolmanager.New(cfg.DataDir, execRepo)
+	toolMgr.RegisterConfig(toolmanager.ToolYtdlp, cfg.YtdlpPath)
+	toolMgr.RegisterConfig(toolmanager.ToolFFmpeg, cfg.FFmpegPath)
+	toolMgr.RegisterConfig(toolmanager.ToolAria2, cfg.Aria2RPCURL)
+	toolMgr.RegisterConfig(toolmanager.ToolQBittorrent, cfg.QBitURL)
+
+	// Revalidate active records from tool ledger
+	_ = toolMgr.RevalidateActiveRecords(ctx)
+
+	// Resolve external tools
+	ytdlpInfo, _ := toolMgr.Resolve(ctx, toolmanager.ToolYtdlp)
+	ffmpegInfo, _ := toolMgr.Resolve(ctx, toolmanager.ToolFFmpeg)
+	_, _ = toolMgr.Resolve(ctx, toolmanager.ToolAria2)
+	_, _ = toolMgr.Resolve(ctx, toolmanager.ToolQBittorrent)
 
 	// Initialize media auth service & perform startup stale temp cleanup
 	mediaAuthService := mediaauth.NewService(settingsRepo, secretStore, filepath.Join(cfg.DataDir, "tmp", "auth"))
@@ -80,14 +98,23 @@ func main() {
 	registry := engine.NewRegistry()
 	registry.Register("aria2", eng)
 
-	// Initialize yt-dlp engine if available
-	ytdlpEng := ytdlp.NewEngine(cfg.YtdlpPath, cfg.FFmpegPath)
+	// Initialize yt-dlp engine using resolved paths
+	resolvedYtdlpPath := cfg.YtdlpPath
+	if ytdlpInfo != nil && ytdlpInfo.Available() {
+		resolvedYtdlpPath = ytdlpInfo.ExecutablePath
+	}
+	resolvedFFmpegPath := cfg.FFmpegPath
+	if ffmpegInfo != nil && ffmpegInfo.Available() {
+		resolvedFFmpegPath = ffmpegInfo.ExecutablePath
+	}
+
+	ytdlpEng := ytdlp.NewEngine(resolvedYtdlpPath, resolvedFFmpegPath)
 	ytdlpEng.SetAuthProvider(mediaAuthService)
 	if ytdlpEng.Available() {
 		registry.Register("ytdlp", ytdlpEng)
-		log.Printf("yt-dlp engine: available")
+		log.Printf("yt-dlp engine: available (provenance=%s, version=%s, path=%s)", ytdlpInfo.Provenance, ytdlpInfo.Version, resolvedYtdlpPath)
 	} else {
-		log.Printf("yt-dlp engine: not available (yt-dlp not found in PATH)")
+		log.Printf("yt-dlp engine: not available (%s)", ytdlpInfo.Diagnostic)
 	}
 
 	// Initialize qBittorrent engine
@@ -119,8 +146,6 @@ func main() {
 	manager.SetStorageService(storageService)
 	manager.SetCategoryRepository(catRepo)
 	manager.SetTrackerEntryProvider(trackerService)
-
-	execRepo := database.NewSQLiteExecutionRepository(db)
 	manager.SetExecutionRepository(execRepo)
 
 	scheduler := job.NewScheduler(repo, queueRepo, settingsService.EffectiveMaxConcurrentDownloads, manager.DispatchQueuedJob)
