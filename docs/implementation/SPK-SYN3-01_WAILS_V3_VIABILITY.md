@@ -8,14 +8,21 @@
 - **Spike Directory:** `spikes/spk-syn3-01-wails-v3/`
 - **Spike Branch:** `spike/spk-syn3-01-wails-v3`
 - **Pinned Wails v3 Version:** `v3.0.0-beta.23` (GitHub release 2026-09-16)
+- **Tauri v2:** NOT EVALUATED / FALLBACK ONLY
 - **Status:** **FINAL EVIDENCE GATE COMPLETE — ALL CRITERIA VERIFIED**
 - **Outcome Standard:** **WAILS ACCEPTED WITH NON-BLOCKING LIMITATIONS**
+- **SPK-SYN3-01 Status:** **COMPLETE / LOCKED**
 
 ---
 
 ## 1. Executive Summary & Verdict
 
 ### Final Verdict: WAILS ACCEPTED WITH NON-BLOCKING LIMITATIONS
+
+- **Desktop Framework:** Wails v3
+- **Evaluated Pinned Version:** `v3.0.0-beta.23`
+- **Tauri v2:** NOT EVALUATED / FALLBACK ONLY
+- **SPK-SYN3-01:** COMPLETE / LOCKED
 
 Architecture spike `SPK-SYN3-01` has evaluated **Wails v3** (`v3.0.0-beta.23`) as the Windows desktop application host for GoDownloader across all **22 criteria (A through V)** defined in the architectural specification.
 
@@ -28,7 +35,7 @@ All architecture-critical criteria have **PASSED** with direct machine-readable 
 - OS-level secret management via `internal/securestore.WindowsCredentialManagerProvider` under standard user credentials.
 - Deterministic data root (`%APPDATA%\GoDownloader`) independent of invocation working directory.
 
-Only two non-blocking limitations were noted (default system tray styling and development host WebView2 packaging considerations). No hard architectural blockers exist. The fallback framework (Tauri v2) is **not required** and has not been installed.
+Only two non-blocking limitations were noted (Criterion J: default system tray styling, and Criterion Q: development host WebView2 packaging considerations). No hard architectural blockers exist. The fallback framework (Tauri v2) is **not required** and has not been installed.
 
 ---
 
@@ -60,6 +67,35 @@ The original spike specification defined 22 criteria (A through V). The table be
 | **T** | Go Error Propagation | **PASS** | `TriggerError()` returning Go `error` translates to rejected `CancellablePromise<void>` in TypeScript; error message string is readable directly in `.catch((err) => ...)`. |
 | **U** | Event Listener Reload Safety | **PASS** | WebView2 reloads discard the previous JavaScript VM context, tearing down old listeners. React `useEffect` cleanup unregisters listeners. Event delivery verified at exactly 1 delivery per event across reloads. |
 | **V** | No Production Source Changes | **PASS** | Zero lines of production code in root `internal/` or `cmd/` were modified. Root `go.mod`, `go.sum`, and `package.json` remain untouched. |
+
+### Acceptance Matrix Accounting
+- **Total Criteria Evaluated:** 22 (Criteria A through V)
+- **PASS (20 criteria):**
+  - **A** — Pinned Wails build
+  - **B** — React/Vite assets
+  - **C** — No required REST/SSE
+  - **D** — Typed bindings
+  - **E** — Native events
+  - **F** — StateSync semantics
+  - **G** — WebView reload / one backend core
+  - **H** — Native single instance
+  - **I** — Second-launch args
+  - **K** — Intercepted close/background
+  - **L** — Explicit Quit lifecycle
+  - **M** — ProcessSupervisor desktop compatibility
+  - **N** — Quit terminates process tree
+  - **O** — Credential Manager
+  - **P** — Deterministic data root
+  - **R** — Existing frontend compatibility
+  - **S** — Representative DTO bindings
+  - **T** — Go error propagation
+  - **U** — Event-listener multiplication/reload safety
+  - **V** — No production source changes required
+- **PASS WITH NON-BLOCKING LIMITATION (2 criteria):**
+  - **J** — System tray (basic tray verified; animated badges / custom draw hooks deferred)
+  - **Q** — WebView2 (Evergreen runtime verified; standalone NSIS installer generation deferred to DSK-4)
+- **FAIL (0 criteria):** None
+- **UNVERIFIED (0 criteria):** None
 
 ---
 
@@ -218,12 +254,12 @@ A live deterministic verification run was executed against the production-built 
 
 ## 7. Non-Blocking Limitations & Mitigations
 
-| Item | Finding / Limitation | Impact | Mitigation for V0.9 Implementation |
-|---|---|---|---|
-| **1. Upstream Beta Status** | Wails v3 is currently in public beta (`v3.0.0-beta.23`). Minor API adjustments may occur prior to 3.0 GA. | Low | Pin exact version `v3.0.0-beta.23` in `go.mod` and tooling. Upgrade deliberately via dedicated check. |
-| **2. System Tray Polish** | Native tray supports minimal menu (`Show`, `Quit`), tooltip, and icons. Animated download badges or progress overlays require custom native draw hooks. | Cosmetic | Retain clean standard tray icon and menu for V0.9.0 Technical Preview; defer advanced tray badge rendering to post-V1. |
-| **3. Console Window Flashing** | Windows GUI executables (`-H windowsgui`) spawning console children (e.g. `yt-dlp.exe`) can momentarily flash a console window if spawned without creation flags. | Cosmetic | Ensure `internal/process.ProcessSupervisor` continues to enforce `CREATE_NO_WINDOW` (`0x08000000`) in `SysProcAttr` on Windows. |
-| **4. Installer & Bootstrapper Packaging** | Development machine has WebView2 Evergreen runtime installed. While `wails3 generate webview2bootstrapper` exists, creating a signed redistributable installer was not part of this architecture spike. | Packaging concern | Defer NSIS installer script generation and code signing to dedicated milestone `DSK-4`. |
+| Item | Criterion | Finding / Limitation | Impact | Mitigation for V0.9 Implementation |
+|---|:---:|---|---|---|
+| **1** | — | **Upstream Beta Status:** Wails v3 is currently in public beta (`v3.0.0-beta.23`). Minor API adjustments may occur prior to 3.0 GA. | Low | Pin exact version `v3.0.0-beta.23` in `go.mod` and tooling. Upgrade deliberately via dedicated check. |
+| **2** | **J** | **System Tray Polish:** Native tray supports minimal menu (`Show`, `Quit`), tooltip, and icons. Animated download badges or progress overlays require custom native draw hooks. | Cosmetic | Retain clean standard tray icon and menu for V0.9.0 Technical Preview; defer advanced tray badge rendering to post-V1. |
+| **3** | — | **Console Window Flashing:** Windows GUI executables (`-H windowsgui`) spawning console children (e.g. `yt-dlp.exe`) can momentarily flash a console window if spawned without creation flags. | Cosmetic | Ensure `internal/process.ProcessSupervisor` continues to enforce `CREATE_NO_WINDOW` (`0x08000000`) in `SysProcAttr` on Windows. |
+| **4** | **Q** | **Installer & Bootstrapper Packaging:** Development machine has WebView2 Evergreen runtime installed. While `wails3 generate webview2bootstrapper` exists, creating a signed redistributable installer was not part of this architecture spike. | Packaging concern | Defer NSIS installer script generation and code signing to dedicated milestone `DSK-4`. |
 
 ---
 
@@ -250,11 +286,17 @@ To guarantee zero collateral impact on existing production functionality:
 ```text
 ====================================================================================================
 DECISION: WAILS ACCEPTED WITH NON-BLOCKING LIMITATIONS
-FRAMEWORK: Wails v3 (pinned v3.0.0-beta.23)
+FRAMEWORK: Wails v3
+EVALUATED PINNED VERSION: v3.0.0-beta.23
 TARGET PLATFORM: Windows 11 / Windows 10 (x64)
 CRITERIA EVALUATED: 22 / 22 (Criteria A through V)
-CRITERIA PASSED: 22 / 22 (20 PASS, 2 PASS WITH NON-BLOCKING LIMITATION, 0 UNVERIFIED, 0 FAIL)
-TAURI EVALUATION: CANCELLED (No architectural blockers found; framework switch not justified)
+CRITERIA ACCOUNTING:
+  - PASS (20): A, B, C, D, E, F, G, H, I, K, L, M, N, O, P, R, S, T, U, V
+  - PASS WITH NON-BLOCKING LIMITATION (2): J, Q
+  - FAIL (0): None
+  - UNVERIFIED (0): None
+TAURI V2: NOT EVALUATED / FALLBACK ONLY (No architectural blockers found; framework switch not justified)
+SPK-SYN3-01 STATUS: COMPLETE / LOCKED
 AUTHORITATIVE REPORT: docs/implementation/SPK-SYN3-01_WAILS_V3_VIABILITY.md
 ====================================================================================================
 ```
