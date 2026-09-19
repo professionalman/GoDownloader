@@ -234,10 +234,15 @@ func (e *Engine) Cancel(ctx context.Context, j *job.Job) error {
 
 	state.cancel()
 	state.mu.Lock()
-	if state.proc != nil {
-		_ = state.proc.Terminate()
+	proc := state.proc
+	if proc != nil {
+		_ = proc.Terminate()
 	}
 	state.mu.Unlock()
+
+	if proc != nil {
+		_ = proc.Wait()
+	}
 	return nil
 }
 

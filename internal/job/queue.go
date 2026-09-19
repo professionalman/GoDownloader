@@ -12,6 +12,7 @@ type IQueueRepository interface {
 	Delete(ctx context.Context, jobID string) error
 
 	NextRunnable(ctx context.Context, evalTime ...time.Time) (*QueuedJob, error)
+	ListRunnable(ctx context.Context, evalTime ...time.Time) ([]QueuedJob, error)
 	List(ctx context.Context) ([]QueuedJob, error)
 
 	NextPosition(ctx context.Context, priority JobPriority) (int64, error)

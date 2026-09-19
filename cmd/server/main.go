@@ -154,7 +154,13 @@ func main() {
 	manager.SetTrackerEntryProvider(trackerService)
 	manager.SetExecutionRepository(execRepo)
 
+	resourceGovernor := job.NewResourceGovernor(job.DefaultResourceGovernorConfig(), func() int {
+		return settingsService.EffectiveMaxConcurrentDownloads(context.Background())
+	})
+	manager.SetResourceGovernor(resourceGovernor)
+
 	scheduler := job.NewScheduler(repo, queueRepo, settingsService.EffectiveMaxConcurrentDownloads, manager.DispatchQueuedJob)
+	scheduler.SetResourceGovernor(resourceGovernor)
 	manager.SetScheduler(scheduler)
 
 	// Supervisor shutdown deferred before manager.Stop so manager.Stop runs FIRST,

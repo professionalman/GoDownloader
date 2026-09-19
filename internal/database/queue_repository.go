@@ -80,10 +80,9 @@ func (r *SQLiteQueueRepository) NextPosition(ctx context.Context, priority job.J
 	return nextPos, nil
 }
 
-// NextRunnable retrieves the highest-priority runnable queued job (status = 'queued').
-// It filters eligible jobs (status = queued and not_before <= now), and evaluates
-// priority, deterministic aging, FIFO ties, and Run Now overrides using job.SelectNextRunnable.
-func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context, evalTime ...time.Time) (*job.QueuedJob, error) {
+// ListRunnable retrieves all eligible runnable queued jobs (status = 'queued' and not_before <= now),
+// sorted in deterministic FND-5A dispatch order (best candidate first).
+func (r *SQLiteQueueRepository) ListRunnable(ctx context.Context, evalTime ...time.Time) ([]job.QueuedJob, error) {
 	now := time.Now()
 	if len(evalTime) > 0 && !evalTime[0].IsZero() {
 		now = evalTime[0]
@@ -116,8 +115,20 @@ func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context, evalTime ...ti
 		return nil, nil
 	}
 
-	best := job.SelectNextRunnable(candidates, now, job.DefaultAgingConfig())
-	return best, nil
+	job.RankQueuedJobs(candidates, now, job.DefaultAgingConfig())
+	return candidates, nil
+}
+
+// NextRunnable retrieves the highest-priority runnable queued job (status = 'queued').
+// It filters eligible jobs (status = queued and not_before <= now), and evaluates
+// priority, deterministic aging, FIFO ties, and Run Now overrides using ListRunnable.
+func (r *SQLiteQueueRepository) NextRunnable(ctx context.Context, evalTime ...time.Time) (*job.QueuedJob, error) {
+	ranked, err := r.ListRunnable(ctx, evalTime...)
+	if err != nil || len(ranked) == 0 {
+		return nil, err
+	}
+	best := ranked[0]
+	return &best, nil
 }
 
 // List retrieves all queued/paused jobs with their queue entries, ordered by priority lane and position.

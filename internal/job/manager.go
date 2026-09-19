@@ -38,8 +38,9 @@ type Manager struct {
 	settings       *settings.SettingsService
 	storageService storage.IStorageService
 	categoryRepo   storage.ICategoryRepository
-	trackerEntries ITrackerEntryProvider
-	scheduler      *Scheduler
+	trackerEntries   ITrackerEntryProvider
+	scheduler        *Scheduler
+	resourceGovernor *ResourceGovernor
 
 	metadataTimeoutSeconds int
 
@@ -158,14 +159,38 @@ func (m *Manager) prepareJobForActivation(ctx context.Context, j *Job) error {
 
 // SetScheduler wires the scheduler instance.
 func (m *Manager) SetScheduler(s *Scheduler) {
+	m.mu.Lock()
 	m.scheduler = s
+	gov := m.resourceGovernor
+	m.mu.Unlock()
 	if s != nil {
 		s.SetEventBus(m.bus)
 		s.SetPublishFunc(m.publish)
 		s.SetEngineRegistry(m.engines)
 		s.SetAddActiveFunc(m.addActive)
 		s.SetPrepareActiveJobFunc(m.prepareJobForActivation)
+		if gov != nil {
+			s.SetResourceGovernor(gov)
+		}
 	}
+}
+
+// SetResourceGovernor wires the resource governor instance.
+func (m *Manager) SetResourceGovernor(gov *ResourceGovernor) {
+	m.mu.Lock()
+	m.resourceGovernor = gov
+	s := m.scheduler
+	m.mu.Unlock()
+	if s != nil {
+		s.SetResourceGovernor(gov)
+	}
+}
+
+// GetResourceGovernor returns the current resource governor instance.
+func (m *Manager) GetResourceGovernor() *ResourceGovernor {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.resourceGovernor
 }
 
 // StartBackgroundTasks starts recovery, queue cleanup, scheduler, and progress monitor.
@@ -173,6 +198,13 @@ func (m *Manager) SetScheduler(s *Scheduler) {
 func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 	// 1. Run recovery first
 	m.recover(ctx)
+	if gov := m.GetResourceGovernor(); gov != nil {
+		m.mu.RLock()
+		for _, j := range m.activeJobs {
+			gov.ReconstructJob(j)
+		}
+		m.mu.RUnlock()
+	}
 	m.ReconcileNetworkPolicies(ctx)
 	m.processPendingEngineCleanups(ctx)
 	reconcileCtx, cancel := context.WithCancel(ctx)
@@ -2717,6 +2749,9 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				return
 			}
 			if prevStatus != StatusSeeding {
+				if gov := m.GetResourceGovernor(); gov != nil {
+					gov.Release(j.ID)
+				}
 				_ = m.repo.Update(ctx, j)
 				m.addActive(j)
 				m.publish(EventJobUpdated, j)
@@ -2913,6 +2948,9 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		}
 
 		if prevStatus != StatusSeeding {
+			if gov := m.GetResourceGovernor(); gov != nil {
+				gov.Release(j.ID)
+			}
 			m.repo.Update(ctx, j)
 			m.addActive(j)
 			m.publish(EventJobUpdated, j)
@@ -3789,10 +3827,17 @@ func (m *Manager) addActive(j *Job) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) removeActive(id string) {
+func (m *Manager) removeActive(id string) bool {
 	m.mu.Lock()
+	_, hadActive := m.activeJobs[id]
 	delete(m.activeJobs, id)
+	gov := m.resourceGovernor
 	m.mu.Unlock()
+	released := false
+	if gov != nil {
+		released = gov.Release(id)
+	}
+	return hadActive || released
 }
 
 func (m *Manager) updateActiveJobFinalization(jobID, finalPath, name string) {

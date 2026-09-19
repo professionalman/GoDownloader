@@ -62,6 +62,7 @@ type Scheduler struct {
 	engines            IEngineRegistry
 	addActiveFn        AddActiveFunc
 	prepareActiveJobFn PrepareActiveJobFunc
+	governor           *ResourceGovernor
 
 	mu                         sync.Mutex
 	inFlight                   map[string]*DispatchReservation
@@ -121,6 +122,20 @@ func (s *Scheduler) SetPrepareActiveJobFunc(fn PrepareActiveJobFunc) {
 // SetPublishFunc injects the sequenced event publisher from Manager.
 func (s *Scheduler) SetPublishFunc(fn PublishFunc) {
 	s.publishFn = fn
+}
+
+// SetResourceGovernor injects the resource governor for multi-dimensional capacity management.
+func (s *Scheduler) SetResourceGovernor(gov *ResourceGovernor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.governor = gov
+}
+
+// GetResourceGovernor returns the injected resource governor.
+func (s *Scheduler) GetResourceGovernor() *ResourceGovernor {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.governor
 }
 
 // SetClock configures a custom time source for deterministic evaluation in tests.
@@ -369,6 +384,14 @@ func (s *Scheduler) inFlightCount() int {
 	return len(s.inFlight)
 }
 
+func (s *Scheduler) releaseGovernorLease(jobID string) {
+	if s.governor != nil {
+		if s.governor.Release(jobID) {
+			s.Kick()
+		}
+	}
+}
+
 func (s *Scheduler) schedule() {
 	for {
 		if s.ctx != nil && s.ctx.Err() != nil {
@@ -384,6 +407,66 @@ func (s *Scheduler) schedule() {
 			s.resetReconciliationRetry()
 		}
 
+		now := s.now()
+
+		if s.governor != nil {
+			var candidates []QueuedJob
+			if s.queueRepo != nil {
+				var listErr error
+				candidates, listErr = s.queueRepo.ListRunnable(s.ctx, now)
+				if listErr != nil {
+					log.Printf("scheduler: failed to list runnable jobs: %v", listErr)
+					return
+				}
+			}
+			if len(candidates) == 0 {
+				return
+			}
+
+			var selected *QueuedJob
+			for i := range candidates {
+				candidate := &candidates[i]
+				if s.isInFlight(candidate.JobID) {
+					continue
+				}
+
+				engine := candidate.Job.Engine
+				req := ResourceRequirements{Engine: engine}
+
+				_, acquireErr := s.governor.TryAcquire(candidate.JobID, req)
+				if acquireErr != nil {
+					// Capacity unavailable for this candidate (e.g. engine limit full or global transfer limit full).
+					// Continue scanning candidates in deterministic FND-5A order to prevent head-of-line blocking.
+					continue
+				}
+
+				if !s.reserveInFlight(candidate.JobID, candidate.Action) {
+					// Could not reserve in flight: release acquired lease and continue
+					s.governor.Release(candidate.JobID)
+					continue
+				}
+
+				selected = candidate
+				break
+			}
+
+			if selected == nil {
+				// No candidate could be admitted with available resources
+				return
+			}
+
+			if err := s.dispatchSingle(selected); err != nil {
+				if errors.Is(err, ErrDispatchPersistenceFailed) {
+					log.Printf("scheduler: stopping fill loop due to persistence failure for job %s", selected.JobID)
+					if s.hasUnresolvedReconciliations() {
+						s.scheduleReconciliationRetry()
+					}
+					return
+				}
+			}
+			continue
+		}
+
 		max := s.getLimit(s.ctx)
 		running, err := s.repo.CountDownloading(s.ctx)
 		if err != nil {
@@ -396,7 +479,6 @@ func (s *Scheduler) schedule() {
 			return
 		}
 
-		now := s.now()
 		next, err := s.queueRepo.NextRunnable(s.ctx, now)
 		if err != nil {
 			log.Printf("scheduler: failed to query next runnable job: %v", err)
@@ -484,6 +566,7 @@ func (s *Scheduler) reconcileStatePersistence(ctx context.Context, res DispatchR
 	}
 
 	s.releaseInFlight(current.ID)
+	s.releaseGovernorLease(current.ID)
 	log.Printf("scheduler: state reconciliation succeeded for job %s (%s)", current.ID, res.TargetStatus)
 	s.Kick()
 }
@@ -639,6 +722,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		if s.queueRepo != nil {
 			s.queueRepo.Delete(s.ctx, next.JobID)
 		}
+		s.releaseGovernorLease(next.JobID)
 		return err
 	}
 
@@ -647,12 +731,14 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		if current != nil && (current.Status == StatusCompleted || current.Status == StatusFailed || current.Status == StatusCancelled || current.Status == StatusDownloading || current.Status == StatusProcessing || current.Status == StatusSeeding) {
 			s.queueRepo.Delete(s.ctx, next.JobID)
 		}
+		s.releaseGovernorLease(next.JobID)
 		return nil
 	}
 
 	entry, err := s.queueRepo.Get(s.ctx, next.JobID)
 	if err != nil || entry == nil || entry.Action != next.Action {
 		log.Printf("scheduler: queue entry for job %s missing or changed, skipping", next.JobID)
+		s.releaseGovernorLease(next.JobID)
 		return nil
 	}
 
@@ -661,6 +747,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 		var handledErr *DispatchHandledError
 		if errors.As(dispatchErr, &handledErr) {
 			log.Printf("scheduler: local dispatch failure for job %s already handled by manager: %v", next.JobID, handledErr.Err)
+			s.releaseGovernorLease(next.JobID)
 			// Manager already durably persisted FAILED/PAUSED, updated queue, and published event.
 			// Release reservation and return nil so scheduler continues normally without duplicate processing.
 			return nil
@@ -713,6 +800,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 					log.Printf("scheduler: failed to delete queue entry for failed job %s: %v", next.JobID, delErr)
 				}
 				s.publish(EventJobFailed, current)
+				s.releaseGovernorLease(next.JobID)
 			}
 		} else {
 			targetErr := fmt.Sprintf("failed to resume queued download: %v", dispatchErr)
@@ -735,6 +823,7 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 				}
 			} else {
 				s.publish(EventJobUpdated, current)
+				s.releaseGovernorLease(next.JobID)
 			}
 		}
 	}

@@ -2252,6 +2252,23 @@ func (f *fakeQueueRepo) NextRunnable(ctx context.Context, evalTime ...time.Time)
 	}
 	return nil, nil
 }
+
+func (f *fakeQueueRepo) ListRunnable(ctx context.Context, evalTime ...time.Time) ([]QueuedJob, error) {
+	if f.entries == nil {
+		return nil, nil
+	}
+	var list []QueuedJob
+	for jobID, entry := range f.entries {
+		list = append(list, QueuedJob{
+			JobID:      jobID,
+			Action:     entry.Action,
+			Position:   entry.Position,
+			EnqueuedAt: entry.EnqueuedAt,
+			UpdatedAt:  entry.UpdatedAt,
+		})
+	}
+	return list, nil
+}
 func (f *fakeQueueRepo) List(ctx context.Context) ([]QueuedJob, error) {
 	return nil, nil
 }
