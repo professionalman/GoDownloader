@@ -63,6 +63,11 @@ vi.mock('../bindings/downloader/cmd/desktop/desktopservice', () => ({
   GetSingleInstanceStatus: vi.fn(),
   ShowNativeDialog: vi.fn(),
   Quit: vi.fn(),
+  RecordDiagnosticDelivery: vi.fn().mockResolvedValue(undefined),
+  RecordStateSyncCompleted: vi.fn().mockResolvedValue(undefined),
+  ReloadMainWindow: vi.fn().mockResolvedValue(undefined),
+  EmitDiagnosticEvent: vi.fn().mockResolvedValue(undefined),
+  GetDiagnosticEventDeliveryCount: vi.fn().mockResolvedValue(0),
 }));
 
 describe('Desktop Transport Layer', () => {
@@ -452,6 +457,38 @@ describe('Desktop Transport Layer', () => {
         { type: 'job.updated', id: 'job-102', seq: 102 },
       ]);
       expect(onSyncRequired).not.toHaveBeenCalled();
+    });
+
+    it('handles diagnostic.ping event and notifies DesktopService of delivery and sync completion', async () => {
+      let registeredCallback: ((ev: any) => void) | null = null;
+      vi.mocked(Events.On).mockImplementation((_name: any, cb: any) => {
+        registeredCallback = cb;
+        return vi.fn();
+      });
+
+      const onEvent = vi.fn();
+      const onSyncRequired = vi.fn();
+
+      const sub = new DesktopEventSubscription({
+        onEvent,
+        onSyncRequired,
+        getCursor: () => 0,
+      });
+
+      await sub.ready;
+
+      expect(DesktopService.RecordStateSyncCompleted).toHaveBeenCalledWith(0);
+
+      // Trigger diagnostic.ping event
+      registeredCallback!({
+        data: {
+          type: 'diagnostic.ping',
+          data: 'test-ping-token-123',
+        },
+      });
+
+      expect(DesktopService.RecordDiagnosticDelivery).toHaveBeenCalledWith('test-ping-token-123');
+      expect(onEvent).toHaveBeenCalledWith('diagnostic.ping', expect.anything(), undefined);
     });
   });
 });

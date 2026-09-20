@@ -75,6 +75,13 @@ export function DeleteTrackerSource(id: string): $CancellablePromise<void> {
     return $Call.ByID(2218491311, id);
 }
 
+/**
+ * EmitDiagnosticEvent publishes a deterministic diagnostic event across the application event bus.
+ */
+export function EmitDiagnosticEvent(token: string): $CancellablePromise<void> {
+    return $Call.ByID(4230022879, token);
+}
+
 export function GetBackendInstanceID(): $CancellablePromise<string> {
     return $Call.ByID(80028127);
 }
@@ -89,6 +96,13 @@ export function GetCategories(): $CancellablePromise<storage$0.CategoryResponse[
 
 export function GetDataRootInfo(): $CancellablePromise<$models.DataRootInfo | null> {
     return $Call.ByID(4187956567);
+}
+
+/**
+ * GetDiagnosticEventDeliveryCount returns the delivery count for the last emitted diagnostic event.
+ */
+export function GetDiagnosticEventDeliveryCount(): $CancellablePromise<number> {
+    return $Call.ByID(2667844939);
 }
 
 export function GetEventsAfter(cursor: number): $CancellablePromise<$models.EventsReplayResult | null> {
@@ -151,12 +165,33 @@ export function Quit(): $CancellablePromise<void> {
     return $Call.ByID(1821349302);
 }
 
+/**
+ * RecordDiagnosticDelivery records an event delivery acknowledged by the frontend.
+ */
+export function RecordDiagnosticDelivery(token: string): $CancellablePromise<void> {
+    return $Call.ByID(1556007099, token);
+}
+
+/**
+ * RecordStateSyncCompleted records completion of frontend StateSync initialization or catch-up.
+ */
+export function RecordStateSyncCompleted(cursor: number): $CancellablePromise<void> {
+    return $Call.ByID(1972263043, cursor);
+}
+
 export function RefreshAllTrackerSources(): $CancellablePromise<$models.TrackerRefreshSummary | null> {
     return $Call.ByID(3975827205);
 }
 
 export function RefreshTrackerSource(id: string): $CancellablePromise<networkpolicy$0.TrackerSource | null> {
     return $Call.ByID(3126597693, id);
+}
+
+/**
+ * ReloadMainWindow forces a reload of the main webview window.
+ */
+export function ReloadMainWindow(): $CancellablePromise<void> {
+    return $Call.ByID(3005123689);
 }
 
 export function ReorderQueue(priority: string, jobIDs: string[] | null): $CancellablePromise<void> {

@@ -28,11 +28,17 @@ import (
 
 // SingleInstanceStatus holds status information about the primary instance and secondary launches.
 type SingleInstanceStatus struct {
-	PrimaryPID        int      `json:"primaryPid"`
-	CoreInitCount     int      `json:"coreInitCount"`
-	SecondLaunchCount int      `json:"secondLaunchCount"`
-	LastForwardedArgs []string `json:"lastForwardedArgs"`
-	LastForwardedCwd  string   `json:"lastForwardedCwd"`
+	PrimaryPID         int      `json:"primaryPid"`
+	BackendInstanceID  string   `json:"backendInstanceId"`
+	CoreInitCount      int      `json:"coreInitCount"`
+	SecondLaunchCount  int      `json:"secondLaunchCount"`
+	LastForwardedArgs  []string `json:"lastForwardedArgs"`
+	LastForwardedCwd   string   `json:"lastForwardedCwd"`
+	ReloadCount        int      `json:"reloadCount"`
+	DeliveryCount      int      `json:"deliveryCount"`
+	LastEventToken     string   `json:"lastEventToken"`
+	StateSyncCompleted bool     `json:"stateSyncCompleted"`
+	StateSyncCursor    int64    `json:"stateSyncCursor"`
 }
 
 // EventsReplayResult contains events replayed since a requested cursor.
@@ -55,16 +61,21 @@ type TrackerRefreshSummary struct {
 // DesktopService exposes the unified GoDownloader application runtime
 // to the embedded desktop frontend via Wails v3 in-process IPC.
 type DesktopService struct {
-	mu                sync.Mutex
-	app               *app.App
-	wailsApp          *application.App
-	mainWindow        *application.WebviewWindow
-	instanceID        string
-	dataRoot          string
-	coreInitCount     int
-	secondLaunchCount int
-	lastForwardedArgs []string
-	lastForwardedCwd  string
+	mu                 sync.Mutex
+	app                *app.App
+	wailsApp           *application.App
+	mainWindow         *application.WebviewWindow
+	instanceID         string
+	dataRoot           string
+	coreInitCount      int
+	secondLaunchCount  int
+	lastForwardedArgs  []string
+	lastForwardedCwd   string
+	reloadCount        int
+	deliveryCount      int
+	lastEventToken     string
+	stateSyncCompleted bool
+	stateSyncCursor    int64
 }
 
 // NewDesktopService constructs a DesktopService wrapping the primary App instance.
@@ -85,11 +96,17 @@ func (s *DesktopService) persistStatus() {
 		return
 	}
 	status := SingleInstanceStatus{
-		PrimaryPID:        os.Getpid(),
-		CoreInitCount:     s.coreInitCount,
-		SecondLaunchCount: s.secondLaunchCount,
-		LastForwardedArgs: s.lastForwardedArgs,
-		LastForwardedCwd:  s.lastForwardedCwd,
+		PrimaryPID:         os.Getpid(),
+		BackendInstanceID:  s.instanceID,
+		CoreInitCount:      s.coreInitCount,
+		SecondLaunchCount:  s.secondLaunchCount,
+		LastForwardedArgs:  s.lastForwardedArgs,
+		LastForwardedCwd:   s.lastForwardedCwd,
+		ReloadCount:        s.reloadCount,
+		DeliveryCount:      s.deliveryCount,
+		LastEventToken:     s.lastEventToken,
+		StateSyncCompleted: s.stateSyncCompleted,
+		StateSyncCursor:    s.stateSyncCursor,
 	}
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err == nil {
@@ -860,12 +877,77 @@ func (s *DesktopService) GetSingleInstanceStatus() (*SingleInstanceStatus, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return &SingleInstanceStatus{
-		PrimaryPID:        os.Getpid(),
-		CoreInitCount:     s.coreInitCount,
-		SecondLaunchCount: s.secondLaunchCount,
-		LastForwardedArgs: s.lastForwardedArgs,
-		LastForwardedCwd:  s.lastForwardedCwd,
+		PrimaryPID:         os.Getpid(),
+		BackendInstanceID:  s.instanceID,
+		CoreInitCount:      s.coreInitCount,
+		SecondLaunchCount:  s.secondLaunchCount,
+		LastForwardedArgs:  s.lastForwardedArgs,
+		LastForwardedCwd:   s.lastForwardedCwd,
+		ReloadCount:        s.reloadCount,
+		DeliveryCount:      s.deliveryCount,
+		LastEventToken:     s.lastEventToken,
+		StateSyncCompleted: s.stateSyncCompleted,
+		StateSyncCursor:    s.stateSyncCursor,
 	}, nil
+}
+
+// ReloadMainWindow forces a reload of the main webview window.
+func (s *DesktopService) ReloadMainWindow() {
+	s.mu.Lock()
+	win := s.mainWindow
+	s.deliveryCount = 0
+	s.lastEventToken = ""
+	s.stateSyncCompleted = false
+	s.reloadCount++
+	s.persistStatus()
+	s.mu.Unlock()
+
+	if win != nil {
+		win.Reload()
+	}
+}
+
+// EmitDiagnosticEvent publishes a deterministic diagnostic event across the application event bus.
+func (s *DesktopService) EmitDiagnosticEvent(token string) {
+	s.mu.Lock()
+	s.deliveryCount = 0
+	s.lastEventToken = token
+	appInst := s.app
+	s.persistStatus()
+	s.mu.Unlock()
+
+	if appInst != nil && appInst.EventBus() != nil {
+		appInst.EventBus().Publish(job.Event{
+			Type: "diagnostic.ping",
+			Data: token,
+		})
+	}
+}
+
+// RecordDiagnosticDelivery records an event delivery acknowledged by the frontend.
+func (s *DesktopService) RecordDiagnosticDelivery(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastEventToken == "" || s.lastEventToken == token {
+		s.deliveryCount++
+		s.persistStatus()
+	}
+}
+
+// GetDiagnosticEventDeliveryCount returns the delivery count for the last emitted diagnostic event.
+func (s *DesktopService) GetDiagnosticEventDeliveryCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deliveryCount
+}
+
+// RecordStateSyncCompleted records completion of frontend StateSync initialization or catch-up.
+func (s *DesktopService) RecordStateSyncCompleted(cursor int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stateSyncCompleted = true
+	s.stateSyncCursor = cursor
+	s.persistStatus()
 }
 
 func (s *DesktopService) ShowNativeDialog(title, message string) {

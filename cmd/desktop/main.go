@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -87,7 +89,7 @@ func main() {
 
 	// Diagnostic flag: print single instance status for runtime verification
 	for _, arg := range os.Args[1:] {
-		if arg == "--print-single-instance-status" {
+		if arg == "--print-single-instance-status" || arg == "--print-diagnostic-status" {
 			dataRoot, err := ResolveDesktopDataRoot()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
@@ -100,6 +102,24 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println(string(data))
+			return
+		}
+	}
+
+	// Diagnostic IPC command dispatcher for headless test triggers
+	for _, arg := range os.Args[1:] {
+		if arg == "--trigger-reload" || strings.HasPrefix(arg, "--emit-diagnostic-event=") || arg == "--trigger-quit" {
+			dataRoot, err := ResolveDesktopDataRoot()
+			if err == nil {
+				cwd, _ := os.Getwd()
+				cmdFile := filepath.Join(dataRoot, "diagnostic_command.json")
+				payload := map[string]any{
+					"args": os.Args[1:],
+					"cwd":  cwd,
+				}
+				data, _ := json.Marshal(payload)
+				_ = os.WriteFile(cmdFile, data, 0644)
+			}
 			return
 		}
 	}
@@ -170,12 +190,55 @@ func main() {
 				service.Quit()
 				return
 			}
+			if arg == "--trigger-reload" {
+				service.ReloadMainWindow()
+				return
+			}
+			if strings.HasPrefix(arg, "--emit-diagnostic-event=") {
+				token := strings.TrimPrefix(arg, "--emit-diagnostic-event=")
+				service.EmitDiagnosticEvent(token)
+				return
+			}
 			if arg == "--test-dialog" {
 				go service.ShowNativeDialog("GoDownloader Verification", "Native dialog verification message")
 				return
 			}
 		}
 	}
+
+	// Listen for diagnostic commands in background
+	go func() {
+		cmdFile := filepath.Join(dataRoot, "diagnostic_command.json")
+		for {
+			time.Sleep(50 * time.Millisecond)
+			data, err := os.ReadFile(cmdFile)
+			if err == nil && len(data) > 0 {
+				_ = os.Remove(cmdFile)
+				var payload struct {
+					Args []string `json:"args"`
+					Cwd  string   `json:"cwd"`
+				}
+				if json.Unmarshal(data, &payload) == nil {
+					service.recordSecondLaunch(payload.Args, payload.Cwd)
+					for _, arg := range payload.Args {
+						if arg == "--trigger-quit" {
+							service.Quit()
+							break
+						}
+						if arg == "--trigger-reload" {
+							service.ReloadMainWindow()
+							break
+						}
+						if strings.HasPrefix(arg, "--emit-diagnostic-event=") {
+							token := strings.TrimPrefix(arg, "--emit-diagnostic-event=")
+							service.EmitDiagnosticEvent(token)
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	// Wire application event bus to Wails native events
 	eventCh := appInstance.EventBus().Subscribe()

@@ -196,6 +196,31 @@ func TestDesktopService_Basics(t *testing.T) {
 		t.Fatalf("expected single_instance_status.json to exist: %v", err)
 	}
 
+	// Test Diagnostic Methods
+	svc.ReloadMainWindow() // safe when mainWindow is nil
+	status, err = svc.GetSingleInstanceStatus()
+	if err != nil {
+		t.Fatalf("GetSingleInstanceStatus failed: %v", err)
+	}
+	if status.ReloadCount != 1 {
+		t.Fatalf("expected ReloadCount 1, got %d", status.ReloadCount)
+	}
+	if status.BackendInstanceID != svc.GetBackendInstanceID() {
+		t.Fatalf("expected BackendInstanceID %s, got %s", svc.GetBackendInstanceID(), status.BackendInstanceID)
+	}
+
+	svc.EmitDiagnosticEvent("diag-token-1")
+	svc.RecordDiagnosticDelivery("diag-token-1")
+	if count := svc.GetDiagnosticEventDeliveryCount(); count != 1 {
+		t.Fatalf("expected delivery count 1, got %d", count)
+	}
+
+	svc.RecordStateSyncCompleted(42)
+	status, _ = svc.GetSingleInstanceStatus()
+	if !status.StateSyncCompleted || status.StateSyncCursor != 42 {
+		t.Fatalf("expected StateSyncCompleted true and cursor 42, got %v / %d", status.StateSyncCompleted, status.StateSyncCursor)
+	}
+
 	// Test Capabilities
 	caps := svc.GetCapabilities()
 	if caps == nil || caps["profiles"] == nil {

@@ -136,10 +136,12 @@ export class DesktopEventSubscription implements EventSubscription {
           .finally(() => {
             this.handshakeComplete = true;
             resolveReady();
+            DesktopService.RecordStateSyncCompleted?.(this.lastProcessedSeq)?.catch?.(() => {});
           });
       } else {
         this.handshakeComplete = true;
         resolveReady();
+        DesktopService.RecordStateSyncCompleted?.(0)?.catch?.(() => {});
       }
     } catch (err) {
       if (options.onError) {
@@ -157,6 +159,11 @@ export class DesktopEventSubscription implements EventSubscription {
     if (payload.type === 'sync.required') {
       options.onSyncRequired?.(payload.data || { cursor: 0, reason: 'event_gap' });
       return;
+    }
+
+    if (payload.type === 'diagnostic.ping') {
+      const token = typeof payload.data === 'string' ? payload.data : '';
+      DesktopService.RecordDiagnosticDelivery?.(token)?.catch?.(() => {});
     }
 
     const seq = payload.sequence;

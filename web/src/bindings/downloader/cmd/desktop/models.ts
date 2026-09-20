@@ -32,10 +32,16 @@ export interface EventsReplayResult {
  */
 export interface SingleInstanceStatus {
     "primaryPid": number;
+    "backendInstanceId": string;
     "coreInitCount": number;
     "secondLaunchCount": number;
     "lastForwardedArgs": string[] | null;
     "lastForwardedCwd": string;
+    "reloadCount": number;
+    "deliveryCount": number;
+    "lastEventToken": string;
+    "stateSyncCompleted": boolean;
+    "stateSyncCursor": number;
 }
 
 /**
