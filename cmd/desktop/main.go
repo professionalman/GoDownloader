@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"downloader/internal/app"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+var globalCoreInitCount int64
 
 func main() {
 	// Diagnostic flag: print CWD and resolved DATA_ROOT for verification
@@ -82,29 +85,33 @@ func main() {
 		}
 	}
 
-	dataRoot, err := ResolveDesktopDataRoot()
-	if err != nil {
-		log.Fatalf("Fatal: failed to resolve desktop data root: %v", err)
+	// Diagnostic flag: print single instance status for runtime verification
+	for _, arg := range os.Args[1:] {
+		if arg == "--print-single-instance-status" {
+			dataRoot, err := ResolveDesktopDataRoot()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+				os.Exit(1)
+			}
+			statusPath := filepath.Join(dataRoot, "single_instance_status.json")
+			data, err := os.ReadFile(statusPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: failed to read status: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(data))
+			return
+		}
 	}
-
-	dbPath := filepath.Join(dataRoot, "downloader.db")
-	cfg := config.New()
-	cfg.DownloadDir = filepath.Join(dataRoot, "downloads")
-	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
-	if err != nil {
-		log.Fatalf("Fatal: failed to construct application core: %v", err)
-	}
-
-	startCtx, cancelStart := context.WithTimeout(context.Background(), 15*time.Second)
-	if err := appInstance.Start(startCtx); err != nil {
-		cancelStart()
-		log.Fatalf("Fatal: failed to start application runtime: %v", err)
-	}
-	cancelStart()
 
 	var secondLaunchHandler func(data application.SecondInstanceData)
 	var mainWindow *application.WebviewWindow
 
+	// =========================================================================
+	// SINGLE-INSTANCE ESTABLISHMENT BEFORE CORE RUNTIME
+	// Any secondary process exits cleanly with code 0 inside application.New.
+	// Secondary processes NEVER reach app.New, app.Start, or DB initialization!
+	// =========================================================================
 	wailsApp := application.New(application.Options{
 		Name:        "GoDownloader",
 		Description: "GoDownloader Windows Desktop Technical Preview",
@@ -129,8 +136,29 @@ func main() {
 
 	// =========================================================================
 	// PRIMARY PROCESS EXECUTION BEYOND THIS POINT
-	// Any secondary process already exited with code 0 in application.New above
 	// =========================================================================
+
+	atomic.AddInt64(&globalCoreInitCount, 1)
+
+	dataRoot, err := ResolveDesktopDataRoot()
+	if err != nil {
+		log.Fatalf("Fatal: failed to resolve desktop data root: %v", err)
+	}
+
+	dbPath := filepath.Join(dataRoot, "downloader.db")
+	cfg := config.New()
+	cfg.DownloadDir = filepath.Join(dataRoot, "downloads")
+	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
+	if err != nil {
+		log.Fatalf("Fatal: failed to construct application core: %v", err)
+	}
+
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := appInstance.Start(startCtx); err != nil {
+		cancelStart()
+		log.Fatalf("Fatal: failed to start application runtime: %v", err)
+	}
+	cancelStart()
 
 	service := NewDesktopService(appInstance, dataRoot)
 	wailsApp.RegisterService(application.NewService(service))
@@ -140,6 +168,10 @@ func main() {
 		for _, arg := range data.Args {
 			if arg == "--trigger-quit" {
 				service.Quit()
+				return
+			}
+			if arg == "--test-dialog" {
+				go service.ShowNativeDialog("GoDownloader Verification", "Native dialog verification message")
 				return
 			}
 		}

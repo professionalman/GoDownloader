@@ -57,6 +57,7 @@ vi.mock('../bindings/downloader/cmd/desktop/desktopservice', () => ({
   ImportMediaCookies: vi.fn(),
   DeleteMediaCookies: vi.fn(),
   GetSyncSnapshot: vi.fn(),
+  GetEventsAfter: vi.fn(),
   GetBackendInstanceID: vi.fn(),
   GetDataRootInfo: vi.fn(),
   GetSingleInstanceStatus: vi.fn(),
@@ -258,7 +259,7 @@ describe('Desktop Transport Layer', () => {
       expect(unlistenMock).toHaveBeenCalledTimes(1);
     });
 
-    it('triggers onSyncRequired when sequence gap is detected', () => {
+    it('triggers onSyncRequired when sequence gap is detected in live events', () => {
       let registeredCallback: ((ev: any) => void) | null = null;
       vi.mocked(Events.On).mockImplementation((_name: any, cb: any) => {
         registeredCallback = cb;
@@ -288,6 +289,169 @@ describe('Desktop Transport Layer', () => {
 
       expect(onSyncRequired).toHaveBeenCalledWith({ cursor: 5, reason: 'event_gap' });
       expect(onEvent).not.toHaveBeenCalled();
+    });
+
+    it('recovers lost mutation 101 via handshake without timing sleeps when NO event 102 occurs', async () => {
+      // Simulation of Section 10:
+      // snapshot captures cursor 100
+      // persisted mutation/event 101 occurs on backend
+      // frontend native listener attaches with cursor 100
+      // NO event 102 occurs
+      vi.mocked(DesktopService.GetEventsAfter).mockResolvedValue({
+        events: [
+          {
+            sequence: 101,
+            type: 'job.updated',
+            job: { id: 'job-101', name: 'recovered-file.zip', status: 'downloading' } as any,
+          },
+        ],
+        currentCursor: 101,
+        gapDetected: false,
+      });
+
+      const onEvent = vi.fn();
+      const onSyncRequired = vi.fn();
+
+      const sub = new DesktopEventSubscription({
+        onEvent,
+        onSyncRequired,
+        getCursor: () => 100,
+      });
+
+      // Await deterministic handshake completion
+      await sub.ready;
+
+      expect(DesktopService.GetEventsAfter).toHaveBeenCalledWith(100);
+      expect(onEvent).toHaveBeenCalledTimes(1);
+      expect(onEvent).toHaveBeenCalledWith(
+        'job.updated',
+        expect.objectContaining({ id: 'job-101', name: 'recovered-file.zip' }),
+        101
+      );
+      expect(onSyncRequired).not.toHaveBeenCalled();
+    });
+
+    it('triggers onSyncRequired immediately if GetEventsAfter reports gapDetected', async () => {
+      vi.mocked(DesktopService.GetEventsAfter).mockResolvedValue({
+        events: [],
+        currentCursor: 150,
+        gapDetected: true,
+      });
+
+      const onEvent = vi.fn();
+      const onSyncRequired = vi.fn();
+
+      const sub = new DesktopEventSubscription({
+        onEvent,
+        onSyncRequired,
+        getCursor: () => 100,
+      });
+
+      await sub.ready;
+
+      expect(onSyncRequired).toHaveBeenCalledWith({ cursor: 100, reason: 'event_gap' });
+      expect(onEvent).not.toHaveBeenCalled();
+    });
+
+    it('preserves ephemeral seq=0 progress events without triggering gap or deduplication', async () => {
+      let registeredCallback: ((ev: any) => void) | null = null;
+      vi.mocked(Events.On).mockImplementation((_name: any, cb: any) => {
+        registeredCallback = cb;
+        return vi.fn();
+      });
+
+      vi.mocked(DesktopService.GetEventsAfter).mockResolvedValue({
+        events: [],
+        currentCursor: 10,
+        gapDetected: false,
+      });
+
+      const onEvent = vi.fn();
+      const onSyncRequired = vi.fn();
+
+      const sub = new DesktopEventSubscription({
+        onEvent,
+        onSyncRequired,
+        getCursor: () => 10,
+      });
+
+      await sub.ready;
+
+      // Ephemeral tick: sequence is 0
+      registeredCallback!({
+        data: {
+          sequence: 0,
+          type: 'job.updated',
+          job: { id: 'job-progress', progress: 55.4 } as any,
+        },
+      });
+
+      expect(onEvent).toHaveBeenCalledWith(
+        'job.updated',
+        expect.objectContaining({ id: 'job-progress' }),
+        0
+      );
+      expect(onSyncRequired).not.toHaveBeenCalled();
+    });
+
+    it('queues live events during handshake and drains them in order after replayed events', async () => {
+      let registeredCallback: ((ev: any) => void) | null = null;
+      vi.mocked(Events.On).mockImplementation((_name: any, cb: any) => {
+        registeredCallback = cb;
+        return vi.fn();
+      });
+
+      let resolveGetEvents: (val: any) => void = () => {};
+      const getEventsPromise = new Promise((resolve) => {
+        resolveGetEvents = resolve;
+      });
+      vi.mocked(DesktopService.GetEventsAfter).mockReturnValue(getEventsPromise as any);
+
+      const eventsReceived: Array<{ type: string; id: string; seq?: number }> = [];
+      const onEvent = vi.fn((type: string, job: any, seq?: number) => {
+        eventsReceived.push({ type, id: job.id, seq });
+      });
+      const onSyncRequired = vi.fn();
+
+      const sub = new DesktopEventSubscription({
+        onEvent,
+        onSyncRequired,
+        getCursor: () => 100,
+      });
+
+      // While GetEventsAfter is in-flight, a live event arrives (seq 102)
+      registeredCallback!({
+        data: {
+          sequence: 102,
+          type: 'job.updated',
+          job: { id: 'job-102' } as any,
+        },
+      });
+
+      // No events dispatched yet while handshake is in-flight
+      expect(eventsReceived).toHaveLength(0);
+
+      // Resolve GetEventsAfter with replayed event 101
+      resolveGetEvents({
+        events: [
+          {
+            sequence: 101,
+            type: 'job.updated',
+            job: { id: 'job-101' } as any,
+          },
+        ],
+        currentCursor: 101,
+        gapDetected: false,
+      });
+
+      await sub.ready;
+
+      // Both replayed 101 and queued live 102 must be delivered in strict order
+      expect(eventsReceived).toEqual([
+        { type: 'job.updated', id: 'job-101', seq: 101 },
+        { type: 'job.updated', id: 'job-102', seq: 102 },
+      ]);
+      expect(onSyncRequired).not.toHaveBeenCalled();
     });
   });
 });

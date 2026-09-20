@@ -17,6 +17,7 @@ export type {
     BulkActionResponse,
     BulkItemResult,
     CreateBatchResponse,
+    Event,
     Job,
     MediaFormat,
     MediaInfo,

@@ -8,6 +8,7 @@ export {
 
 export type {
     DataRootInfo,
+    EventsReplayResult,
     SingleInstanceStatus,
     TrackerRefreshSummary,
     TrackersResult

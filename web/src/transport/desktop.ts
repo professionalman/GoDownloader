@@ -59,29 +59,35 @@ async function fileToBase64(file: File): Promise<string> {
   return btoa(binary);
 }
 
-/** In-process desktop event subscription wrapping Wails Events.On */
+/** In-process desktop event subscription wrapping Wails Events.On with deterministic StateSync handshake */
 export class DesktopEventSubscription implements EventSubscription {
   private unlisten: (() => void) | null = null;
+  private isClosed = false;
+  private handshakeComplete = false;
+  private pendingLiveEvents: Array<{ type: string; job?: Job; data?: any; sequence?: number }> = [];
+  private lastProcessedSeq = 0;
+  readonly ready: Promise<void>;
 
   constructor(options: EventSubscribeOptions) {
+    let resolveReady: () => void = () => {};
+    this.ready = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+
     try {
       this.unlisten = Events.On('godownloader.event', (wailsEv: any) => {
+        if (this.isClosed) return;
         try {
           const payload = wailsEv?.data;
           if (!payload) return;
-          if (payload.type === 'sync.required') {
-            options.onSyncRequired?.(payload.data || { cursor: 0, reason: 'event_gap' });
-          } else if (payload.job) {
-            const seq = payload.sequence;
-            if (typeof seq === 'number' && seq > 0 && options.getCursor) {
-              const currentCursor = options.getCursor();
-              if (typeof currentCursor === 'number' && currentCursor > 0 && seq > currentCursor + 1) {
-                options.onSyncRequired?.({ cursor: currentCursor, reason: 'event_gap' });
-                return;
-              }
-            }
-            options.onEvent(payload.type, payload.job as Job, payload.sequence);
+
+          // If handshake is still in progress, queue live events
+          if (!this.handshakeComplete) {
+            this.pendingLiveEvents.push(payload);
+            return;
           }
+
+          this.processEvent(payload, options);
         } catch (err) {
           options.onError?.(err);
         }
@@ -90,18 +96,96 @@ export class DesktopEventSubscription implements EventSubscription {
       if (options.onConnected) {
         options.onConnected();
       }
+
+      // Perform deterministic StateSync catchup handshake if cursor is supplied
+      const initialCursor = options.getCursor ? options.getCursor() : undefined;
+      if (typeof initialCursor === 'number' && initialCursor > 0) {
+        this.lastProcessedSeq = initialCursor;
+        DesktopService.GetEventsAfter(initialCursor)
+          .then((res: any) => {
+            if (this.isClosed) return;
+            if (res?.gapDetected) {
+              options.onSyncRequired?.({ cursor: initialCursor, reason: 'event_gap' });
+              this.pendingLiveEvents = [];
+              return;
+            }
+
+            if (Array.isArray(res?.events)) {
+              for (const replayed of res.events) {
+                if (this.isClosed) return;
+                const seq = replayed.sequence;
+                if (typeof seq === 'number' && seq > 0) {
+                  this.lastProcessedSeq = Math.max(this.lastProcessedSeq, seq);
+                }
+                options.onEvent(replayed.type, (replayed.job || {}) as Job, seq);
+              }
+            }
+
+            // Drain queued live events
+            this.handshakeComplete = true;
+            for (const queued of this.pendingLiveEvents) {
+              if (this.isClosed) return;
+              this.processEvent(queued, options);
+            }
+            this.pendingLiveEvents = [];
+          })
+          .catch((err) => {
+            if (this.isClosed) return;
+            options.onError?.(err);
+          })
+          .finally(() => {
+            this.handshakeComplete = true;
+            resolveReady();
+          });
+      } else {
+        this.handshakeComplete = true;
+        resolveReady();
+      }
     } catch (err) {
       if (options.onError) {
         options.onError(err);
       }
+      this.handshakeComplete = true;
+      resolveReady();
     }
   }
 
+  private processEvent(
+    payload: { type: string; job?: Job; data?: any; sequence?: number },
+    options: EventSubscribeOptions
+  ) {
+    if (payload.type === 'sync.required') {
+      options.onSyncRequired?.(payload.data || { cursor: 0, reason: 'event_gap' });
+      return;
+    }
+
+    const seq = payload.sequence;
+    if (typeof seq === 'number' && seq > 0) {
+      // Monotonic sequence event: deduplicate if already applied
+      if (this.lastProcessedSeq > 0) {
+        if (seq <= this.lastProcessedSeq) {
+          return; // already processed
+        }
+        if (seq > this.lastProcessedSeq + 1) {
+          // Gap detected in live stream
+          options.onSyncRequired?.({ cursor: this.lastProcessedSeq, reason: 'event_gap' });
+          return;
+        }
+      }
+      this.lastProcessedSeq = seq;
+    }
+
+    // Ephemeral events (seq === 0 or undefined) pass through unconditionally
+    options.onEvent(payload.type, (payload.job || {}) as Job, seq);
+  }
+
   close(): void {
+    this.isClosed = true;
     if (this.unlisten) {
       this.unlisten();
       this.unlisten = null;
     }
+    this.pendingLiveEvents = [];
   }
 }
 

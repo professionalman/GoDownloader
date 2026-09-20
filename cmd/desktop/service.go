@@ -35,6 +35,13 @@ type SingleInstanceStatus struct {
 	LastForwardedCwd  string   `json:"lastForwardedCwd"`
 }
 
+// EventsReplayResult contains events replayed since a requested cursor.
+type EventsReplayResult struct {
+	Events        []job.Event `json:"events"`
+	CurrentCursor int64       `json:"currentCursor"`
+	GapDetected   bool        `json:"gapDetected"`
+}
+
 // TrackersResult carries tracker results for addTorrentTrackers.
 type TrackersResult struct {
 	Trackers []networkpolicy.Tracker `json:"trackers"`
@@ -63,11 +70,30 @@ type DesktopService struct {
 // NewDesktopService constructs a DesktopService wrapping the primary App instance.
 func NewDesktopService(appInstance *app.App, dataRoot string) *DesktopService {
 	instID := fmt.Sprintf("core-%d-%04x", time.Now().UnixMilli(), time.Now().Nanosecond()%0xffff)
-	return &DesktopService{
+	svc := &DesktopService{
 		app:           appInstance,
 		instanceID:    instID,
 		dataRoot:      dataRoot,
 		coreInitCount: 1,
+	}
+	svc.persistStatus()
+	return svc
+}
+
+func (s *DesktopService) persistStatus() {
+	if s.dataRoot == "" {
+		return
+	}
+	status := SingleInstanceStatus{
+		PrimaryPID:        os.Getpid(),
+		CoreInitCount:     s.coreInitCount,
+		SecondLaunchCount: s.secondLaunchCount,
+		LastForwardedArgs: s.lastForwardedArgs,
+		LastForwardedCwd:  s.lastForwardedCwd,
+	}
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(filepath.Join(s.dataRoot, "single_instance_status.json"), data, 0644)
 	}
 }
 
@@ -84,6 +110,7 @@ func (s *DesktopService) recordSecondLaunch(args []string, cwd string) {
 	s.secondLaunchCount++
 	s.lastForwardedArgs = args
 	s.lastForwardedCwd = cwd
+	s.persistStatus()
 }
 
 func toIPCError(err error) error {
@@ -770,6 +797,44 @@ func (s *DesktopService) GetSyncSnapshot() (*job.SyncSnapshot, error) {
 		return nil, toIPCError(err)
 	}
 	return snap, nil
+}
+
+func (s *DesktopService) GetEventsAfter(cursor int64) (*EventsReplayResult, error) {
+	s.mu.Lock()
+	appInst := s.app
+	s.mu.Unlock()
+
+	if appInst == nil {
+		return nil, toIPCError(errors.New("application core not initialized"))
+	}
+
+	ctx := context.Background()
+	currentCursor := appInst.Manager().GetCurrentCursor(ctx)
+
+	if cursor >= currentCursor {
+		return &EventsReplayResult{
+			Events:        []job.Event{},
+			CurrentCursor: currentCursor,
+			GapDetected:   cursor > currentCursor,
+		}, nil
+	}
+
+	if bus := appInst.EventBus(); bus != nil {
+		evs, ok := bus.GetEventsAfter(cursor)
+		if ok {
+			return &EventsReplayResult{
+				Events:        evs,
+				CurrentCursor: currentCursor,
+				GapDetected:   false,
+			}, nil
+		}
+	}
+
+	return &EventsReplayResult{
+		Events:        nil,
+		CurrentCursor: currentCursor,
+		GapDetected:   true,
+	}, nil
 }
 
 // =========================================================================

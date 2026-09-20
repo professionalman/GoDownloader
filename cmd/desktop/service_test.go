@@ -169,6 +169,33 @@ func TestDesktopService_Basics(t *testing.T) {
 		t.Fatal("expected non-nil sync snapshot")
 	}
 
+	// Test GetEventsAfter
+	eventsRes, err := svc.GetEventsAfter(syncSnap.Cursor)
+	if err != nil {
+		t.Fatalf("GetEventsAfter failed: %v", err)
+	}
+	if eventsRes.GapDetected {
+		t.Fatal("expected no gap when cursor matches currentCursor")
+	}
+	if len(eventsRes.Events) != 0 {
+		t.Fatalf("expected 0 replayed events, got %d", len(eventsRes.Events))
+	}
+
+	// Test GetEventsAfter with future cursor -> gap detected
+	futureRes, err := svc.GetEventsAfter(syncSnap.Cursor + 100)
+	if err != nil {
+		t.Fatalf("GetEventsAfter failed: %v", err)
+	}
+	if !futureRes.GapDetected {
+		t.Fatal("expected gap detected for future cursor")
+	}
+
+	// Test status file persistence
+	statusFile := filepath.Join(tmpDir, "single_instance_status.json")
+	if _, err := os.Stat(statusFile); err != nil {
+		t.Fatalf("expected single_instance_status.json to exist: %v", err)
+	}
+
 	// Test Capabilities
 	caps := svc.GetCapabilities()
 	if caps == nil || caps["profiles"] == nil {

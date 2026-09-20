@@ -91,6 +91,10 @@ export function GetDataRootInfo(): $CancellablePromise<$models.DataRootInfo | nu
     return $Call.ByID(4187956567);
 }
 
+export function GetEventsAfter(cursor: number): $CancellablePromise<$models.EventsReplayResult | null> {
+    return $Call.ByID(2397380008, cursor);
+}
+
 export function GetJob(id: string): $CancellablePromise<job$0.Job | null> {
     return $Call.ByID(2401552206, id);
 }

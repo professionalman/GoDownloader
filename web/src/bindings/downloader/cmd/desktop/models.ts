@@ -3,6 +3,9 @@
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as job$0 from "../../internal/job/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as networkpolicy$0 from "../../internal/networkpolicy/models.js";
 
 /**
@@ -13,6 +16,15 @@ export interface DataRootInfo {
     "workingDir": string;
     "resolvedDataRoot": string;
     "isDeterministic": boolean;
+}
+
+/**
+ * EventsReplayResult contains events replayed since a requested cursor.
+ */
+export interface EventsReplayResult {
+    "events": job$0.Event[] | null;
+    "currentCursor": number;
+    "gapDetected": boolean;
 }
 
 /**

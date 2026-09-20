@@ -53,6 +53,16 @@ export interface CreateBatchResponse {
 }
 
 /**
+ * Event represents an internal event published by the job system.
+ */
+export interface Event {
+    "sequence"?: number;
+    "type": string;
+    "job": Job;
+    "data"?: any;
+}
+
+/**
  * FilenameConflictPolicy defines the strategy when a destination file already exists.
  */
 export enum FilenameConflictPolicy {
