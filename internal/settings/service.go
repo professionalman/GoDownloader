@@ -20,12 +20,14 @@ const (
 	KeyMinimumFreeSpaceBytes    = "minimum_free_space_bytes"
 	KeyDefaultConflictPolicy    = "default_conflict_policy"
 	KeyV07PowerSettings         = "v07_power_settings"
+	KeyCloseToTray              = "close_to_tray"
 
 	DefaultMaxConcurrent  = 3
 	MinMaxConcurrent      = 1
 	MaxMaxConcurrent      = 20
 	DefaultMinFreeSpace   = 1073741824 // 1 GiB
 	DefaultConflictPolicy = "rename"
+	DefaultCloseToTray    = true
 	FallbackDownloadDir   = "./downloads"
 	FallbackDataDir       = "./data"
 )
@@ -860,4 +862,23 @@ func (s *SettingsService) UpdateStorageSettings(ctx context.Context, req *Update
 	}
 
 	return s.GetSettings(ctx)
+}
+
+// GetCloseToTray retrieves the persisted close-to-tray preference.
+// Missing or unparseable values default to DefaultCloseToTray (true).
+func (s *SettingsService) GetCloseToTray(ctx context.Context) (bool, error) {
+	valStr, err := s.repo.Get(ctx, KeyCloseToTray)
+	if err != nil || valStr == "" {
+		return DefaultCloseToTray, nil
+	}
+	parsed, err := strconv.ParseBool(valStr)
+	if err != nil {
+		return DefaultCloseToTray, nil
+	}
+	return parsed, nil
+}
+
+// SetCloseToTray persists the close-to-tray preference.
+func (s *SettingsService) SetCloseToTray(ctx context.Context, enabled bool) error {
+	return s.repo.Set(ctx, KeyCloseToTray, strconv.FormatBool(enabled))
 }

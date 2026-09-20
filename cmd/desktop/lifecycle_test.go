@@ -9,30 +9,42 @@ func TestLifecyclePolicy_ShouldHideOnClose(t *testing.T) {
 	tests := []struct {
 		name           string
 		trayConfigured bool
+		closeToTray    bool
 		quitting       bool
 		expected       bool
 	}{
 		{
-			name:           "tray configured and not quitting -> hide",
+			name:           "tray configured, closeToTray true, and not quitting -> hide",
 			trayConfigured: true,
+			closeToTray:    true,
 			quitting:       false,
 			expected:       true,
 		},
 		{
-			name:           "tray not configured and not quitting -> allow close (safe fallback)",
-			trayConfigured: false,
+			name:           "tray configured, closeToTray false, and not quitting -> allow close",
+			trayConfigured: true,
+			closeToTray:    false,
 			quitting:       false,
 			expected:       false,
 		},
 		{
-			name:           "tray configured but quitting -> allow close",
+			name:           "tray not configured, closeToTray true, and not quitting -> allow close (safe fallback)",
+			trayConfigured: false,
+			closeToTray:    true,
+			quitting:       false,
+			expected:       false,
+		},
+		{
+			name:           "tray configured, closeToTray true, but quitting -> allow close",
 			trayConfigured: true,
+			closeToTray:    true,
 			quitting:       true,
 			expected:       false,
 		},
 		{
 			name:           "tray not configured and quitting -> allow close",
 			trayConfigured: false,
+			closeToTray:    true,
 			quitting:       true,
 			expected:       false,
 		},
@@ -42,6 +54,7 @@ func TestLifecyclePolicy_ShouldHideOnClose(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			l := NewDesktopLifecycle()
 			l.SetTrayConfigured(tc.trayConfigured)
+			l.SetCloseToTray(tc.closeToTray)
 			if tc.quitting {
 				l.quitting.Store(true)
 			}
@@ -50,6 +63,37 @@ func TestLifecyclePolicy_ShouldHideOnClose(t *testing.T) {
 				t.Errorf("ShouldHideOnClose() = %v, expected %v", actual, tc.expected)
 			}
 		})
+	}
+}
+
+func TestLifecycle_CloseToTray_LiveUpdate(t *testing.T) {
+	l := NewDesktopLifecycle()
+	l.SetTrayConfigured(true)
+
+	// 1. Defaults to true
+	if !l.CloseToTray() {
+		t.Fatalf("expected CloseToTray() to default to true")
+	}
+	if !l.ShouldHideOnClose() {
+		t.Fatalf("expected ShouldHideOnClose() to be true by default with tray configured")
+	}
+
+	// 2. Live update to false
+	l.SetCloseToTray(false)
+	if l.CloseToTray() {
+		t.Fatalf("expected CloseToTray() to be false after SetCloseToTray(false)")
+	}
+	if l.ShouldHideOnClose() {
+		t.Fatalf("expected ShouldHideOnClose() to be false when closeToTray is disabled")
+	}
+
+	// 3. Live update back to true
+	l.SetCloseToTray(true)
+	if !l.CloseToTray() {
+		t.Fatalf("expected CloseToTray() to be true after SetCloseToTray(true)")
+	}
+	if !l.ShouldHideOnClose() {
+		t.Fatalf("expected ShouldHideOnClose() to be true when closeToTray is re-enabled")
 	}
 }
 

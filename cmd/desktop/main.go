@@ -111,7 +111,8 @@ func main() {
 
 	// Diagnostic IPC command dispatcher for headless test triggers
 	for _, arg := range os.Args[1:] {
-		if arg == "--trigger-reload" || strings.HasPrefix(arg, "--emit-diagnostic-event=") || arg == "--trigger-quit" {
+		if arg == "--trigger-reload" || strings.HasPrefix(arg, "--emit-diagnostic-event=") || arg == "--trigger-quit" ||
+			strings.HasPrefix(arg, "--set-close-to-tray=") || strings.HasPrefix(arg, "--set-autostart=") {
 			dataRoot, err := ResolveDesktopDataRoot()
 			if err == nil {
 				cwd, _ := os.Getwd()
@@ -124,6 +125,14 @@ func main() {
 				_ = os.WriteFile(cmdFile, data, 0644)
 			}
 			return
+		}
+	}
+
+	var startBackground bool
+	for _, arg := range os.Args[1:] {
+		if arg == "--background" {
+			startBackground = true
+			break
 		}
 	}
 
@@ -149,7 +158,16 @@ func main() {
 				if secondLaunchHandler != nil {
 					secondLaunchHandler(data)
 				}
-				showMainWindow(mainWindow)
+				hasBg := false
+				for _, arg := range data.Args {
+					if arg == "--background" || strings.HasPrefix(arg, "--set-") || strings.HasPrefix(arg, "--trigger-") || strings.HasPrefix(arg, "--emit-") {
+						hasBg = true
+						break
+					}
+				}
+				if !hasBg {
+					showMainWindow(mainWindow)
+				}
 			},
 		},
 	})
@@ -180,6 +198,13 @@ func main() {
 	}
 	cancelStart()
 
+	// Load persisted close-to-tray preference into desktop lifecycle coordinator
+	if st := appInstance.Settings(); st != nil {
+		if ctt, err := st.GetCloseToTray(context.Background()); err == nil {
+			lifecycle.SetCloseToTray(ctt)
+		}
+	}
+
 	service := NewDesktopService(appInstance, dataRoot)
 	service.setLifecycle(lifecycle)
 	wailsApp.RegisterService(application.NewService(service))
@@ -198,6 +223,22 @@ func main() {
 			if strings.HasPrefix(arg, "--emit-diagnostic-event=") {
 				token := strings.TrimPrefix(arg, "--emit-diagnostic-event=")
 				service.EmitDiagnosticEvent(token)
+				return
+			}
+			if arg == "--set-close-to-tray=false" {
+				_, _ = service.SetCloseToTray(false)
+				return
+			}
+			if arg == "--set-close-to-tray=true" {
+				_, _ = service.SetCloseToTray(true)
+				return
+			}
+			if arg == "--set-autostart=true" {
+				_, _ = service.SetAutostart(true)
+				return
+			}
+			if arg == "--set-autostart=false" {
+				_, _ = service.SetAutostart(false)
 				return
 			}
 			if arg == "--test-dialog" {
@@ -235,6 +276,22 @@ func main() {
 							service.EmitDiagnosticEvent(token)
 							break
 						}
+						if arg == "--set-close-to-tray=false" {
+							_, _ = service.SetCloseToTray(false)
+							break
+						}
+						if arg == "--set-close-to-tray=true" {
+							_, _ = service.SetCloseToTray(true)
+							break
+						}
+						if arg == "--set-autostart=true" {
+							_, _ = service.SetAutostart(true)
+							break
+						}
+						if arg == "--set-autostart=false" {
+							_, _ = service.SetAutostart(false)
+							break
+						}
 					}
 				}
 			}
@@ -255,6 +312,7 @@ func main() {
 		Width:  1200,
 		Height: 800,
 		URL:    "/desktop.html",
+		Hidden: startBackground,
 	})
 
 	lifecycle.SetWailsContext(wailsApp, mainWindow, appInstance)
@@ -316,6 +374,10 @@ func main() {
 		log.Println("Desktop: System tray configured successfully.")
 	} else {
 		lifecycle.SetTrayConfigured(false)
+		if startBackground {
+			log.Println("Desktop: System tray configuration failed; showing main window as fallback.")
+			showMainWindow(mainWindow)
+		}
 		log.Println("Desktop: WARNING - System tray configuration failed, close-to-tray disabled.")
 	}
 

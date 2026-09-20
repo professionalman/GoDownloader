@@ -167,6 +167,19 @@ export interface SyncOperations {
   subscribeEvents(options: EventSubscribeOptions): EventSubscription;
 }
 
+/** User-configurable desktop lifecycle preferences */
+export interface DesktopPreferences {
+  closeToTray: boolean;
+  autostartEnabled: boolean;
+}
+
+/** Domain: Desktop OS and lifecycle preferences */
+export interface DesktopPreferencesOperations {
+  getPreferences(): Promise<DesktopPreferences>;
+  setCloseToTray(enabled: boolean): Promise<DesktopPreferences>;
+  setAutostart(enabled: boolean): Promise<DesktopPreferences>;
+}
+
 /** Complete transport-neutral client interface */
 export interface BackendClient {
   readonly jobs: JobsOperations;
@@ -176,4 +189,6 @@ export interface BackendClient {
   readonly tracker: TrackerOperations;
   readonly mediaAuth: MediaAuthOperations;
   readonly sync: SyncOperations;
+  readonly desktopPreferences?: DesktopPreferencesOperations;
 }
+

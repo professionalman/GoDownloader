@@ -19,6 +19,14 @@ export interface DataRootInfo {
 }
 
 /**
+ * DesktopPreferences represents user-configurable desktop lifecycle preferences.
+ */
+export interface DesktopPreferences {
+    "closeToTray": boolean;
+    "autostartEnabled": boolean;
+}
+
+/**
  * EventsReplayResult contains events replayed since a requested cursor.
  */
 export interface EventsReplayResult {
@@ -44,6 +52,8 @@ export interface SingleInstanceStatus {
     "stateSyncCursor": number;
     "trayShowCount": number;
     "trayQuitCount": number;
+    "closeToTray": boolean;
+    "autostartEnabled": boolean;
 }
 
 /**

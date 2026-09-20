@@ -29,6 +29,7 @@ import {
   type BackendClient,
   type EventSubscription,
   type EventSubscribeOptions,
+  type DesktopPreferences,
 } from './transport';
 
 export {
@@ -37,7 +38,7 @@ export {
   setBackendClient,
   resetBackendClient,
 };
-export type { BackendClient, EventSubscription, EventSubscribeOptions };
+export type { BackendClient, EventSubscription, EventSubscribeOptions, DesktopPreferences };
 
 // ----------------------------------------------------------------------------
 // Jobs Domain Facade
@@ -308,3 +309,23 @@ export async function getSyncSnapshot(): Promise<SyncSnapshot> {
 export function subscribeEvents(options: EventSubscribeOptions): EventSubscription {
   return getBackendClient().sync.subscribeEvents(options);
 }
+
+// ----------------------------------------------------------------------------
+// Desktop Preferences Domain Facade
+// ----------------------------------------------------------------------------
+
+export async function getDesktopPreferences(): Promise<DesktopPreferences | null> {
+  const ops = getBackendClient().desktopPreferences;
+  return ops ? ops.getPreferences() : null;
+}
+
+export async function setCloseToTray(enabled: boolean): Promise<DesktopPreferences | null> {
+  const ops = getBackendClient().desktopPreferences;
+  return ops ? ops.setCloseToTray(enabled) : null;
+}
+
+export async function setAutostart(enabled: boolean): Promise<DesktopPreferences | null> {
+  const ops = getBackendClient().desktopPreferences;
+  return ops ? ops.setAutostart(enabled) : null;
+}
+

@@ -154,3 +154,42 @@ func TestSettingsService_EnvironmentOverride(t *testing.T) {
 		t.Errorf("expected DefaultConflictPolicy override true")
 	}
 }
+
+func TestSettingsService_CloseToTray(t *testing.T) {
+	ctx := context.Background()
+	svc, db := setupTestSettings(t)
+	defer db.Close()
+
+	// 1. Missing value defaults to true
+	val, err := svc.GetCloseToTray(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !val {
+		t.Fatalf("expected close_to_tray to default to true, got false")
+	}
+
+	// 2. Set to false persists and returns false
+	if err := svc.SetCloseToTray(ctx, false); err != nil {
+		t.Fatalf("failed to set close_to_tray to false: %v", err)
+	}
+	val, err = svc.GetCloseToTray(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val {
+		t.Fatalf("expected close_to_tray to be false after persist, got true")
+	}
+
+	// 3. Set back to true persists and returns true
+	if err := svc.SetCloseToTray(ctx, true); err != nil {
+		t.Fatalf("failed to set close_to_tray to true: %v", err)
+	}
+	val, err = svc.GetCloseToTray(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !val {
+		t.Fatalf("expected close_to_tray to be true after persist, got false")
+	}
+}

@@ -16,7 +16,16 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { createCategory, deleteCategory, getCategories, updateCategory } from '../api';
+import {
+  createCategory,
+  deleteCategory,
+  getCategories,
+  updateCategory,
+  getDesktopPreferences,
+  setCloseToTray,
+  setAutostart,
+  type DesktopPreferences,
+} from '../api';
 import type { AppSettings, Category, FilenameConflictPolicy, UpdateSettingsPayload } from '../types';
 import { cx } from '../downloadUi';
 import { PowerSettingsPanel } from './PowerSettingsPanel';
@@ -77,6 +86,9 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences | null>(null);
+  const [desktopLoading, setDesktopLoading] = useState(false);
+  const [desktopError, setDesktopError] = useState('');
 
   useEffect(() => {
     if (!settings) return;
@@ -94,6 +106,44 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
   };
 
   useEffect(() => { void loadCategories(); }, []);
+
+  useEffect(() => {
+    const loadPrefs = async () => {
+      try {
+        const prefs = await getDesktopPreferences();
+        setDesktopPrefs(prefs);
+      } catch (err: unknown) {
+        setDesktopError(err instanceof Error ? err.message : 'Failed to load desktop preferences');
+      }
+    };
+    void loadPrefs();
+  }, []);
+
+  const handleToggleCloseToTray = async (checked: boolean) => {
+    try {
+      setDesktopLoading(true);
+      setDesktopError('');
+      const updated = await setCloseToTray(checked);
+      if (updated) setDesktopPrefs(updated);
+    } catch (err: unknown) {
+      setDesktopError(err instanceof Error ? err.message : 'Failed to update close to tray preference');
+    } finally {
+      setDesktopLoading(false);
+    }
+  };
+
+  const handleToggleAutostart = async (checked: boolean) => {
+    try {
+      setDesktopLoading(true);
+      setDesktopError('');
+      const updated = await setAutostart(checked);
+      if (updated) setDesktopPrefs(updated);
+    } catch (err: unknown) {
+      setDesktopError(err instanceof Error ? err.message : 'Failed to update Windows autostart setting');
+    } finally {
+      setDesktopLoading(false);
+    }
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -196,6 +246,55 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
                 <Field label="Maximum concurrent downloads" hint="Applies across all engines. Accepted range: 1–20.">
                   <input id="max-concurrent-input" aria-label="Max Concurrent Downloads" type="number" min={1} max={20} className={inputClass} value={maxConcurrent} onChange={(event) => setMaxConcurrent(Number(event.target.value) || 1)} disabled={saving} />
                 </Field>
+
+                {desktopPrefs != null && (
+                  <div className="space-y-4 pt-3 border-t border-border">
+                    <div>
+                      <h4 className="text-sm font-semibold tracking-tight">Desktop Integration</h4>
+                      <p className="mt-0.5 text-xs text-muted-foreground">Manage window close behavior and system startup.</p>
+                    </div>
+
+                    {desktopError && (
+                      <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 p-2.5 text-xs text-destructive">
+                        {desktopError}
+                      </div>
+                    )}
+
+                    <div className="space-y-3">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          id="close-to-tray-checkbox"
+                          aria-label="Close to tray"
+                          checked={desktopPrefs.closeToTray}
+                          disabled={desktopLoading || saving}
+                          onChange={(e) => void handleToggleCloseToTray(e.target.checked)}
+                          className="mt-0.5 size-4 rounded border-border text-primary focus:ring-primary disabled:opacity-50"
+                        />
+                        <div className="space-y-0.5">
+                          <span className="text-sm font-medium text-foreground">Close to tray</span>
+                          <p className="text-xs text-muted-foreground">Keep GoDownloader running in the system tray when the window is closed.</p>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          id="autostart-checkbox"
+                          aria-label="Start GoDownloader with Windows"
+                          checked={desktopPrefs.autostartEnabled}
+                          disabled={desktopLoading || saving}
+                          onChange={(e) => void handleToggleAutostart(e.target.checked)}
+                          className="mt-0.5 size-4 rounded border-border text-primary focus:ring-primary disabled:opacity-50"
+                        />
+                        <div className="space-y-0.5">
+                          <span className="text-sm font-medium text-foreground">Start GoDownloader with Windows</span>
+                          <p className="text-xs text-muted-foreground">Start GoDownloader in the background when you sign in to Windows.</p>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

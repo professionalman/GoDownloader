@@ -16,6 +16,7 @@ import (
 type DesktopLifecycle struct {
 	quitting       atomic.Bool
 	trayConfigured atomic.Bool
+	closeToTray    atomic.Bool
 	trayShowCount  atomic.Int32
 	trayQuitCount  atomic.Int32
 	mu             sync.Mutex
@@ -27,7 +28,9 @@ type DesktopLifecycle struct {
 
 // NewDesktopLifecycle creates a new lifecycle coordinator.
 func NewDesktopLifecycle() *DesktopLifecycle {
-	return &DesktopLifecycle{}
+	l := &DesktopLifecycle{}
+	l.closeToTray.Store(true)
+	return l
 }
 
 // SetWailsContext registers the application, main window, and backend runtime references.
@@ -79,13 +82,23 @@ func (l *DesktopLifecycle) TrayQuitCount() int {
 	return int(l.trayQuitCount.Load())
 }
 
+// SetCloseToTray configures whether closing the window hides it to tray instead of quitting.
+func (l *DesktopLifecycle) SetCloseToTray(enabled bool) {
+	l.closeToTray.Store(enabled)
+}
+
+// CloseToTray returns whether closing the window hides it to tray.
+func (l *DesktopLifecycle) CloseToTray() bool {
+	return l.closeToTray.Load()
+}
+
 // ShouldHideOnClose determines whether the window should hide to tray instead of closing.
 // Pure decision logic:
 // - If quitting: do not hide (allow real window close and process termination).
-// - If tray is configured and not quitting: hide (close-to-tray).
-// - If tray is not configured: do not hide (allow normal close to prevent unreachable headless process).
+// - If tray is configured and closeToTray is enabled: hide (close-to-tray).
+// - If tray is not configured or closeToTray is disabled: do not hide (allow normal close to prevent unreachable headless process).
 func (l *DesktopLifecycle) ShouldHideOnClose() bool {
-	return !l.quitting.Load() && l.trayConfigured.Load()
+	return !l.quitting.Load() && l.trayConfigured.Load() && l.closeToTray.Load()
 }
 
 // HandleWindowClosing handles the Wails WindowClosing event.

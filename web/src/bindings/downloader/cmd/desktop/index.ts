@@ -8,6 +8,7 @@ export {
 
 export type {
     DataRootInfo,
+    DesktopPreferences,
     EventsReplayResult,
     SingleInstanceStatus,
     TrackerRefreshSummary,

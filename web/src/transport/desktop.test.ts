@@ -68,6 +68,9 @@ vi.mock('../bindings/downloader/cmd/desktop/desktopservice', () => ({
   ReloadMainWindow: vi.fn().mockResolvedValue(undefined),
   EmitDiagnosticEvent: vi.fn().mockResolvedValue(undefined),
   GetDiagnosticEventDeliveryCount: vi.fn().mockResolvedValue(0),
+  GetDesktopPreferences: vi.fn(),
+  SetCloseToTray: vi.fn(),
+  SetAutostart: vi.fn(),
 }));
 
 describe('Desktop Transport Layer', () => {
@@ -491,5 +494,43 @@ describe('Desktop Transport Layer', () => {
       expect(onEvent).toHaveBeenCalledWith('diagnostic.ping', expect.anything(), undefined);
     });
   });
+
+  describe('desktopPreferences', () => {
+    it('calls GetDesktopPreferences and returns preferences', async () => {
+      const mockPrefs = { closeToTray: true, autostartEnabled: false };
+      vi.mocked(DesktopService.GetDesktopPreferences).mockResolvedValue(mockPrefs as any);
+
+      const res = await desktopBackendClient.desktopPreferences?.getPreferences();
+      expect(DesktopService.GetDesktopPreferences).toHaveBeenCalled();
+      expect(res).toEqual(mockPrefs);
+    });
+
+    it('calls SetCloseToTray with boolean and returns updated preferences', async () => {
+      const mockUpdated = { closeToTray: false, autostartEnabled: false };
+      vi.mocked(DesktopService.SetCloseToTray).mockResolvedValue(mockUpdated as any);
+
+      const res = await desktopBackendClient.desktopPreferences?.setCloseToTray(false);
+      expect(DesktopService.SetCloseToTray).toHaveBeenCalledWith(false);
+      expect(res).toEqual(mockUpdated);
+    });
+
+    it('calls SetAutostart with boolean and returns updated preferences', async () => {
+      const mockUpdated = { closeToTray: true, autostartEnabled: true };
+      vi.mocked(DesktopService.SetAutostart).mockResolvedValue(mockUpdated as any);
+
+      const res = await desktopBackendClient.desktopPreferences?.setAutostart(true);
+      expect(DesktopService.SetAutostart).toHaveBeenCalledWith(true);
+      expect(res).toEqual(mockUpdated);
+    });
+
+    it('wraps IPC errors from desktop preferences calls', async () => {
+      vi.mocked(DesktopService.SetAutostart).mockRejectedValue(new Error('[AUTOSTART_ENABLE_FAILED] permission denied'));
+
+      await expect(
+        desktopBackendClient.desktopPreferences?.setAutostart(true)
+      ).rejects.toThrow('permission denied');
+    });
+  });
 });
+
 

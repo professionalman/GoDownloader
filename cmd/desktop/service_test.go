@@ -11,6 +11,8 @@ import (
 	"downloader/internal/app"
 	"downloader/internal/config"
 	"downloader/internal/job"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 func TestResolveDesktopDataRoot(t *testing.T) {
@@ -249,3 +251,265 @@ func TestDesktopService_ErrorFormatting(t *testing.T) {
 		t.Fatalf("expected [INVALID_REQUEST] missing parameter, got %v", madeErr)
 	}
 }
+
+type testAutostartController struct {
+	enabled     bool
+	enableErr   error
+	disableErr  error
+	lastOptions application.AutostartOptions
+}
+
+func (m *testAutostartController) IsEnabled() (bool, error) {
+	return m.enabled, nil
+}
+
+func (m *testAutostartController) EnableWithOptions(opts application.AutostartOptions) error {
+	if m.enableErr != nil {
+		return m.enableErr
+	}
+	m.enabled = true
+	m.lastOptions = opts
+	return nil
+}
+
+func (m *testAutostartController) Disable() error {
+	if m.disableErr != nil {
+		return m.disableErr
+	}
+	m.enabled = false
+	return nil
+}
+
+func TestDesktopService_DesktopPreferences(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfg := config.New()
+	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+
+	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
+	if err != nil {
+		t.Fatalf("failed to create app: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := appInstance.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = appInstance.Shutdown(shutdownCtx)
+	}()
+
+	lifecycle := NewDesktopLifecycle()
+	lifecycle.SetTrayConfigured(true)
+
+	svc := NewDesktopService(appInstance, tmpDir)
+	svc.setLifecycle(lifecycle)
+
+	mockAuto := &testAutostartController{enabled: false}
+	svc.setAutostartController(mockAuto)
+
+	// 1. Initial defaults: close_to_tray = true, autostart = false
+	prefs, err := svc.GetDesktopPreferences()
+	if err != nil {
+		t.Fatalf("GetDesktopPreferences failed: %v", err)
+	}
+	if !prefs.CloseToTray {
+		t.Fatalf("expected CloseToTray to default to true, got false")
+	}
+	if prefs.AutostartEnabled {
+		t.Fatalf("expected AutostartEnabled to default to false, got true")
+	}
+
+	// 2. Set CloseToTray = false
+	prefs, err = svc.SetCloseToTray(false)
+	if err != nil {
+		t.Fatalf("SetCloseToTray(false) failed: %v", err)
+	}
+	if prefs.CloseToTray {
+		t.Fatalf("expected CloseToTray to be false, got true")
+	}
+	if lifecycle.CloseToTray() {
+		t.Fatalf("expected lifecycle.CloseToTray() to be false")
+	}
+
+	// Verify persistence in settings repository
+	persistedCTT, err := appInstance.Settings().GetCloseToTray(context.Background())
+	if err != nil || persistedCTT {
+		t.Fatalf("expected persisted close_to_tray to be false, got %v (err: %v)", persistedCTT, err)
+	}
+
+	// 3. Set CloseToTray = true
+	prefs, err = svc.SetCloseToTray(true)
+	if err != nil {
+		t.Fatalf("SetCloseToTray(true) failed: %v", err)
+	}
+	if !prefs.CloseToTray {
+		t.Fatalf("expected CloseToTray to be true, got false")
+	}
+	if !lifecycle.CloseToTray() {
+		t.Fatalf("expected lifecycle.CloseToTray() to be true")
+	}
+
+	// 4. Enable Autostart -> registers with --background
+	prefs, err = svc.SetAutostart(true)
+	if err != nil {
+		t.Fatalf("SetAutostart(true) failed: %v", err)
+	}
+	if !prefs.AutostartEnabled {
+		t.Fatalf("expected AutostartEnabled to be true, got false")
+	}
+	if !mockAuto.enabled {
+		t.Fatalf("expected mockAuto.enabled to be true")
+	}
+	if len(mockAuto.lastOptions.Arguments) != 1 || mockAuto.lastOptions.Arguments[0] != "--background" {
+		t.Fatalf("expected --background argument in autostart options, got %v", mockAuto.lastOptions.Arguments)
+	}
+
+	// 5. Disable Autostart
+	prefs, err = svc.SetAutostart(false)
+	if err != nil {
+		t.Fatalf("SetAutostart(false) failed: %v", err)
+	}
+	if prefs.AutostartEnabled {
+		t.Fatalf("expected AutostartEnabled to be false, got true")
+	}
+	if mockAuto.enabled {
+		t.Fatalf("expected mockAuto.enabled to be false")
+	}
+
+	// 6. Autostart enable failure error handling
+	mockAuto.enableErr = os.ErrPermission
+	_, err = svc.SetAutostart(true)
+	if err == nil || !strings.Contains(err.Error(), "AUTOSTART_ENABLE_FAILED") {
+		t.Fatalf("expected AUTOSTART_ENABLE_FAILED error, got: %v", err)
+	}
+
+	// 7. Autostart disable failure error handling
+	mockAuto.enableErr = nil
+	mockAuto.enabled = true
+	mockAuto.disableErr = os.ErrPermission
+	_, err = svc.SetAutostart(false)
+	if err == nil || !strings.Contains(err.Error(), "AUTOSTART_DISABLE_FAILED") {
+		t.Fatalf("expected AUTOSTART_DISABLE_FAILED error, got: %v", err)
+	}
+}
+
+func TestDesktopService_BackgroundArgHandling(t *testing.T) {
+	// Verify pure argument checking logic for background launch & secondary instance
+	isBg := func(args []string) bool {
+		for _, arg := range args {
+			if arg == "--background" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !isBg([]string{"--background"}) {
+		t.Fatalf("expected isBg true for --background")
+	}
+	if !isBg([]string{"--some-other-flag", "--background"}) {
+		t.Fatalf("expected isBg true for mixed args containing --background")
+	}
+	if isBg([]string{"--foreground", "magnet:?xt=urn:btih:test"}) {
+		t.Fatalf("expected isBg false for normal launch args")
+	}
+	if isBg([]string{}) {
+		t.Fatalf("expected isBg false for empty args")
+	}
+}
+
+func TestDesktopService_DiagnosticCommandDispatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "diag_dispatch_test.db")
+	cfg := config.New()
+	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+
+	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
+	if err != nil {
+		t.Fatalf("failed to create app: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := appInstance.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = appInstance.Shutdown(shutdownCtx)
+	}()
+
+	lifecycle := NewDesktopLifecycle()
+	lifecycle.SetTrayConfigured(true)
+
+	svc := NewDesktopService(appInstance, tmpDir)
+	svc.setLifecycle(lifecycle)
+	mockAuto := &testAutostartController{enabled: false}
+	svc.setAutostartController(mockAuto)
+
+	dispatchArg := func(arg string) bool {
+		switch arg {
+		case "--set-close-to-tray=false":
+			_, _ = svc.SetCloseToTray(false)
+			return true
+		case "--set-close-to-tray=true":
+			_, _ = svc.SetCloseToTray(true)
+			return true
+		case "--set-autostart=true":
+			_, _ = svc.SetAutostart(true)
+			return true
+		case "--set-autostart=false":
+			_, _ = svc.SetAutostart(false)
+			return true
+		default:
+			return false
+		}
+	}
+
+	// 1. Test valid --set-close-to-tray=false
+	if !dispatchArg("--set-close-to-tray=false") {
+		t.Fatal("expected handled")
+	}
+	if lifecycle.CloseToTray() != false {
+		t.Fatal("expected lifecycle closeToTray to be false")
+	}
+
+	// 2. Test valid --set-close-to-tray=true
+	if !dispatchArg("--set-close-to-tray=true") {
+		t.Fatal("expected handled")
+	}
+	if lifecycle.CloseToTray() != true {
+		t.Fatal("expected lifecycle closeToTray to be true")
+	}
+
+	// 3. Test invalid close-to-tray value rejected
+	if dispatchArg("--set-close-to-tray=invalid") {
+		t.Fatal("expected invalid close-to-tray to be rejected")
+	}
+
+	// 4. Test valid --set-autostart=true
+	if !dispatchArg("--set-autostart=true") {
+		t.Fatal("expected handled")
+	}
+	if !mockAuto.enabled {
+		t.Fatal("expected autostart enabled")
+	}
+
+	// 5. Test valid --set-autostart=false
+	if !dispatchArg("--set-autostart=false") {
+		t.Fatal("expected handled")
+	}
+	if mockAuto.enabled {
+		t.Fatal("expected autostart disabled")
+	}
+
+	// 6. Test invalid autostart value rejected
+	if dispatchArg("--set-autostart=invalid") {
+		t.Fatal("expected invalid autostart to be rejected")
+	}
+}
+

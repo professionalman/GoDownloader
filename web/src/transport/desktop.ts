@@ -35,6 +35,8 @@ import {
   type TrackerOperations,
   type MediaAuthOperations,
   type SyncOperations,
+  type DesktopPreferences,
+  type DesktopPreferencesOperations,
 } from './types';
 
 /** Error translation converting Go [ERROR_CODE] error prefixes into typed ApiResponseError */
@@ -511,7 +513,24 @@ class DesktopSyncOperations implements SyncOperations {
   }
 }
 
-/** DesktopBackendClient coordinates all 7 domains via native Wails v3 IPC and Events */
+class DesktopPreferencesOperationsImpl implements DesktopPreferencesOperations {
+  async getPreferences(): Promise<DesktopPreferences> {
+    const res = await DesktopService.GetDesktopPreferences().catch(wrapIpcError);
+    return res as unknown as DesktopPreferences;
+  }
+
+  async setCloseToTray(enabled: boolean): Promise<DesktopPreferences> {
+    const res = await DesktopService.SetCloseToTray(enabled).catch(wrapIpcError);
+    return res as unknown as DesktopPreferences;
+  }
+
+  async setAutostart(enabled: boolean): Promise<DesktopPreferences> {
+    const res = await DesktopService.SetAutostart(enabled).catch(wrapIpcError);
+    return res as unknown as DesktopPreferences;
+  }
+}
+
+/** DesktopBackendClient coordinates all domains via native Wails v3 IPC and Events */
 export class DesktopBackendClient implements BackendClient {
   readonly jobs: JobsOperations = new DesktopJobsOperations();
   readonly queue: QueueOperations = new DesktopQueueOperations();
@@ -520,7 +539,9 @@ export class DesktopBackendClient implements BackendClient {
   readonly tracker: TrackerOperations = new DesktopTrackerOperations();
   readonly mediaAuth: MediaAuthOperations = new DesktopMediaAuthOperations();
   readonly sync: SyncOperations = new DesktopSyncOperations();
+  readonly desktopPreferences: DesktopPreferencesOperations = new DesktopPreferencesOperationsImpl();
 }
 
 /** Singleton instance of the desktop backend client */
 export const desktopBackendClient = new DesktopBackendClient();
+

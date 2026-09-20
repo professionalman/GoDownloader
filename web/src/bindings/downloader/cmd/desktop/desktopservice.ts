@@ -99,6 +99,15 @@ export function GetDataRootInfo(): $CancellablePromise<$models.DataRootInfo | nu
 }
 
 /**
+ * GetDesktopPreferences returns the current desktop lifecycle preferences.
+ * close_to_tray is read from the settings repository (defaulting to true).
+ * autostartEnabled is queried directly from the Windows Registry via Wails AutostartManager.
+ */
+export function GetDesktopPreferences(): $CancellablePromise<$models.DesktopPreferences | null> {
+    return $Call.ByID(2253236565);
+}
+
+/**
  * GetDiagnosticEventDeliveryCount returns the delivery count for the last emitted diagnostic event.
  */
 export function GetDiagnosticEventDeliveryCount(): $CancellablePromise<number> {
@@ -212,6 +221,23 @@ export function RetryJob(id: string): $CancellablePromise<job$0.Job | null> {
 
 export function SelectFormat(id: string, formatID: string, subtitleOptionsJSON: string): $CancellablePromise<job$0.Job | null> {
     return $Call.ByID(3691919834, id, formatID, subtitleOptionsJSON);
+}
+
+/**
+ * SetAutostart enables or disables Windows login startup via Wails AutostartManager.
+ * When enabled, it registers GoDownloader with the --background argument.
+ * Operational truth is queried directly from Windows to ensure no divergent state.
+ */
+export function SetAutostart(enabled: boolean): $CancellablePromise<$models.DesktopPreferences | null> {
+    return $Call.ByID(3109129572, enabled);
+}
+
+/**
+ * SetCloseToTray persists the close_to_tray preference to the settings database
+ * and immediately applies it to the active DesktopLifecycle coordinator.
+ */
+export function SetCloseToTray(enabled: boolean): $CancellablePromise<$models.DesktopPreferences | null> {
+    return $Call.ByID(2540122416, enabled);
 }
 
 export function SetJobPriority(id: string, priority: string): $CancellablePromise<job$0.Job | null> {

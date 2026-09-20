@@ -26,6 +26,19 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
+// autostartController abstracts login startup management for testability and runtime isolation.
+type autostartController interface {
+	IsEnabled() (bool, error)
+	EnableWithOptions(opts application.AutostartOptions) error
+	Disable() error
+}
+
+// DesktopPreferences represents user-configurable desktop lifecycle preferences.
+type DesktopPreferences struct {
+	CloseToTray      bool `json:"closeToTray"`
+	AutostartEnabled bool `json:"autostartEnabled"`
+}
+
 // SingleInstanceStatus holds status information about the primary instance and secondary launches.
 type SingleInstanceStatus struct {
 	PrimaryPID         int      `json:"primaryPid"`
@@ -41,6 +54,8 @@ type SingleInstanceStatus struct {
 	StateSyncCursor    int64    `json:"stateSyncCursor"`
 	TrayShowCount      int      `json:"trayShowCount"`
 	TrayQuitCount      int      `json:"trayQuitCount"`
+	CloseToTray        bool     `json:"closeToTray"`
+	AutostartEnabled   bool     `json:"autostartEnabled"`
 }
 
 // EventsReplayResult contains events replayed since a requested cursor.
@@ -68,6 +83,7 @@ type DesktopService struct {
 	wailsApp           *application.App
 	mainWindow         *application.WebviewWindow
 	lifecycle          *DesktopLifecycle
+	autostart          autostartController
 	instanceID         string
 	dataRoot           string
 	coreInitCount      int
@@ -100,6 +116,16 @@ func (s *DesktopService) persistStatus() {
 	if s.dataRoot == "" {
 		return
 	}
+	closeToTray := true
+	if s.lifecycle != nil {
+		closeToTray = s.lifecycle.CloseToTray()
+	}
+	autostart := false
+	if s.autostart != nil {
+		if enabled, err := s.autostart.IsEnabled(); err == nil {
+			autostart = enabled
+		}
+	}
 	status := SingleInstanceStatus{
 		PrimaryPID:         os.Getpid(),
 		BackendInstanceID:  s.instanceID,
@@ -114,6 +140,8 @@ func (s *DesktopService) persistStatus() {
 		StateSyncCursor:    s.stateSyncCursor,
 		TrayShowCount:      s.trayShowCount,
 		TrayQuitCount:      s.trayQuitCount,
+		CloseToTray:        closeToTray,
+		AutostartEnabled:   autostart,
 	}
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err == nil {
@@ -126,6 +154,15 @@ func (s *DesktopService) setWailsContext(wailsApp *application.App, win *applica
 	defer s.mu.Unlock()
 	s.wailsApp = wailsApp
 	s.mainWindow = win
+	if wailsApp != nil && wailsApp.Autostart != nil {
+		s.autostart = wailsApp.Autostart
+	}
+}
+
+func (s *DesktopService) setAutostartController(ac autostartController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.autostart = ac
 }
 
 func (s *DesktopService) setLifecycle(l *DesktopLifecycle) {
@@ -620,6 +657,94 @@ func (s *DesktopService) UpdateSettings(settingsJSON string) (*settings.AppSetti
 	}
 
 	return st, nil
+}
+
+// =========================================================================
+// DESKTOP PREFERENCES & AUTOSTART
+// =========================================================================
+
+// GetDesktopPreferences returns the current desktop lifecycle preferences.
+// close_to_tray is read from the settings repository (defaulting to true).
+// autostartEnabled is queried directly from the Windows Registry via Wails AutostartManager.
+func (s *DesktopService) GetDesktopPreferences() (*DesktopPreferences, error) {
+	s.mu.Lock()
+	l := s.lifecycle
+	ac := s.autostart
+	appInst := s.app
+	s.mu.Unlock()
+
+	closeToTray := true
+	if l != nil {
+		closeToTray = l.CloseToTray()
+	} else if appInst != nil && appInst.Settings() != nil {
+		if val, err := appInst.Settings().GetCloseToTray(context.Background()); err == nil {
+			closeToTray = val
+		}
+	}
+
+	autostart := false
+	if ac != nil {
+		if enabled, err := ac.IsEnabled(); err == nil {
+			autostart = enabled
+		}
+	}
+
+	return &DesktopPreferences{
+		CloseToTray:      closeToTray,
+		AutostartEnabled: autostart,
+	}, nil
+}
+
+// SetCloseToTray persists the close_to_tray preference to the settings database
+// and immediately applies it to the active DesktopLifecycle coordinator.
+func (s *DesktopService) SetCloseToTray(enabled bool) (*DesktopPreferences, error) {
+	s.mu.Lock()
+	appInst := s.app
+	l := s.lifecycle
+	s.mu.Unlock()
+
+	if appInst == nil || appInst.Settings() == nil {
+		return nil, makeIPCError(job.ErrInvalidRequest, "settings service unavailable")
+	}
+
+	if err := appInst.Settings().SetCloseToTray(context.Background(), enabled); err != nil {
+		return nil, toIPCError(err)
+	}
+
+	if l != nil {
+		l.SetCloseToTray(enabled)
+	}
+
+	s.persistStatus()
+	return s.GetDesktopPreferences()
+}
+
+// SetAutostart enables or disables Windows login startup via Wails AutostartManager.
+// When enabled, it registers GoDownloader with the --background argument.
+// Operational truth is queried directly from Windows to ensure no divergent state.
+func (s *DesktopService) SetAutostart(enabled bool) (*DesktopPreferences, error) {
+	s.mu.Lock()
+	ac := s.autostart
+	s.mu.Unlock()
+
+	if ac == nil {
+		return nil, makeIPCError(job.ErrInvalidRequest, "autostart controller unavailable")
+	}
+
+	if enabled {
+		if err := ac.EnableWithOptions(application.AutostartOptions{
+			Arguments: []string{"--background"},
+		}); err != nil {
+			return nil, makeIPCError("AUTOSTART_ENABLE_FAILED", fmt.Sprintf("failed to enable autostart: %v", err))
+		}
+	} else {
+		if err := ac.Disable(); err != nil {
+			return nil, makeIPCError("AUTOSTART_DISABLE_FAILED", fmt.Sprintf("failed to disable autostart: %v", err))
+		}
+	}
+
+	s.persistStatus()
+	return s.GetDesktopPreferences()
 }
 
 // =========================================================================
