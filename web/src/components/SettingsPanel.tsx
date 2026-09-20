@@ -95,6 +95,16 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
 
   useEffect(() => { void loadCategories(); }, []);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, saving]);
+
   const saveCoreSettings = async () => {
     if (maxConcurrent < 1 || maxConcurrent > 20) throw new Error('Max concurrent downloads must be between 1 and 20');
     if (minFreeSpaceGiB < 0) throw new Error('Minimum free space must be non-negative');

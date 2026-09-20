@@ -31,6 +31,13 @@ describe('MediaAuthPanel Component', () => {
     expect(screen.getByRole('button', { name: /Media Auth/i })).toBeInTheDocument();
   });
 
+  it('closes SettingsPanel on Escape key press', () => {
+    const handleClose = vi.fn();
+    render(<SettingsPanel settings={null} onSave={vi.fn()} onClose={handleClose} />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(handleClose).toHaveBeenCalledTimes(1);
+  });
+
   // 2. Media Authentication defaults to None
   it('defaults to None mode with clean initial state', async () => {
     render(<MediaAuthPanel />);

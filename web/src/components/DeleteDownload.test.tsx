@@ -376,4 +376,19 @@ describe('Delete Download Feature', () => {
       expect(screen.queryByText('ArchLinux ISO')).not.toBeInTheDocument();
     });
   });
+
+  // 15. Escape key dismisses DeleteConfirmDialog
+  it('15. Escape key dismisses DeleteConfirmDialog', async () => {
+    const handleClose = vi.fn();
+    render(
+      <DeleteConfirmDialog
+        job={baseJob}
+        onConfirm={vi.fn()}
+        onClose={handleClose}
+      />
+    );
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(handleClose).toHaveBeenCalledTimes(1);
+  });
 });

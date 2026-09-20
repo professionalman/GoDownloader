@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LoaderCircle, Trash2, X } from 'lucide-react';
 import type { Job } from '../types';
 
@@ -16,6 +16,16 @@ export function DeleteConfirmDialog({
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isDeleting) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, isDeleting]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
