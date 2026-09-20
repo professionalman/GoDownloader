@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.9.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.9.0",
+			"CompanyName": "GoDownloader",
+			"FileDescription": "GoDownloader Windows Desktop Technical Preview",
+			"LegalCopyright": "© 2026 GoDownloader",
+			"ProductName": "GoDownloader",
+			"Comments": "Windows Desktop Technical Preview"
+		}
+	}
+}
