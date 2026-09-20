@@ -11,11 +11,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"downloader/build"
 	"downloader/internal/app"
 	"downloader/internal/config"
 	"downloader/web"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
+	"github.com/wailsapp/wails/v3/pkg/icons"
 )
 
 var globalCoreInitCount int64
@@ -126,6 +129,7 @@ func main() {
 
 	var secondLaunchHandler func(data application.SecondInstanceData)
 	var mainWindow *application.WebviewWindow
+	lifecycle := NewDesktopLifecycle()
 
 	// =========================================================================
 	// SINGLE-INSTANCE ESTABLISHMENT BEFORE CORE RUNTIME
@@ -145,11 +149,7 @@ func main() {
 				if secondLaunchHandler != nil {
 					secondLaunchHandler(data)
 				}
-				if mainWindow != nil {
-					mainWindow.Show()
-					mainWindow.Restore()
-					mainWindow.Focus()
-				}
+				showMainWindow(mainWindow)
 			},
 		},
 	})
@@ -181,13 +181,14 @@ func main() {
 	cancelStart()
 
 	service := NewDesktopService(appInstance, dataRoot)
+	service.setLifecycle(lifecycle)
 	wailsApp.RegisterService(application.NewService(service))
 
 	secondLaunchHandler = func(data application.SecondInstanceData) {
 		service.recordSecondLaunch(data.Args, data.WorkingDir)
 		for _, arg := range data.Args {
 			if arg == "--trigger-quit" {
-				service.Quit()
+				lifecycle.RequestQuit()
 				return
 			}
 			if arg == "--trigger-reload" {
@@ -222,7 +223,7 @@ func main() {
 					service.recordSecondLaunch(payload.Args, payload.Cwd)
 					for _, arg := range payload.Args {
 						if arg == "--trigger-quit" {
-							service.Quit()
+							lifecycle.RequestQuit()
 							break
 						}
 						if arg == "--trigger-reload" {
@@ -256,7 +257,67 @@ func main() {
 		URL:    "/desktop.html",
 	})
 
+	lifecycle.SetWailsContext(wailsApp, mainWindow, appInstance)
 	service.setWailsContext(wailsApp, mainWindow)
+
+	// Intercept window close to keep background backend running (Close-to-tray)
+	mainWindow.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		lifecycle.HandleWindowClosing(e, mainWindow)
+	})
+
+	// Initialize system tray
+	var tray *application.SystemTray
+	if wailsApp.SystemTray != nil {
+		tray = wailsApp.SystemTray.New()
+	}
+	if tray != nil {
+		tray.SetLabel("GoDownloader")
+		tray.SetTooltip("GoDownloader")
+
+		var iconBytes []byte
+		if len(build.WindowsIcon) > 0 {
+			iconBytes = build.WindowsIcon
+		} else if len(build.AppIcon) > 0 {
+			iconBytes = build.AppIcon
+		} else if len(icons.SystrayLight) > 0 {
+			iconBytes = icons.SystrayLight
+		}
+		if len(iconBytes) > 0 {
+			tray.SetIcon(iconBytes)
+		}
+
+		trayMenu := wailsApp.NewMenu()
+		trayMenu.Add("Show GoDownloader").OnClick(func(ctx *application.Context) {
+			lifecycle.RecordTrayShow()
+			if service != nil {
+				service.recordTrayShow()
+			}
+			showMainWindow(mainWindow)
+		})
+		trayMenu.AddSeparator()
+		trayMenu.Add("Quit GoDownloader").OnClick(func(ctx *application.Context) {
+			lifecycle.RecordTrayQuit()
+			if service != nil {
+				service.recordTrayQuit()
+			}
+			lifecycle.RequestQuit()
+		})
+		tray.SetMenu(trayMenu)
+
+		tray.OnClick(func() {
+			lifecycle.RecordTrayShow()
+			if service != nil {
+				service.recordTrayShow()
+			}
+			showMainWindow(mainWindow)
+		})
+
+		lifecycle.SetTrayConfigured(true)
+		log.Println("Desktop: System tray configured successfully.")
+	} else {
+		lifecycle.SetTrayConfigured(false)
+		log.Println("Desktop: WARNING - System tray configuration failed, close-to-tray disabled.")
+	}
 
 	runErr := wailsApp.Run()
 

@@ -42,6 +42,8 @@ export interface SingleInstanceStatus {
     "lastEventToken": string;
     "stateSyncCompleted": boolean;
     "stateSyncCursor": number;
+    "trayShowCount": number;
+    "trayQuitCount": number;
 }
 
 /**

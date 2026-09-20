@@ -39,6 +39,8 @@ type SingleInstanceStatus struct {
 	LastEventToken     string   `json:"lastEventToken"`
 	StateSyncCompleted bool     `json:"stateSyncCompleted"`
 	StateSyncCursor    int64    `json:"stateSyncCursor"`
+	TrayShowCount      int      `json:"trayShowCount"`
+	TrayQuitCount      int      `json:"trayQuitCount"`
 }
 
 // EventsReplayResult contains events replayed since a requested cursor.
@@ -65,6 +67,7 @@ type DesktopService struct {
 	app                *app.App
 	wailsApp           *application.App
 	mainWindow         *application.WebviewWindow
+	lifecycle          *DesktopLifecycle
 	instanceID         string
 	dataRoot           string
 	coreInitCount      int
@@ -76,6 +79,8 @@ type DesktopService struct {
 	lastEventToken     string
 	stateSyncCompleted bool
 	stateSyncCursor    int64
+	trayShowCount      int
+	trayQuitCount      int
 }
 
 // NewDesktopService constructs a DesktopService wrapping the primary App instance.
@@ -107,6 +112,8 @@ func (s *DesktopService) persistStatus() {
 		LastEventToken:     s.lastEventToken,
 		StateSyncCompleted: s.stateSyncCompleted,
 		StateSyncCursor:    s.stateSyncCursor,
+		TrayShowCount:      s.trayShowCount,
+		TrayQuitCount:      s.trayQuitCount,
 	}
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err == nil {
@@ -119,6 +126,26 @@ func (s *DesktopService) setWailsContext(wailsApp *application.App, win *applica
 	defer s.mu.Unlock()
 	s.wailsApp = wailsApp
 	s.mainWindow = win
+}
+
+func (s *DesktopService) setLifecycle(l *DesktopLifecycle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lifecycle = l
+}
+
+func (s *DesktopService) recordTrayShow() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trayShowCount++
+	s.persistStatus()
+}
+
+func (s *DesktopService) recordTrayQuit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trayQuitCount++
+	s.persistStatus()
 }
 
 func (s *DesktopService) recordSecondLaunch(args []string, cwd string) {
@@ -961,6 +988,13 @@ func (s *DesktopService) ShowNativeDialog(title, message string) {
 }
 
 func (s *DesktopService) Quit() {
+	s.mu.Lock()
+	l := s.lifecycle
+	s.mu.Unlock()
+	if l != nil {
+		l.RequestQuit()
+		return
+	}
 	log.Println("Desktop: Orderly quit initiated.")
 	if s.app != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
