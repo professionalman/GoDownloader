@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  getSyncSnapshot,
+  createJob,
+  deleteJob,
+} from './api';
+import {
   setCsrfToken,
   getCsrfToken,
   initSession,
   authFetch,
-  getSyncSnapshot,
   connectSSE,
-  createJob,
-  deleteJob,
-} from './api';
+} from './transport/http';
 
 describe('Frontend Security Boundary (FND-3A)', () => {
   beforeEach(() => {

@@ -34,9 +34,13 @@ vi.mock('../api', async () => {
       items: [],
     }),
     getSettings: vi.fn().mockResolvedValue(null),
-    connectSSE: vi.fn((callback: (eventType: string, job: Job) => void) => {
-      appHarness.sseCallback = callback;
-      return sse.source;
+    subscribeEvents: vi.fn((options: import('../transport/types').EventSubscribeOptions) => {
+      appHarness.sseCallback = (eventType: string, job: Job) => options.onEvent(eventType, job);
+      if (options.onConnected) sse.listeners.set('open', options.onConnected);
+      if (options.onError) sse.listeners.set('error', options.onError);
+      return {
+        close: sse.source.close,
+      };
     }),
   };
 });
@@ -136,7 +140,7 @@ describe('AppShell', () => {
     expect(screen.getByLabelText('GoDownloader Reconnecting')).toBeInTheDocument();
   });
 
-  it('updates connection status from the existing EventSource lifecycle and closes it', () => {
+  it('updates connection status from the event lifecycle and closes it', () => {
     const { unmount } = render(<App />);
     expect(screen.getByLabelText('GoDownloader Connecting')).toBeInTheDocument();
 
@@ -146,8 +150,7 @@ describe('AppShell', () => {
     act(() => sse.listeners.get('error')?.());
     expect(screen.getByLabelText('GoDownloader Reconnecting')).toBeInTheDocument();
 
-    expect(sse.source.addEventListener).toHaveBeenCalledWith('open', expect.any(Function));
-    expect(sse.source.addEventListener).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(api.subscribeEvents).toHaveBeenCalled();
     unmount();
     expect(sse.source.close).toHaveBeenCalledOnce();
   });

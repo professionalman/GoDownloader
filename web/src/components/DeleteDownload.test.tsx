@@ -15,9 +15,7 @@ vi.mock('../api', async (importOriginal) => {
     getSettings: vi.fn(),
     getCategories: vi.fn().mockResolvedValue([]),
     deleteJob: vi.fn(),
-    connectSSE: vi.fn(() => ({
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
+    subscribeEvents: vi.fn(() => ({
       close: vi.fn(),
     })),
     createJob: vi.fn(),

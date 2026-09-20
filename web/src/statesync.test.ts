@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { connectSSE } from './api';
+import { connectSSE } from './transport/http';
 import { reconcileJobsFromSnapshot, upsertJob } from './jobState';
 import type { Job, SyncSnapshot } from './types';
 

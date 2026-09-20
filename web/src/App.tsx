@@ -42,8 +42,8 @@ import {
   selectFormat,
   uploadTorrent,
   setJobPriority,
-  connectSSE,
-  initSession,
+  subscribeEvents,
+  type EventSubscription,
 } from './api';
 import './App.css';
 
@@ -70,7 +70,7 @@ function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const lastAppliedCursorRef = useRef<number>(0);
   const rehydrationGenRef = useRef<number>(0);
-  const activeEsRef = useRef<EventSource | null>(null);
+  const activeSubRef = useRef<EventSubscription | null>(null);
   const [streamTrigger, setStreamTrigger] = useState<number>(0);
 
   const fetchQueue = useCallback(async () => {
@@ -96,8 +96,7 @@ function App() {
     let cancelled = false;
     setInitialLoading(true);
 
-    initSession()
-      .then(() => getSyncSnapshot())
+    getSyncSnapshot()
       .then((snapshot) => {
         if (!cancelled) {
           lastAppliedCursorRef.current = snapshot.cursor;
@@ -152,13 +151,13 @@ function App() {
     const gen = ++rehydrationGenRef.current;
     setConnectionState('reconnecting');
 
-    if (activeEsRef.current) {
+    if (activeSubRef.current) {
       try {
-        activeEsRef.current.close();
+        activeSubRef.current.close();
       } catch {
         // ignore
       }
-      activeEsRef.current = null;
+      activeSubRef.current = null;
     }
 
     try {
@@ -178,32 +177,27 @@ function App() {
     }
   }, []);
 
-  // Connect SSE for live progress and bounded replay
+  // Connect live event stream for progress and bounded replay
   useEffect(() => {
-    const es = connectSSE(
-      handleEvent,
-      handleSyncRequired,
-      () => lastAppliedCursorRef.current
-    );
-    activeEsRef.current = es;
-
     const handleOpen = () => setConnectionState('connected');
     const handleError = () => {
       setConnectionState('reconnecting');
-      if (activeEsRef.current === es) {
-        handleSyncRequired();
-      }
+      handleSyncRequired();
     };
 
-    es.addEventListener('open', handleOpen);
-    es.addEventListener('error', handleError);
+    const sub = subscribeEvents({
+      onEvent: handleEvent,
+      onSyncRequired: handleSyncRequired,
+      getCursor: () => lastAppliedCursorRef.current,
+      onConnected: handleOpen,
+      onError: handleError,
+    });
+    activeSubRef.current = sub;
 
     return () => {
-      es.removeEventListener('open', handleOpen);
-      es.removeEventListener('error', handleError);
-      if (activeEsRef.current === es) {
-        es.close();
-        activeEsRef.current = null;
+      if (activeSubRef.current === sub) {
+        sub.close();
+        activeSubRef.current = null;
       }
     };
   }, [streamTrigger, handleEvent, handleSyncRequired]);
