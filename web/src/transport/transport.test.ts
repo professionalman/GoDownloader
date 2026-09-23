@@ -20,6 +20,7 @@ import {
   getJobs,
   createJob,
   getSyncSnapshot,
+  getRecoverySummary,
   subscribeEvents,
 } from '../api';
 import { mountApp } from '../bootstrap';
@@ -87,6 +88,13 @@ class FakeBackendClient implements BackendClient {
     addTorrentTrackers: vi.fn(),
     updateSeedingPolicy: vi.fn(),
     openFolder: vi.fn(),
+    getRecoverySummary: vi.fn(async () => ({
+      reconciledFinalizations: 0,
+      reattachedTransfers: 0,
+      restartedMetadataAcquisitions: 0,
+      interruptedMediaJobs: 0,
+      issues: [],
+    })),
   } as unknown as JobsOperations;
 
   readonly queue: QueueOperations = {
@@ -530,5 +538,50 @@ describe('Framework-Neutral Frontend Transport Contracts (DSK-2)', () => {
   it('O. Default HTTP web-mode selection: default client is HttpBackendClient', () => {
     resetBackendClient();
     expect(getBackendClient()).toBe(httpBackendClient);
+  });
+
+  // P. HttpJobsOperations.getRecoverySummary calls GET /api/v1/jobs/recovery-summary
+  it('P. HttpJobsOperations.getRecoverySummary calls GET /api/v1/jobs/recovery-summary', async () => {
+    const mockSummary = {
+      reconciledFinalizations: 1,
+      reattachedTransfers: 0,
+      restartedMetadataAcquisitions: 0,
+      interruptedMediaJobs: 0,
+      issues: [],
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify(mockSummary), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const client = new HttpBackendClient();
+    const res = await client.jobs.getRecoverySummary();
+    expect(res.reconciledFinalizations).toBe(1);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/v1/jobs/recovery-summary',
+      expect.objectContaining({ credentials: 'same-origin' })
+    );
+  });
+
+  // Q. Facade getRecoverySummary routes through configured backend client
+  it('Q. Facade getRecoverySummary routes through configured backend client', async () => {
+    const fake = new FakeBackendClient();
+    const mockSummary = {
+      reconciledFinalizations: 2,
+      reattachedTransfers: 1,
+      restartedMetadataAcquisitions: 0,
+      interruptedMediaJobs: 0,
+      issues: [],
+    };
+    fake.jobs.getRecoverySummary = vi.fn(async () => mockSummary);
+    setBackendClient(fake);
+
+    const res = await getRecoverySummary();
+    expect(res.reconciledFinalizations).toBe(2);
+    expect(fake.jobs.getRecoverySummary).toHaveBeenCalledTimes(1);
+
+    resetBackendClient();
   });
 });

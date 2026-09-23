@@ -53,7 +53,8 @@ type Manager struct {
 
 	monitor *Monitor
 
-	fallbackCursor int64
+	fallbackCursor  int64
+	recoverySummary RecoverySummary
 }
 
 // NewManager creates a new job manager.
@@ -191,6 +192,13 @@ func (m *Manager) GetResourceGovernor() *ResourceGovernor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.resourceGovernor
+}
+
+// GetRecoverySummary returns an immutable value copy of the startup recovery summary.
+func (m *Manager) GetRecoverySummary() RecoverySummary {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.recoverySummary.Clone()
 }
 
 // StartBackgroundTasks starts recovery, queue cleanup, scheduler, and progress monitor.

@@ -6,6 +6,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { FormatSelector } from './components/FormatSelector';
 import { TorrentFileSelector } from './components/TorrentFileSelector';
 import { DeleteConfirmDialog } from './components/DeleteConfirmDialog';
+import { RecoveryBanner, hasRecoveryInterventions } from './components/RecoveryBanner';
 import { AppShell } from './components/AppShell';
 import type { ConnectionState } from './components/AppShell';
 import type {
@@ -24,6 +25,8 @@ import { useJobSelection } from './hooks/useJobSelection';
 import {
   getJobs,
   getSyncSnapshot,
+  getRecoverySummary,
+  type RecoverySummary,
   createJob,
   createBatchJobs,
   bulkAction,
@@ -52,6 +55,8 @@ function App() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [recoverySummary, setRecoverySummary] = useState<RecoverySummary | null>(null);
+  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
   const [viewMode, setViewMode] = useState<'downloads' | 'queue'>('downloads');
   const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -124,6 +129,16 @@ function App() {
       });
 
     fetchSettings();
+
+    getRecoverySummary()
+      .then((summary) => {
+        if (!cancelled && hasRecoveryInterventions(summary)) {
+          setRecoverySummary(summary);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to fetch recovery summary:', err);
+      });
 
     return () => {
       cancelled = true;
@@ -537,6 +552,13 @@ function App() {
                   ×
                 </button>
               </div>
+            )}
+
+            {!recoveryDismissed && recoverySummary && (
+              <RecoveryBanner
+                summary={recoverySummary}
+                onDismiss={() => setRecoveryDismissed(true)}
+              />
             )}
 
             <DownloadsPanel

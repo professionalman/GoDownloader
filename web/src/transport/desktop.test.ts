@@ -17,6 +17,7 @@ vi.mock('@wailsio/runtime', () => ({
 vi.mock('../bindings/downloader/cmd/desktop/desktopservice', () => ({
   GetJobs: vi.fn(),
   GetJob: vi.fn(),
+  GetRecoverySummary: vi.fn(),
   CreateJob: vi.fn(),
   CreateBatchJobs: vi.fn(),
   PauseJob: vi.fn(),
@@ -122,6 +123,25 @@ describe('Desktop Transport Layer', () => {
       const res = await desktopBackendClient.jobs.getJobs();
       expect(res).toEqual(mockJobs);
       expect(DesktopService.GetJobs).toHaveBeenCalledTimes(1);
+    });
+
+    it('jobs.getRecoverySummary calls DesktopService.GetRecoverySummary', async () => {
+      const mockSummary = {
+        reconciledFinalizations: 1,
+        reattachedTransfers: 2,
+        restartedMetadataAcquisitions: 3,
+        interruptedMediaJobs: 4,
+        issues: [{ jobId: 'j1', kind: 'interrupted_media' }],
+      };
+      vi.mocked(DesktopService.GetRecoverySummary).mockResolvedValue(mockSummary as any);
+
+      const res = await desktopBackendClient.jobs.getRecoverySummary();
+      expect(res.reconciledFinalizations).toBe(1);
+      expect(res.reattachedTransfers).toBe(2);
+      expect(res.restartedMetadataAcquisitions).toBe(3);
+      expect(res.interruptedMediaJobs).toBe(4);
+      expect(res.issues).toHaveLength(1);
+      expect(DesktopService.GetRecoverySummary).toHaveBeenCalledTimes(1);
     });
 
     it('jobs.createJob serializes policies and calls DesktopService.CreateJob', async () => {

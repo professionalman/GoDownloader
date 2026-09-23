@@ -437,3 +437,23 @@ export interface SyncSnapshot {
   queue: QueueSnapshot;
   timestamp: string;
 }
+
+export type RecoveryIssueKind =
+  | 'interrupted_media'
+  | 'finalization_failed'
+  | 'engine_unavailable'
+  | 'external_state_unrecoverable'
+  | 'torrent_metadata_unrecoverable';
+
+export interface RecoveryIssue {
+  jobId: string;
+  kind: RecoveryIssueKind;
+}
+
+export interface RecoverySummary {
+  reconciledFinalizations: number;
+  reattachedTransfers: number;
+  restartedMetadataAcquisitions: number;
+  interruptedMediaJobs: number;
+  issues?: RecoveryIssue[];
+}

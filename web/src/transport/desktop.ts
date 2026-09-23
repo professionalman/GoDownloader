@@ -22,6 +22,7 @@ import type {
   TorrentFile,
   TorrentFileSelection,
   SyncSnapshot,
+  RecoverySummary,
 } from '../types';
 import {
   ApiResponseError,
@@ -385,6 +386,17 @@ class DesktopJobsOperations implements JobsOperations {
 
   async openFolder(): Promise<void> {
     await DesktopService.OpenFolder().catch(wrapIpcError);
+  }
+
+  async getRecoverySummary(): Promise<RecoverySummary> {
+    const res = await DesktopService.GetRecoverySummary().catch(wrapIpcError);
+    return (res || {
+      reconciledFinalizations: 0,
+      reattachedTransfers: 0,
+      restartedMetadataAcquisitions: 0,
+      interruptedMediaJobs: 0,
+      issues: [],
+    }) as unknown as RecoverySummary;
   }
 }
 

@@ -258,11 +258,14 @@ func (m *Manager) finalizeMediaArtifact(ctx context.Context, j *Job, srcFile str
 	}
 
 	if rec != nil && m.execRepo != nil {
-		rec.Phase = FinalizationPhaseComplete
-		rec.UpdatedAt = time.Now()
-		now := time.Now()
-		rec.CompletedAt = &now
-		_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseComplete, "")
+		if err := m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseComplete, ""); err != nil {
+			log.Printf("finalizeMediaArtifact: failed to update finalization phase to COMPLETE for job %s: %v", j.ID, err)
+		} else {
+			rec.Phase = FinalizationPhaseComplete
+			rec.UpdatedAt = time.Now()
+			now := time.Now()
+			rec.CompletedAt = &now
+		}
 	}
 
 	if m.scheduler != nil {
@@ -271,7 +274,7 @@ func (m *Manager) finalizeMediaArtifact(ctx context.Context, j *Job, srcFile str
 }
 
 // reconcileFinalizationJournal queries pending finalization records and recovers each towards completion.
-func (m *Manager) reconcileFinalizationJournal(ctx context.Context) {
+func (m *Manager) reconcileFinalizationJournal(ctx context.Context, summary *RecoverySummary) {
 	if m.execRepo == nil {
 		return
 	}
@@ -290,12 +293,12 @@ func (m *Manager) reconcileFinalizationJournal(ctx context.Context) {
 
 	for i := range pending {
 		rec := &pending[i]
-		m.reconcileFinalizationRecord(ctx, rec)
+		m.reconcileFinalizationRecord(ctx, rec, summary)
 	}
 }
 
 // reconcileFinalizationRecord resolves a single finalization journal entry according to disk and DB state.
-func (m *Manager) reconcileFinalizationRecord(ctx context.Context, rec *FinalizationRecord) {
+func (m *Manager) reconcileFinalizationRecord(ctx context.Context, rec *FinalizationRecord, summary *RecoverySummary) {
 	if rec.Phase == FinalizationPhaseComplete || rec.Phase == FinalizationPhaseFailed {
 		return
 	}
@@ -304,6 +307,9 @@ func (m *Manager) reconcileFinalizationRecord(ctx context.Context, rec *Finaliza
 	if err != nil || j == nil {
 		log.Printf("reconcileFinalizationRecord: job %s not found for record %s: %v", rec.JobID, rec.ID, err)
 		_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "job not found")
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+		}
 		return
 	}
 
@@ -314,24 +320,27 @@ func (m *Manager) reconcileFinalizationRecord(ctx context.Context, rec *Finaliza
 	switch rec.Phase {
 	case FinalizationPhasePrepared:
 		if srcExists {
-			m.resumeFinalizationFromSource(ctx, j, rec)
+			m.resumeFinalizationFromSource(ctx, j, rec, summary)
 		} else if dstValid && rec.ExpectedDigest != "" {
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseValidated, "")
 			rec.Phase = FinalizationPhaseValidated
-			m.commitAndCleanupFinalization(ctx, j, rec)
+			m.commitAndCleanupFinalization(ctx, j, rec, summary)
 		} else {
 			log.Printf("reconcileFinalizationRecord: job %s staging file missing in prepared phase", j.ID)
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "staging file missing")
 			m.failJobWithReason(ctx, j, "staging file missing during finalization recovery")
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+			}
 		}
 
 	case FinalizationPhaseInProgress:
 		if srcExists {
-			m.resumeFinalizationFromSource(ctx, j, rec)
+			m.resumeFinalizationFromSource(ctx, j, rec, summary)
 		} else if dstValid {
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseValidated, "")
 			rec.Phase = FinalizationPhaseValidated
-			m.commitAndCleanupFinalization(ctx, j, rec)
+			m.commitAndCleanupFinalization(ctx, j, rec, summary)
 		} else if rec.ConflictPolicy == string(storage.ConflictPolicyRename) || rec.ConflictPolicy == string(storage.ConflictPolicyEngineManaged) || rec.ConflictPolicy == "" {
 			if candPath, ok := findRenamedArtifact(j.DestinationDir, rec.DestinationPath, rec.ExpectedSize, rec.ExpectedDigest); ok {
 				log.Printf("reconcileFinalizationRecord: job %s recovered collision-renamed destination artifact at %s", j.ID, candPath)
@@ -340,36 +349,51 @@ func (m *Manager) reconcileFinalizationRecord(ctx context.Context, rec *Finaliza
 				_ = m.execRepo.SaveFinalizationRecord(ctx, rec)
 				_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseValidated, "")
 				rec.Phase = FinalizationPhaseValidated
-				m.commitAndCleanupFinalization(ctx, j, rec)
+				m.commitAndCleanupFinalization(ctx, j, rec, summary)
 			} else if dstExists {
 				log.Printf("reconcileFinalizationRecord: job %s destination invalid and staging missing; preserving destination", j.ID)
 				_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "destination file invalid and staging missing")
 				m.failJobWithReason(ctx, j, "finalization failed: destination invalid and staging missing")
+				if summary != nil {
+					summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+				}
 			} else {
 				log.Printf("reconcileFinalizationRecord: job %s staging and destination missing in in_progress phase", j.ID)
 				_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "artifacts missing")
 				m.failJobWithReason(ctx, j, "finalization failed: artifacts missing")
+				if summary != nil {
+					summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+				}
 			}
 		} else if dstExists && !dstValid {
 			// Invariant: Do NOT overwrite or delete user destination when source is missing
 			log.Printf("reconcileFinalizationRecord: job %s destination invalid and staging missing; preserving destination", j.ID)
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "destination file invalid and staging missing")
 			m.failJobWithReason(ctx, j, "finalization failed: destination invalid and staging missing")
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+			}
 		} else {
 			log.Printf("reconcileFinalizationRecord: job %s staging and destination missing in in_progress phase", j.ID)
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "artifacts missing")
 			m.failJobWithReason(ctx, j, "finalization failed: artifacts missing")
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+			}
 		}
 
 	case FinalizationPhaseValidated:
 		if dstValid {
-			m.commitAndCleanupFinalization(ctx, j, rec)
+			m.commitAndCleanupFinalization(ctx, j, rec, summary)
 		} else if srcExists {
-			m.resumeFinalizationFromSource(ctx, j, rec)
+			m.resumeFinalizationFromSource(ctx, j, rec, summary)
 		} else {
 			log.Printf("reconcileFinalizationRecord: job %s validated destination missing and staging missing", j.ID)
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "validated destination missing and staging missing")
 			m.failJobWithReason(ctx, j, "finalization failed: validated destination missing")
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+			}
 		}
 
 	case FinalizationPhaseDBCommitted:
@@ -385,15 +409,15 @@ func (m *Manager) reconcileFinalizationRecord(ctx context.Context, rec *Finaliza
 			j.UpdatedAt = time.Now()
 			_ = m.repo.Update(ctx, j)
 		}
-		m.executeCleanupAndComplete(ctx, j, rec)
+		_ = m.executeCleanupAndComplete(ctx, j, rec, summary)
 
 	case FinalizationPhaseCleanupPending:
-		m.executeCleanupAndComplete(ctx, j, rec)
+		_ = m.executeCleanupAndComplete(ctx, j, rec, summary)
 	}
 }
 
 // resumeFinalizationFromSource moves/copies the staging artifact to the destination and completes finalization.
-func (m *Manager) resumeFinalizationFromSource(ctx context.Context, j *Job, rec *FinalizationRecord) {
+func (m *Manager) resumeFinalizationFromSource(ctx context.Context, j *Job, rec *FinalizationRecord, summary *RecoverySummary) {
 	policy := storage.FilenameConflictPolicy(rec.ConflictPolicy)
 	targetPath := rec.DestinationPath
 	if m.storageService != nil {
@@ -402,6 +426,9 @@ func (m *Manager) resumeFinalizationFromSource(ctx context.Context, j *Job, rec 
 			log.Printf("resumeFinalizationFromSource: resolve path failed for job %s: %v", j.ID, err)
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, err.Error())
 			m.failJobWithReason(ctx, j, fmt.Sprintf("file finalization recovery failed: %v", err))
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+			}
 			return
 		}
 		targetPath = resolved
@@ -430,6 +457,9 @@ func (m *Manager) resumeFinalizationFromSource(ctx context.Context, j *Job, rec 
 		log.Printf("resumeFinalizationFromSource: finalization failed for job %s: %v", j.ID, finErr)
 		_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, finErr.Error())
 		m.failJobWithReason(ctx, j, fmt.Sprintf("file finalization recovery failed: %v", finErr))
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+		}
 		return
 	}
 
@@ -440,17 +470,20 @@ func (m *Manager) resumeFinalizationFromSource(ctx context.Context, j *Job, rec 
 		log.Printf("resumeFinalizationFromSource: %s", valErr)
 		_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, valErr)
 		m.failJobWithReason(ctx, j, valErr)
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+		}
 		return
 	}
 
 	_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseValidated, "")
 	rec.Phase = FinalizationPhaseValidated
 
-	m.commitAndCleanupFinalization(ctx, j, rec)
+	m.commitAndCleanupFinalization(ctx, j, rec, summary)
 }
 
 // commitAndCleanupFinalization marks the job completed in DB, publishes event, and initiates workdir cleanup.
-func (m *Manager) commitAndCleanupFinalization(ctx context.Context, j *Job, rec *FinalizationRecord) {
+func (m *Manager) commitAndCleanupFinalization(ctx context.Context, j *Job, rec *FinalizationRecord, summary *RecoverySummary) {
 	j.FinalPath = rec.DestinationPath
 	j.Name = filepath.Base(rec.DestinationPath)
 	if rec.ExpectedSize > 0 {
@@ -475,6 +508,9 @@ func (m *Manager) commitAndCleanupFinalization(ctx context.Context, j *Job, rec 
 	if err := m.repo.Update(ctx, j); err != nil {
 		log.Printf("commitAndCleanupFinalization: failed to update job %s to COMPLETED: %v", j.ID, err)
 		_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, fmt.Sprintf("db commit error: %v", err))
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: rec.JobID, Kind: RecoveryIssueFinalizationFailed})
+		}
 		return
 	}
 
@@ -485,11 +521,15 @@ func (m *Manager) commitAndCleanupFinalization(ctx context.Context, j *Job, rec 
 	m.publish(EventJobCompleted, j)
 	m.cleanupTerminalEngineState(j)
 
-	m.executeCleanupAndComplete(ctx, j, rec)
+	_ = m.executeCleanupAndComplete(ctx, j, rec, summary)
 }
 
 // executeCleanupAndComplete cleans up the workdir and transitions journal to completed state.
-func (m *Manager) executeCleanupAndComplete(ctx context.Context, j *Job, rec *FinalizationRecord) {
+func (m *Manager) executeCleanupAndComplete(ctx context.Context, j *Job, rec *FinalizationRecord, summary *RecoverySummary) error {
+	if rec == nil || m.execRepo == nil {
+		return nil
+	}
+
 	_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseCleanupPending, "")
 	rec.Phase = FinalizationPhaseCleanupPending
 
@@ -504,7 +544,16 @@ func (m *Manager) executeCleanupAndComplete(ctx context.Context, j *Job, rec *Fi
 		}
 	}
 
-	_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseComplete, "")
+	if err := m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseComplete, ""); err != nil {
+		log.Printf("executeCleanupAndComplete: failed to update finalization phase to COMPLETE for job %s: %v", j.ID, err)
+		return err
+	}
 	rec.Phase = FinalizationPhaseComplete
+	now := time.Now()
+	rec.CompletedAt = &now
+	if summary != nil {
+		summary.ReconciledFinalizations++
+	}
 	log.Printf("executeCleanupAndComplete: artifact finalization successfully completed for job %s", j.ID)
+	return nil
 }

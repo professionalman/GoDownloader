@@ -2,9 +2,11 @@ package job
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -613,5 +615,563 @@ func TestRecovery_V05_PausedJob_SurvivesRestart(t *testing.T) {
 	got, _ := repo.GetByID(ctx, "paused-job-1")
 	if got.Status != StatusPaused {
 		t.Errorf("expected PAUSED job to remain PAUSED across restart, got %s", got.Status)
+	}
+}
+
+func TestRecoverySummary_CleanStartup(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Preserved queued and paused jobs should NOT count as recovery interventions
+	createTestJob(t, repo, "q-job", StatusQueued, "")
+	createTestJob(t, repo, "p-job", StatusPaused, "")
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.ReconciledFinalizations != 0 {
+		t.Errorf("expected ReconciledFinalizations=0, got %d", summary.ReconciledFinalizations)
+	}
+	if summary.ReattachedTransfers != 0 {
+		t.Errorf("expected ReattachedTransfers=0, got %d", summary.ReattachedTransfers)
+	}
+	if summary.RestartedMetadataAcquisitions != 0 {
+		t.Errorf("expected RestartedMetadataAcquisitions=0, got %d", summary.RestartedMetadataAcquisitions)
+	}
+	if summary.InterruptedMediaJobs != 0 {
+		t.Errorf("expected InterruptedMediaJobs=0, got %d", summary.InterruptedMediaJobs)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected Issues to be empty, got %v", summary.Issues)
+	}
+}
+
+func TestRecoverySummary_InterruptedMedia(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	mediaJob := &Job{
+		ID:        "media-1",
+		Source:    "https://example.com/watch?v=secret_video&auth=SECRET_TOKEN",
+		Name:      "video.mp4",
+		Status:    StatusDownloading,
+		Type:      TypeMedia,
+		Engine:    "ytdlp",
+		EngineID:  "yt-1",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, mediaJob); err != nil {
+		t.Fatalf("failed to create media job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.InterruptedMediaJobs != 1 {
+		t.Errorf("expected InterruptedMediaJobs=1, got %d", summary.InterruptedMediaJobs)
+	}
+	if len(summary.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(summary.Issues))
+	}
+	if summary.Issues[0].JobID != "media-1" {
+		t.Errorf("expected JobID=media-1, got %s", summary.Issues[0].JobID)
+	}
+	if summary.Issues[0].Kind != RecoveryIssueInterruptedMedia {
+		t.Errorf("expected Kind=interrupted_media, got %s", summary.Issues[0].Kind)
+	}
+
+	// Verify job transitioned to StatusFailed
+	got, _ := repo.GetByID(ctx, "media-1")
+	if got.Status != StatusFailed {
+		t.Errorf("expected StatusFailed for interrupted media job, got %s", got.Status)
+	}
+}
+
+func TestRecoverySummary_ReattachedTransfer(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:              StatusDownloading,
+			TotalBytes:          2000,
+			CompletedBytes:      1000,
+			SpeedBytesPerSecond: 100,
+			Progress:            50.0,
+		}, nil
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	createTestJob(t, repo, "active-job", StatusDownloading, "aria2-active-id")
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.ReattachedTransfers != 1 {
+		t.Errorf("expected ReattachedTransfers=1, got %d", summary.ReattachedTransfers)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues, got %v", summary.Issues)
+	}
+}
+
+func TestRecoverySummary_RestartedMetadata(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	torrentFile := filepath.Join(tmpDir, "test.torrent")
+	if err := os.WriteFile(torrentFile, []byte("d8:announce3:fakee"), 0644); err != nil {
+		t.Fatalf("failed to write torrent file: %v", err)
+	}
+
+	j := &Job{
+		ID:        "torrent-analyzing",
+		Source:    "torrent://" + torrentFile,
+		Name:      "test.torrent",
+		Status:    StatusAnalyzing,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+	m.torrentRepo = newFakeTorrentRepository(repo)
+	if err := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+		JobID:           j.ID,
+		TorrentFilePath: torrentFile,
+	}); err != nil {
+		t.Fatalf("failed to create torrent job record: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.RestartedMetadataAcquisitions != 1 {
+		t.Errorf("expected RestartedMetadataAcquisitions=1, got %d", summary.RestartedMetadataAcquisitions)
+	}
+}
+
+func TestRecoverySummary_TorrentMetadataUnrecoverable(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	j := &Job{
+		ID:        "torrent-missing-file",
+		Source:    "torrent://non-existent-path.torrent",
+		Name:      "missing.torrent",
+		Status:    StatusAnalyzing,
+		Type:      TypeTorrent,
+		Engine:    "qbittorrent",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+	m.torrentRepo = newFakeTorrentRepository(repo)
+	if err := m.torrentRepo.CreateTorrentJob(ctx, &TorrentJobRecord{
+		JobID:           j.ID,
+		TorrentFilePath: "non-existent-path.torrent",
+	}); err != nil {
+		t.Fatalf("failed to create torrent job record: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if len(summary.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(summary.Issues))
+	}
+	if summary.Issues[0].Kind != RecoveryIssueTorrentMetadataUnrecoverable {
+		t.Errorf("expected RecoveryIssueTorrentMetadataUnrecoverable, got %s", summary.Issues[0].Kind)
+	}
+}
+
+func TestRecoverySummary_GetterCopySafety(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	mediaJob := &Job{
+		ID:        "media-copy-safety",
+		Source:    "https://example.com/video",
+		Name:      "video.mp4",
+		Status:    StatusDownloading,
+		Type:      TypeMedia,
+		Engine:    "ytdlp",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, mediaJob); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	s1 := m.GetRecoverySummary()
+	if len(s1.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(s1.Issues))
+	}
+
+	// Mutate returned copy
+	s1.Issues[0].JobID = "MUTATED_ID"
+	s1.Issues[0].Kind = "MUTATED_KIND"
+	s1.Issues = append(s1.Issues, RecoveryIssue{JobID: "MUTATED_EXTRA", Kind: "MUTATED"})
+	s1.InterruptedMediaJobs = 999
+
+	// Read fresh copy from manager
+	s2 := m.GetRecoverySummary()
+	if s2.InterruptedMediaJobs != 1 {
+		t.Errorf("stored summary was mutated! InterruptedMediaJobs=%d", s2.InterruptedMediaJobs)
+	}
+	if len(s2.Issues) != 1 {
+		t.Fatalf("stored issues slice was mutated! len=%d", len(s2.Issues))
+	}
+	if s2.Issues[0].JobID != "media-copy-safety" {
+		t.Errorf("stored issue JobID was mutated! got %s", s2.Issues[0].JobID)
+	}
+	if s2.Issues[0].Kind != RecoveryIssueInterruptedMedia {
+		t.Errorf("stored issue Kind was mutated! got %s", s2.Issues[0].Kind)
+	}
+}
+
+func TestRecoverySummary_RepeatedReads(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	mediaJob := &Job{
+		ID:        "media-repeat",
+		Source:    "https://example.com/video",
+		Name:      "video.mp4",
+		Status:    StatusDownloading,
+		Type:      TypeMedia,
+		Engine:    "ytdlp",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, mediaJob); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	s1 := m.GetRecoverySummary()
+	s2 := m.GetRecoverySummary()
+
+	if s1.InterruptedMediaJobs != s2.InterruptedMediaJobs {
+		t.Errorf("repeated reads mismatch: %d != %d", s1.InterruptedMediaJobs, s2.InterruptedMediaJobs)
+	}
+	if len(s1.Issues) != len(s2.Issues) {
+		t.Errorf("repeated reads issues length mismatch: %d != %d", len(s1.Issues), len(s2.Issues))
+	}
+	if len(s1.Issues) > 0 && s1.Issues[0] != s2.Issues[0] {
+		t.Errorf("repeated reads issue content mismatch")
+	}
+}
+
+func TestRecoverySummary_PrivacySanitization(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	secretURL := "https://private.domain.com/path?secret=SUPER_SECRET_TOKEN&auth=BEARER_TOKEN&token=SECRET_VALUE"
+	mediaJob := &Job{
+		ID:        "job-privacy-check",
+		Source:    secretURL,
+		Name:      "C:\\Users\\SecretUser\\TopSecret\\file.part",
+		Status:    StatusDownloading,
+		Type:      TypeMedia,
+		Engine:    "ytdlp",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, mediaJob); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("failed to marshal summary: %v", err)
+	}
+	jsonStr := string(data)
+
+	// Structural privacy invariants: Data minimization, no free-form strings
+	forbiddenSecrets := []string{
+		"SUPER_SECRET_TOKEN",
+		"BEARER_TOKEN",
+		"SECRET_VALUE",
+		"TopSecret",
+		"SecretUser",
+		"private.domain.com",
+		"token=",
+		"auth=",
+		"secret=",
+		"Bearer",
+		"Authorization",
+	}
+	for _, forbidden := range forbiddenSecrets {
+		if strings.Contains(jsonStr, forbidden) {
+			t.Errorf("privacy invariant violated: found forbidden sensitive pattern %q in serialized recovery summary: %s", forbidden, jsonStr)
+		}
+	}
+
+	// Verify only expected DTO fields are serialized
+	var rawMap map[string]interface{}
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	for key := range rawMap {
+		switch key {
+		case "reconciledFinalizations", "reattachedTransfers", "restartedMetadataAcquisitions", "interruptedMediaJobs", "issues":
+			// expected fields
+		default:
+			t.Errorf("unexpected field in serialized RecoverySummary: %s", key)
+		}
+	}
+}
+
+func TestRecoverySummary_ExternalStateUnrecoverable(t *testing.T) {
+	// Status() returns an error simulating lost or unreachable external transfer state
+	m, repo, cleanup := setupRecoveryTest(t, func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return nil, fmt.Errorf("torrent not found in engine")
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	createTestJob(t, repo, "lost-transfer", StatusDownloading, "aria2-missing-id")
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.ReattachedTransfers != 0 {
+		t.Errorf("expected ReattachedTransfers=0, got %d", summary.ReattachedTransfers)
+	}
+	if len(summary.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(summary.Issues))
+	}
+	if summary.Issues[0].JobID != "lost-transfer" {
+		t.Errorf("expected JobID=lost-transfer, got %s", summary.Issues[0].JobID)
+	}
+	if summary.Issues[0].Kind != RecoveryIssueExternalStateUnrecoverable {
+		t.Errorf("expected Kind=external_state_unrecoverable, got %s", summary.Issues[0].Kind)
+	}
+
+	// Job should be marked StatusFailed
+	got, _ := repo.GetByID(ctx, "lost-transfer")
+	if got.Status != StatusFailed {
+		t.Errorf("expected StatusFailed, got %s", got.Status)
+	}
+}
+
+func TestRecoverySummary_EngineReportedStatusFailed_DiscoveredState(t *testing.T) {
+	// Engine itself returns StatusFailed. Per Section 8, this is discovered current state from the daemon,
+	// NOT a failure caused by restart recovery, so it does not add an issue to RecoverySummary.
+	m, repo, cleanup := setupRecoveryTest(t, func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status: StatusFailed,
+			Error:  "tracker connection timed out in external daemon",
+		}, nil
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	createTestJob(t, repo, "daemon-failed-job", StatusDownloading, "aria2-failed-id")
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 recovery issues for discovered engine failure, got %v", summary.Issues)
+	}
+
+	// Job should be persisted as StatusFailed with the engine's error
+	got, _ := repo.GetByID(ctx, "daemon-failed-job")
+	if got.Status != StatusFailed {
+		t.Errorf("expected StatusFailed, got %s", got.Status)
+	}
+	if got.Error != "tracker connection timed out in external daemon" {
+		t.Errorf("expected error from engine, got %q", got.Error)
+	}
+}
+
+func TestRecoverySummary_Seeding_SeedAfterCompleteFalse_NotCountedAsReattached(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:         StatusSeeding,
+			TotalBytes:     5000000,
+			CompletedBytes: 5000000,
+			Progress:       100.0,
+			UploadSpeed:    250000,
+		}, nil
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &Job{
+		ID:                "seed-complete-false",
+		Source:            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+		Name:              "torrent-data",
+		Type:              TypeTorrent,
+		Status:            StatusDownloading,
+		Engine:            "aria2",
+		EngineID:          "torrent-gid-1",
+		DestinationDir:    t.TempDir(),
+		SeedAfterComplete: false,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create test job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.ReattachedTransfers != 0 {
+		t.Errorf("expected ReattachedTransfers == 0 for SeedAfterComplete=false, got %d", summary.ReattachedTransfers)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues, got %v", summary.Issues)
+	}
+
+	// Job should have finalized and transitioned to StatusCompleted
+	got, err := repo.GetByID(ctx, "seed-complete-false")
+	if err != nil {
+		t.Fatalf("failed to get job: %v", err)
+	}
+	if got.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", got.Status)
+	}
+
+	// Must NOT be actively tracked in activeJobs
+	activeJobs := m.GetActiveJobs()
+	if _, exists := activeJobs["seed-complete-false"]; exists {
+		t.Error("expected job not to be in activeJobs when SeedAfterComplete is false")
+	}
+}
+
+func TestRecoverySummary_Seeding_SeedAfterCompleteTrue_CountedAsReattached(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:         StatusSeeding,
+			TotalBytes:     5000000,
+			CompletedBytes: 5000000,
+			Progress:       100.0,
+			UploadSpeed:    250000,
+		}, nil
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &Job{
+		ID:                "seed-complete-true",
+		Source:            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+		Name:              "torrent-data",
+		Type:              TypeTorrent,
+		Status:            StatusDownloading,
+		Engine:            "aria2",
+		EngineID:          "torrent-gid-2",
+		DestinationDir:    t.TempDir(),
+		SeedAfterComplete: true,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create test job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.ReattachedTransfers != 1 {
+		t.Errorf("expected ReattachedTransfers == 1 for active seeding reattach, got %d", summary.ReattachedTransfers)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues, got %v", summary.Issues)
+	}
+
+	// Job should be actively tracked in activeJobs
+	activeJobs := m.GetActiveJobs()
+	if _, exists := activeJobs["seed-complete-true"]; !exists {
+		t.Error("expected job to be in activeJobs when actively reattached for seeding")
+	}
+
+	// Persisted status should be StatusSeeding
+	got, err := repo.GetByID(ctx, "seed-complete-true")
+	if err != nil {
+		t.Fatalf("failed to get job: %v", err)
+	}
+	if got.Status != StatusSeeding {
+		t.Errorf("expected StatusSeeding, got %s", got.Status)
+	}
+}
+
+func TestRecoverySummary_Downloading_ActiveReattach(t *testing.T) {
+	m, repo, cleanup := setupRecoveryTest(t, func(ctx context.Context, j *Job) (*EngineStatus, error) {
+		return &EngineStatus{
+			Status:              StatusDownloading,
+			TotalBytes:          10000000,
+			CompletedBytes:      4000000,
+			Progress:            40.0,
+			SpeedBytesPerSecond: 100000,
+		}, nil
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &Job{
+		ID:             "download-active-reattach",
+		Source:         "https://example.com/file.iso",
+		Name:           "file.iso",
+		Type:           TypeDownload,
+		Status:         StatusDownloading,
+		Engine:         "aria2",
+		EngineID:       "aria2-gid-download",
+		DestinationDir: t.TempDir(),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create test job: %v", err)
+	}
+
+	m.recover(ctx)
+
+	summary := m.GetRecoverySummary()
+	if summary.ReattachedTransfers != 1 {
+		t.Errorf("expected ReattachedTransfers == 1 for active download reattach, got %d", summary.ReattachedTransfers)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues, got %v", summary.Issues)
+	}
+
+	// Job should be actively tracked in activeJobs via m.addActive(j)
+	activeJobs := m.GetActiveJobs()
+	if _, exists := activeJobs["download-active-reattach"]; !exists {
+		t.Error("expected job to be in activeJobs after m.addActive path")
+	}
+
+	got, err := repo.GetByID(ctx, "download-active-reattach")
+	if err != nil {
+		t.Fatalf("failed to get job: %v", err)
+	}
+	if got.Status != StatusDownloading {
+		t.Errorf("expected StatusDownloading, got %s", got.Status)
+	}
+	if got.Progress != 40.0 {
+		t.Errorf("expected Progress=40.0, got %f", got.Progress)
 	}
 }

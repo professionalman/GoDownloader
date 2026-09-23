@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1480,5 +1481,359 @@ func TestRecovery_UnrecordedCollisionCandidate_DigestMismatchRejected(t *testing
 	}
 	if updatedRec.Phase != job.FinalizationPhaseFailed {
 		t.Fatalf("expected record Phase Failed, got %s", updatedRec.Phase)
+	}
+}
+
+func TestRecoverySummary_FinalizationReconciliation_Success(t *testing.T) {
+	mgr, jobRepo, execRepo, _, downloadDir, tempDir := setupFinalizationTest(t)
+	ctx := context.Background()
+
+	jobID := uuid.New().String()
+	filename := "finalized_video.mp4"
+	content := []byte("recovery finalization success payload")
+
+	_, srcFile := setupWorkDirWithFile(t, tempDir, jobID, filename, content)
+	destPath := filepath.Join(downloadDir, filename)
+
+	testJob := &job.Job{
+		ID:             jobID,
+		Source:         "https://example.com/video",
+		Name:           filename,
+		Type:           job.TypeMedia,
+		Status:         job.StatusProcessing,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if err := jobRepo.Create(ctx, testJob); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	rec := &job.FinalizationRecord{
+		ID:              uuid.New().String(),
+		JobID:           jobID,
+		StagingPath:     srcFile,
+		DestinationPath: destPath,
+		ExpectedSize:    int64(len(content)),
+		Phase:           job.FinalizationPhasePrepared,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := execRepo.SaveFinalizationRecord(ctx, rec); err != nil {
+		t.Fatalf("failed to save finalization record: %v", err)
+	}
+
+	// Run recovery
+	mgr.Recover(ctx)
+
+	summary := mgr.GetRecoverySummary()
+	if summary.ReconciledFinalizations != 1 {
+		t.Errorf("expected ReconciledFinalizations=1, got %d", summary.ReconciledFinalizations)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues on successful finalization reconciliation, got %v", summary.Issues)
+	}
+
+	savedJob, err := jobRepo.GetByID(ctx, jobID)
+	if err != nil {
+		t.Fatalf("failed to get job: %v", err)
+	}
+	if savedJob.Status != job.StatusCompleted {
+		t.Errorf("expected job to be StatusCompleted, got %s", savedJob.Status)
+	}
+}
+
+func TestRecoverySummary_FinalizationReconciliation_Failure(t *testing.T) {
+	mgr, jobRepo, execRepo, _, downloadDir, tempDir := setupFinalizationTest(t)
+	ctx := context.Background()
+
+	jobID := uuid.New().String()
+	filename := "missing_staging.mp4"
+	destPath := filepath.Join(downloadDir, filename)
+	missingSrc := filepath.Join(tempDir, "non_existent_staging.mp4")
+
+	testJob := &job.Job{
+		ID:             jobID,
+		Source:         "https://example.com/video",
+		Name:           filename,
+		Type:           job.TypeMedia,
+		Status:         job.StatusProcessing,
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if err := jobRepo.Create(ctx, testJob); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	rec := &job.FinalizationRecord{
+		ID:              uuid.New().String(),
+		JobID:           jobID,
+		StagingPath:     missingSrc,
+		DestinationPath: destPath,
+		ExpectedSize:    1234,
+		Phase:           job.FinalizationPhasePrepared,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := execRepo.SaveFinalizationRecord(ctx, rec); err != nil {
+		t.Fatalf("failed to save finalization record: %v", err)
+	}
+
+	// Run recovery
+	mgr.Recover(ctx)
+
+	summary := mgr.GetRecoverySummary()
+	if summary.ReconciledFinalizations != 0 {
+		t.Errorf("expected ReconciledFinalizations=0 on failure, got %d", summary.ReconciledFinalizations)
+	}
+	if len(summary.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(summary.Issues))
+	}
+	if summary.Issues[0].JobID != jobID {
+		t.Errorf("expected JobID=%s, got %s", jobID, summary.Issues[0].JobID)
+	}
+	if summary.Issues[0].Kind != job.RecoveryIssueFinalizationFailed {
+		t.Errorf("expected Kind=finalization_failed, got %s", summary.Issues[0].Kind)
+	}
+}
+
+func TestRecoverySummary_EarlyReturnSafety_FinalizationPreserved(t *testing.T) {
+	// Reconciled finalization occurs, then ListRecoverable returns 0 jobs.
+	// Summary must preserve ReconciledFinalizations = 1 across the early return.
+	mgr, jobRepo, execRepo, _, downloadDir, tempDir := setupFinalizationTest(t)
+	ctx := context.Background()
+
+	stagingPath := filepath.Join(tempDir, "early_return.mp4.part")
+	destPath := filepath.Join(downloadDir, "early_return.mp4")
+	if err := os.WriteFile(stagingPath, []byte("finalization content"), 0644); err != nil {
+		t.Fatalf("failed to write staging file: %v", err)
+	}
+
+	jobID := uuid.New().String()
+	j := &job.Job{
+		ID:             jobID,
+		Status:         job.StatusProcessing,
+		Type:           job.TypeMedia,
+		Engine:         "ytdlp",
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if err := jobRepo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	rec := &job.FinalizationRecord{
+		ID:              uuid.New().String(),
+		JobID:           jobID,
+		StagingPath:     stagingPath,
+		DestinationPath: destPath,
+		ExpectedSize:    int64(len("finalization content")),
+		Phase:           job.FinalizationPhasePrepared,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := execRepo.SaveFinalizationRecord(ctx, rec); err != nil {
+		t.Fatalf("failed to save finalization record: %v", err)
+	}
+
+	// Run recovery: finalization is reconciled and completed, so ListRecoverable subsequently finds 0 jobs.
+	mgr.Recover(ctx)
+
+	summary := mgr.GetRecoverySummary()
+	if summary.ReconciledFinalizations != 1 {
+		t.Errorf("expected ReconciledFinalizations=1 despite zero recoverable jobs, got %d", summary.ReconciledFinalizations)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues, got %v", summary.Issues)
+	}
+}
+
+type erroringJobRepoWrapper struct {
+	job.IJobRepository
+	listRecoverableErr error
+}
+
+func (w *erroringJobRepoWrapper) ListRecoverable(ctx context.Context) ([]job.Job, error) {
+	if w.listRecoverableErr != nil {
+		return nil, w.listRecoverableErr
+	}
+	return w.IJobRepository.ListRecoverable(ctx)
+}
+
+func TestRecoverySummary_ListRecoverableError_FinalizationPreserved(t *testing.T) {
+	// Setup: pending FinalizationJournal record -> successful reconciliation -> ReconciledFinalizations = 1.
+	// Then ListRecoverable returns an error -> recover() returns.
+	// Summary must preserve ReconciledFinalizations = 1 across the error return.
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_finalization_err.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create test db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	realJobRepo := database.NewSQLiteJobRepository(db)
+	errRepo := &erroringJobRepoWrapper{
+		IJobRepository:     realJobRepo,
+		listRecoverableErr: errors.New("simulated sqlite error on ListRecoverable"),
+	}
+	execRepo := database.NewSQLiteExecutionRepository(db)
+	storageSvc := storage.NewStorageService(nil, nil, nil, tempDir, tempDir)
+
+	downloadDir := filepath.Join(tempDir, "downloads")
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		t.Fatalf("failed to create downloadDir: %v", err)
+	}
+
+	bus := &fakeBus{}
+	engReg := &fakeRegistry{eng: &fakeEngine{}}
+	mgr := job.NewManager(errRepo, engReg, bus, downloadDir, nil, tempDir)
+	mgr.SetStorageService(storageSvc)
+	mgr.SetExecutionRepository(execRepo)
+
+	ctx := context.Background()
+
+	stagingPath := filepath.Join(tempDir, "list_rec_err.mp4.part")
+	destPath := filepath.Join(downloadDir, "list_rec_err.mp4")
+	if err := os.WriteFile(stagingPath, []byte("finalization content"), 0644); err != nil {
+		t.Fatalf("failed to write staging file: %v", err)
+	}
+
+	jobID := uuid.New().String()
+	j := &job.Job{
+		ID:             jobID,
+		Status:         job.StatusProcessing,
+		Type:           job.TypeMedia,
+		Engine:         "ytdlp",
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if err := realJobRepo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	rec := &job.FinalizationRecord{
+		ID:              uuid.New().String(),
+		JobID:           jobID,
+		StagingPath:     stagingPath,
+		DestinationPath: destPath,
+		ExpectedSize:    int64(len("finalization content")),
+		Phase:           job.FinalizationPhasePrepared,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := execRepo.SaveFinalizationRecord(ctx, rec); err != nil {
+		t.Fatalf("failed to save finalization record: %v", err)
+	}
+
+	// Run recovery: finalization is reconciled and completed, then ListRecoverable errors.
+	mgr.Recover(ctx)
+
+	summary := mgr.GetRecoverySummary()
+	if summary.ReconciledFinalizations != 1 {
+		t.Errorf("expected ReconciledFinalizations=1 despite ListRecoverable error, got %d", summary.ReconciledFinalizations)
+	}
+	if len(summary.Issues) != 0 {
+		t.Errorf("expected 0 issues, got %v", summary.Issues)
+	}
+}
+
+type failingCompleteExecRepoWrapper struct {
+	job.IExecutionRepository
+	failOnComplete bool
+}
+
+func (w *failingCompleteExecRepoWrapper) UpdateFinalizationPhase(ctx context.Context, id string, phase job.FinalizationPhase, errStr string) error {
+	if w.failOnComplete && phase == job.FinalizationPhaseComplete {
+		return errors.New("simulated error updating finalization phase to complete")
+	}
+	return w.IExecutionRepository.UpdateFinalizationPhase(ctx, id, phase, errStr)
+}
+
+func TestRecoverySummary_DurableCompleteUpdateFailure_NotCountedAsReconciled(t *testing.T) {
+	// Pending finalization: artifact/job reconciliation otherwise succeeds,
+	// but the durable Complete update fails.
+	// Summary must NOT claim ReconciledFinalizations (must be 0).
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_finalization_fail_complete.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create test db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	realJobRepo := database.NewSQLiteJobRepository(db)
+	realExecRepo := database.NewSQLiteExecutionRepository(db)
+	failingExecRepo := &failingCompleteExecRepoWrapper{
+		IExecutionRepository: realExecRepo,
+		failOnComplete:       true,
+	}
+	storageSvc := storage.NewStorageService(nil, nil, nil, tempDir, tempDir)
+
+	downloadDir := filepath.Join(tempDir, "downloads")
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		t.Fatalf("failed to create downloadDir: %v", err)
+	}
+
+	bus := &fakeBus{}
+	engReg := &fakeRegistry{eng: &fakeEngine{}}
+	mgr := job.NewManager(realJobRepo, engReg, bus, downloadDir, nil, tempDir)
+	mgr.SetStorageService(storageSvc)
+	mgr.SetExecutionRepository(failingExecRepo)
+
+	ctx := context.Background()
+
+	stagingPath := filepath.Join(tempDir, "fail_complete.mp4.part")
+	destPath := filepath.Join(downloadDir, "fail_complete.mp4")
+	if err := os.WriteFile(stagingPath, []byte("finalization content"), 0644); err != nil {
+		t.Fatalf("failed to write staging file: %v", err)
+	}
+
+	jobID := uuid.New().String()
+	j := &job.Job{
+		ID:             jobID,
+		Status:         job.StatusProcessing,
+		Type:           job.TypeMedia,
+		Engine:         "ytdlp",
+		DestinationDir: downloadDir,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if err := realJobRepo.Create(ctx, j); err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	rec := &job.FinalizationRecord{
+		ID:              uuid.New().String(),
+		JobID:           jobID,
+		StagingPath:     stagingPath,
+		DestinationPath: destPath,
+		ExpectedSize:    int64(len("finalization content")),
+		Phase:           job.FinalizationPhasePrepared,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := realExecRepo.SaveFinalizationRecord(ctx, rec); err != nil {
+		t.Fatalf("failed to save finalization record: %v", err)
+	}
+
+	// Run recovery: reconciliation reaches cleanup, but UpdateFinalizationPhase to Complete fails.
+	mgr.Recover(ctx)
+
+	summary := mgr.GetRecoverySummary()
+	if summary.ReconciledFinalizations != 0 {
+		t.Errorf("expected ReconciledFinalizations=0 when durable Complete write fails, got %d", summary.ReconciledFinalizations)
+	}
+
+	// Under FND-2, the durable record is in FinalizationPhaseCleanupPending because Complete write failed.
+	persistedRec, err := realExecRepo.GetFinalizationByJobID(ctx, jobID)
+	if err != nil {
+		t.Fatalf("failed to get finalization record: %v", err)
+	}
+	if persistedRec.Phase != job.FinalizationPhaseCleanupPending {
+		t.Errorf("expected persisted record phase to be CleanupPending, got %s", persistedRec.Phase)
 	}
 }

@@ -20,6 +20,9 @@ import type {
   UpdateMediaAuthPayload,
   SubtitleOptions,
   SyncSnapshot,
+  RecoverySummary,
+  RecoveryIssue,
+  RecoveryIssueKind,
 } from './types';
 import {
   ApiResponseError,
@@ -38,7 +41,15 @@ export {
   setBackendClient,
   resetBackendClient,
 };
-export type { BackendClient, EventSubscription, EventSubscribeOptions, DesktopPreferences };
+export type {
+  BackendClient,
+  EventSubscription,
+  EventSubscribeOptions,
+  DesktopPreferences,
+  RecoverySummary,
+  RecoveryIssue,
+  RecoveryIssueKind,
+};
 
 // ----------------------------------------------------------------------------
 // Jobs Domain Facade
@@ -94,6 +105,10 @@ export async function setJobPriority(jobId: string, priority: JobPriority): Prom
 
 export async function getJobs(): Promise<Job[]> {
   return getBackendClient().jobs.getJobs();
+}
+
+export async function getRecoverySummary(): Promise<RecoverySummary> {
+  return getBackendClient().jobs.getRecoverySummary();
 }
 
 export async function getJob(id: string): Promise<Job> {

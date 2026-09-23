@@ -138,6 +138,12 @@ func (h *Handler) GetJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobs)
 }
 
+// GetRecoverySummary handles GET /api/v1/jobs/recovery-summary
+func (h *Handler) GetRecoverySummary(w http.ResponseWriter, r *http.Request) {
+	summary := h.manager.GetRecoverySummary()
+	writeJSON(w, http.StatusOK, summary)
+}
+
 // GetJob handles GET /api/v1/jobs/{id}
 func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]

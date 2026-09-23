@@ -17,8 +17,15 @@ func (m *Manager) Recover(ctx context.Context) {
 
 // recover attempts to reconnect to running engine downloads on startup.
 func (m *Manager) recover(ctx context.Context) {
+	var summary RecoverySummary
+	defer func() {
+		m.mu.Lock()
+		m.recoverySummary = summary.Clone()
+		m.mu.Unlock()
+	}()
+
 	if m.execRepo != nil {
-		m.reconcileFinalizationJournal(ctx)
+		m.reconcileFinalizationJournal(ctx, &summary)
 	}
 
 	jobs, err := m.repo.ListRecoverable(ctx)
@@ -44,17 +51,21 @@ func (m *Manager) recover(ctx context.Context) {
 				j.SpeedBytesPerSecond = 0
 				j.ETASeconds = 0
 				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("recovery error: failed to persist failed status for job %s: %v", j.ID, updateErr)
+					continue
+				}
 				m.publish(EventJobFailed, j)
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueTorrentMetadataUnrecoverable})
 				continue
 			}
 		}
 		m.hydrateJob(ctx, j)
-		m.recoverJob(ctx, j)
+		m.recoverJob(ctx, j, &summary)
 	}
 }
 
-func (m *Manager) recoverJob(ctx context.Context, j *Job) {
+func (m *Manager) recoverJob(ctx context.Context, j *Job, summary *RecoverySummary) {
 	log.Printf("recovery: recovering job %s (status=%s, engine=%s, engineID=%s)", j.ID, j.Status, j.Engine, j.EngineID)
 
 	// 1. QUEUED jobs: In V0.5, QUEUED jobs are ready to execute and waiting for Scheduler capacity.
@@ -89,22 +100,37 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 				j.Status = StatusFailed
 				j.Error = "Torrent metainfo record missing during restart recovery. Retry the job."
 				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("recovery error: failed to persist failed status for analyzing job %s: %v", j.ID, updateErr)
+					return
+				}
 				m.publish(EventJobFailed, j)
+				if summary != nil {
+					summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueTorrentMetadataUnrecoverable})
+				}
 				return
 			}
 			if _, err := os.Stat(torrentFilePath); os.IsNotExist(err) {
 				j.Status = StatusFailed
 				j.Error = fmt.Sprintf("Torrent metainfo file missing at %s during restart recovery. Retry the job.", torrentFilePath)
 				j.UpdatedAt = time.Now()
-				m.repo.Update(ctx, j)
+				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+					log.Printf("recovery error: failed to persist failed status for analyzing job %s: %v", j.ID, updateErr)
+					return
+				}
 				m.publish(EventJobFailed, j)
+				if summary != nil {
+					summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueTorrentMetadataUnrecoverable})
+				}
 				return
 			}
 		}
 
 		log.Printf("recovery: resuming metadata acquisition for analyzing torrent job %s (source=%s, file=%s)", j.ID, j.Source, torrentFilePath)
 		m.publish(EventJobUpdated, j)
+		if summary != nil {
+			summary.RestartedMetadataAcquisitions++
+		}
 		go m.acquireTorrentMetadata(j.ID, j.Source, torrentFilePath)
 		return
 	}
@@ -117,8 +143,15 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist failed status for media job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobFailed, j)
+		if summary != nil {
+			summary.InterruptedMediaJobs++
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueInterruptedMedia})
+		}
 		return
 	}
 
@@ -128,8 +161,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			j.Status = StatusFailed
 			j.Error = "Torrent metadata was lost during restart. Retry the job."
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("recovery error: failed to persist failed status for awaiting_selection job %s: %v", j.ID, updateErr)
+				return
+			}
 			m.publish(EventJobFailed, j)
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueTorrentMetadataUnrecoverable})
+			}
 			return
 		}
 		eng, ok := m.engines.Get(j.Engine)
@@ -137,8 +176,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			j.Status = StatusFailed
 			j.Error = "qBittorrent engine not available."
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("recovery error: failed to persist failed status for awaiting_selection job %s: %v", j.ID, updateErr)
+				return
+			}
 			m.publish(EventJobFailed, j)
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueEngineUnavailable})
+			}
 			return
 		}
 		_, err := eng.Status(ctx, j)
@@ -146,8 +191,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			j.Status = StatusFailed
 			j.Error = "Torrent was removed from qBittorrent during restart. Retry the job."
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("recovery error: failed to persist failed status for awaiting_selection job %s: %v", j.ID, updateErr)
+				return
+			}
 			m.publish(EventJobFailed, j)
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueExternalStateUnrecoverable})
+			}
 			return
 		}
 		log.Printf("recovery: torrent job %s still in awaiting_selection, keeping state", j.ID)
@@ -163,8 +214,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist failed status for active job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobFailed, j)
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueExternalStateUnrecoverable})
+		}
 		return
 	}
 
@@ -176,8 +233,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist failed status for active job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobFailed, j)
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueEngineUnavailable})
+		}
 		return
 	}
 	if j.Type == TypeTorrent && j.EngineID != "" {
@@ -200,8 +263,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist failed status for active job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobFailed, j)
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueExternalStateUnrecoverable})
+		}
 		return
 	}
 
@@ -225,8 +294,14 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 			j.Name = status.FileName
 		}
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist reattached status for job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.addActive(j)
+		if summary != nil {
+			summary.ReattachedTransfers++
+		}
 		m.publish(EventJobUpdated, j)
 
 	case StatusPaused:
@@ -278,8 +353,12 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist failed status for job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobFailed, j)
+		// Discovered current state from external engine, not a failure caused by restart recovery.
 
 	case StatusCancelled:
 		log.Printf("recovery: job %s was cancelled in engine", j.ID)
@@ -287,7 +366,10 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist cancelled status for job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobCancelled, j)
 
 	default:
@@ -297,7 +379,13 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job) {
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
+		if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+			log.Printf("recovery error: failed to persist failed status for job %s: %v", j.ID, updateErr)
+			return
+		}
 		m.publish(EventJobFailed, j)
+		if summary != nil {
+			summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueExternalStateUnrecoverable})
+		}
 	}
 }

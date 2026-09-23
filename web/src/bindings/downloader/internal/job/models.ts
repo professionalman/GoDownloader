@@ -222,6 +222,41 @@ export interface QueuedJob {
 }
 
 /**
+ * RecoveryIssue represents a specific job issue identified during startup recovery.
+ */
+export interface RecoveryIssue {
+    "jobId": string;
+    "kind": RecoveryIssueKind;
+}
+
+/**
+ * RecoveryIssueKind represents a typed, sanitized classification of a recovery intervention.
+ */
+export enum RecoveryIssueKind {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    RecoveryIssueInterruptedMedia = "interrupted_media",
+    RecoveryIssueFinalizationFailed = "finalization_failed",
+    RecoveryIssueEngineUnavailable = "engine_unavailable",
+    RecoveryIssueExternalStateUnrecoverable = "external_state_unrecoverable",
+    RecoveryIssueTorrentMetadataUnrecoverable = "torrent_metadata_unrecoverable",
+};
+
+/**
+ * RecoverySummary provides an immutable snapshot of actual startup recovery actions.
+ */
+export interface RecoverySummary {
+    "reconciledFinalizations": number;
+    "reattachedTransfers": number;
+    "restartedMetadataAcquisitions": number;
+    "interruptedMediaJobs": number;
+    "issues"?: RecoveryIssue[] | null;
+}
+
+/**
  * SubtitleCapabilities represents the subtitle capabilities discovered during analysis.
  */
 export interface SubtitleCapabilities {

@@ -224,6 +224,14 @@ func (s *DesktopService) GetJobs() ([]job.Job, error) {
 	return jobs, nil
 }
 
+func (s *DesktopService) GetRecoverySummary() (*job.RecoverySummary, error) {
+	if s.app == nil || s.app.Manager() == nil {
+		return &job.RecoverySummary{}, nil
+	}
+	summary := s.app.Manager().GetRecoverySummary()
+	return &summary, nil
+}
+
 func (s *DesktopService) GetJob(id string) (*job.Job, error) {
 	j, err := s.app.Manager().Get(context.Background(), id)
 	if err != nil {

@@ -138,6 +138,10 @@ export function GetQueueSnapshot(): $CancellablePromise<job$0.QueueSnapshot | nu
     return $Call.ByID(3910836674);
 }
 
+export function GetRecoverySummary(): $CancellablePromise<job$0.RecoverySummary | null> {
+    return $Call.ByID(2766382340);
+}
+
 export function GetSettings(): $CancellablePromise<settings$0.AppSettings | null> {
     return $Call.ByID(682518218);
 }

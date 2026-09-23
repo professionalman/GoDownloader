@@ -6,6 +6,7 @@ export {
     JobPriority,
     JobStatus,
     QueueAction,
+    RecoveryIssueKind,
     SubtitleFormat,
     SubtitleMode,
     TorrentFilePriority
@@ -23,6 +24,8 @@ export type {
     MediaInfo,
     QueueSnapshot,
     QueuedJob,
+    RecoveryIssue,
+    RecoverySummary,
     SubtitleCapabilities,
     SubtitleOptions,
     SubtitleTrack,

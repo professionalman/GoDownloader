@@ -59,6 +59,7 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/sync/snapshot", h.GetSyncSnapshot).Methods("GET")
 	api.HandleFunc("/jobs/batch", h.CreateBatchJobs).Methods("POST")
 	api.HandleFunc("/jobs/bulk", h.BulkAction).Methods("POST")
+	api.HandleFunc("/jobs/recovery-summary", h.GetRecoverySummary).Methods("GET")
 	api.HandleFunc("/jobs", h.CreateJob).Methods("POST")
 	api.HandleFunc("/jobs", h.GetJobs).Methods("GET")
 	api.HandleFunc("/jobs/torrent", h.CreateTorrentJob).Methods("POST")

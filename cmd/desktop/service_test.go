@@ -10,6 +10,7 @@ import (
 
 	"downloader/internal/app"
 	"downloader/internal/config"
+	"downloader/internal/database"
 	"downloader/internal/job"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -115,6 +116,32 @@ func TestDesktopService_Basics(t *testing.T) {
 	}
 	if len(jobs) != 0 {
 		t.Fatalf("expected 0 jobs, got %d", len(jobs))
+	}
+
+	// Test RecoverySummary: GetRecoverySummary returns typed snapshot
+	recSummary, err := svc.GetRecoverySummary()
+	if err != nil {
+		t.Fatalf("GetRecoverySummary failed: %v", err)
+	}
+	if recSummary == nil {
+		t.Fatal("expected non-nil recovery summary")
+	}
+	if recSummary.ReconciledFinalizations != 0 || recSummary.ReattachedTransfers != 0 ||
+		recSummary.RestartedMetadataAcquisitions != 0 || recSummary.InterruptedMediaJobs != 0 || len(recSummary.Issues) != 0 {
+		t.Errorf("expected clean recovery summary, got %+v", recSummary)
+	}
+
+	// Repeated reads return identical values
+	recSummary2, err := svc.GetRecoverySummary()
+	if err != nil || recSummary2 == nil {
+		t.Fatalf("repeated GetRecoverySummary failed: %v", err)
+	}
+	if recSummary.ReconciledFinalizations != recSummary2.ReconciledFinalizations ||
+		recSummary.ReattachedTransfers != recSummary2.ReattachedTransfers ||
+		recSummary.RestartedMetadataAcquisitions != recSummary2.RestartedMetadataAcquisitions ||
+		recSummary.InterruptedMediaJobs != recSummary2.InterruptedMediaJobs ||
+		len(recSummary.Issues) != len(recSummary2.Issues) {
+		t.Errorf("expected identical repeated summary reads")
 	}
 
 	// Test Settings: GetSettings returns settings
@@ -510,6 +537,100 @@ func TestDesktopService_DiagnosticCommandDispatch(t *testing.T) {
 	// 6. Test invalid autostart value rejected
 	if dispatchArg("--set-autostart=invalid") {
 		t.Fatal("expected invalid autostart to be rejected")
+	}
+}
+
+func TestDesktopService_RestartRecovery_InterruptedMediaAcceptance(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfg := config.New()
+	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+
+	// Pre-populate DB with an active media job before App start
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to initialize db: %v", err)
+	}
+	jobRepo := database.NewSQLiteJobRepository(db)
+	now := time.Now().Truncate(time.Second)
+	interruptedJob := &job.Job{
+		ID:        "interrupted-media-acceptance",
+		Source:    "https://example.com/watch?v=acceptance_video",
+		Name:      "acceptance_video.mp4",
+		Status:    job.StatusDownloading,
+		Type:      job.TypeMedia,
+		Engine:    "ytdlp",
+		EngineID:  "yt-acceptance-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := jobRepo.Create(context.Background(), interruptedJob); err != nil {
+		t.Fatalf("failed to create pre-restart job: %v", err)
+	}
+	_ = db.Close()
+
+	// Launch App runtime
+	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
+	if err != nil {
+		t.Fatalf("failed to create app: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := appInstance.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = appInstance.Shutdown(shutdownCtx)
+	}()
+
+	svc := NewDesktopService(appInstance, tmpDir)
+
+	// 1. RecoverySummary reflects the interrupted media job
+	summary, err := svc.GetRecoverySummary()
+	if err != nil {
+		t.Fatalf("GetRecoverySummary failed: %v", err)
+	}
+	if summary.InterruptedMediaJobs != 1 {
+		t.Errorf("expected InterruptedMediaJobs=1, got %d", summary.InterruptedMediaJobs)
+	}
+	if len(summary.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(summary.Issues))
+	}
+	if summary.Issues[0].JobID != "interrupted-media-acceptance" {
+		t.Errorf("expected JobID=interrupted-media-acceptance, got %s", summary.Issues[0].JobID)
+	}
+	if summary.Issues[0].Kind != job.RecoveryIssueInterruptedMedia {
+		t.Errorf("expected Kind=interrupted_media, got %s", summary.Issues[0].Kind)
+	}
+
+	// 2. Current job state query returns StatusFailed
+	j, err := svc.GetJob("interrupted-media-acceptance")
+	if err != nil {
+		t.Fatalf("GetJob failed: %v", err)
+	}
+	if j.Status != job.StatusFailed {
+		t.Errorf("expected job StatusFailed, got %s", j.Status)
+	}
+
+	// 3. Current StateSync snapshot also returns StatusFailed
+	snapshot, err := svc.GetSyncSnapshot()
+	if err != nil {
+		t.Fatalf("GetSyncSnapshot failed: %v", err)
+	}
+	var foundInSnapshot bool
+	for _, sj := range snapshot.Jobs {
+		if sj.ID == "interrupted-media-acceptance" {
+			foundInSnapshot = true
+			if sj.Status != job.StatusFailed {
+				t.Errorf("expected snapshot job StatusFailed, got %s", sj.Status)
+			}
+		}
+	}
+	if !foundInSnapshot {
+		t.Error("expected interrupted job to be present in sync snapshot")
 	}
 }
 

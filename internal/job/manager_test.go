@@ -247,10 +247,11 @@ func (r *fakeEngineRegistry) Detect(url string) string {
 }
 
 type fakeJobRepository struct {
-	mu        sync.Mutex
-	jobs      map[string]*Job
-	updateErr error
-	deleteErr error
+	mu                 sync.Mutex
+	jobs               map[string]*Job
+	updateErr          error
+	deleteErr          error
+	listRecoverableErr error
 }
 
 func newFakeJobRepository() *fakeJobRepository {
@@ -328,6 +329,9 @@ func (f *fakeJobRepository) List(ctx context.Context) ([]Job, error) {
 func (f *fakeJobRepository) ListRecoverable(ctx context.Context) ([]Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.listRecoverableErr != nil {
+		return nil, f.listRecoverableErr
+	}
 	var list []Job
 	for _, j := range f.jobs {
 		if j.Status == StatusDownloading || j.Status == StatusQueued || j.Status == StatusAnalyzing || j.Status == StatusAwaitingSelection || j.Status == StatusSeeding {

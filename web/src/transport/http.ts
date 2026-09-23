@@ -25,6 +25,7 @@ import type {
   SubtitleOptions,
   SelectFormatRequest,
   SyncSnapshot,
+  RecoverySummary,
 } from '../types';
 import {
   ApiResponseError,
@@ -391,6 +392,11 @@ class HttpJobsOperations implements JobsOperations {
 
   async openFolder(): Promise<void> {
     await authFetch(`${API_BASE}/open-folder`, { method: 'POST' });
+  }
+
+  async getRecoverySummary(): Promise<RecoverySummary> {
+    const res = await authFetch(`${API_BASE}/jobs/recovery-summary`);
+    return handleResponse<RecoverySummary>(res);
   }
 }
 

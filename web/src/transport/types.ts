@@ -20,6 +20,7 @@ import type {
   TorrentFile,
   TorrentFileSelection,
   SyncSnapshot,
+  RecoverySummary,
 } from '../types';
 
 /** Error class that carries the backend error code alongside the message. */
@@ -116,6 +117,7 @@ export interface JobsOperations {
   ): Promise<{ trackers: { url: string }[] }>;
   updateSeedingPolicy(jobId: string, policy: SeedingPolicy): Promise<Job>;
   openFolder(): Promise<void>;
+  getRecoverySummary(): Promise<RecoverySummary>;
 }
 
 /** Domain: Queue management and scheduling */
