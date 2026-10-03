@@ -182,6 +182,17 @@ export interface DesktopPreferencesOperations {
   setAutostart(enabled: boolean): Promise<DesktopPreferences>;
 }
 
+/** Result of diagnostic support bundle export operation */
+export interface SupportBundleExportResult {
+  status: 'saved' | 'cancelled' | string;
+  fileName?: string;
+}
+
+/** Domain: Diagnostic support bundle generation */
+export interface SupportBundleOperations {
+  exportBundle(): Promise<SupportBundleExportResult>;
+}
+
 /** Complete transport-neutral client interface */
 export interface BackendClient {
   readonly jobs: JobsOperations;
@@ -192,5 +203,5 @@ export interface BackendClient {
   readonly mediaAuth: MediaAuthOperations;
   readonly sync: SyncOperations;
   readonly desktopPreferences?: DesktopPreferencesOperations;
+  readonly supportBundle?: SupportBundleOperations;
 }
-

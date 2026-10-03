@@ -72,6 +72,7 @@ vi.mock('../bindings/downloader/cmd/desktop/desktopservice', () => ({
   GetDesktopPreferences: vi.fn(),
   SetCloseToTray: vi.fn(),
   SetAutostart: vi.fn(),
+  ExportSupportBundle: vi.fn(),
 }));
 
 describe('Desktop Transport Layer', () => {
@@ -549,6 +550,43 @@ describe('Desktop Transport Layer', () => {
       await expect(
         desktopBackendClient.desktopPreferences?.setAutostart(true)
       ).rejects.toThrow('permission denied');
+    });
+  });
+
+  describe('supportBundle domain', () => {
+    it('calls ExportSupportBundle and returns saved result with fileName', async () => {
+      const mockResult = { status: 'saved', fileName: 'godownloader-support-bundle.zip' };
+      vi.mocked(DesktopService.ExportSupportBundle).mockResolvedValue(mockResult as any);
+
+      const res = await desktopBackendClient.supportBundle?.exportBundle();
+      expect(DesktopService.ExportSupportBundle).toHaveBeenCalledTimes(1);
+      expect(res).toEqual({
+        status: 'saved',
+        fileName: 'godownloader-support-bundle.zip',
+      });
+    });
+
+    it('returns cancelled status when user cancels native save dialog', async () => {
+      vi.mocked(DesktopService.ExportSupportBundle).mockResolvedValue({ status: 'cancelled' } as any);
+
+      const res = await desktopBackendClient.supportBundle?.exportBundle();
+      expect(DesktopService.ExportSupportBundle).toHaveBeenCalledTimes(1);
+      expect(res).toEqual({ status: 'cancelled' });
+    });
+
+    it('returns cancelled status if native call resolves null', async () => {
+      vi.mocked(DesktopService.ExportSupportBundle).mockResolvedValue(null as any);
+
+      const res = await desktopBackendClient.supportBundle?.exportBundle();
+      expect(res).toEqual({ status: 'cancelled' });
+    });
+
+    it('wraps IPC errors into typed ApiResponseError', async () => {
+      vi.mocked(DesktopService.ExportSupportBundle).mockRejectedValue(new Error('[INTERNAL_ERROR] export failed'));
+
+      await expect(
+        desktopBackendClient.supportBundle?.exportBundle()
+      ).rejects.toThrow('export failed');
     });
   });
 });

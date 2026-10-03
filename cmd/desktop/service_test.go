@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"downloader/internal/config"
 	"downloader/internal/database"
 	"downloader/internal/job"
+	"downloader/internal/supportbundle"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -631,6 +633,156 @@ func TestDesktopService_RestartRecovery_InterruptedMediaAcceptance(t *testing.T)
 	}
 	if !foundInSnapshot {
 		t.Error("expected interrupted job to be present in sync snapshot")
+	}
+}
+
+func TestDesktopService_ExportSupportBundle(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfg := config.New()
+	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+
+	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
+	if err != nil {
+		t.Fatalf("failed to create app: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := appInstance.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = appInstance.Shutdown(shutdownCtx)
+	}()
+
+	svc := NewDesktopService(appInstance, tmpDir)
+
+	// 1. User cancels save dialog: builder must not be invoked, status cancelled
+	builderCalled := false
+	svc.setSaveDialogRunner(func(defaultFilename string) (string, error) {
+		return "", nil // user hit Cancel
+	})
+	svc.setBundleBuilder(func(ctx context.Context, destPath string, host supportbundle.HostSnapshot) (supportbundle.SupportBundleExportResult, error) {
+		builderCalled = true
+		return supportbundle.SupportBundleExportResult{}, nil
+	})
+
+	res, err := svc.ExportSupportBundle()
+	if err != nil {
+		t.Fatalf("expected nil error on cancel, got %v", err)
+	}
+	if res.Status != "cancelled" {
+		t.Errorf("expected status 'cancelled', got %q", res.Status)
+	}
+	if builderCalled {
+		t.Error("expected bundle builder NOT to be called when user cancelled")
+	}
+
+	// 2. Save dialog error: fails cleanly
+	svc.setSaveDialogRunner(func(defaultFilename string) (string, error) {
+		return "", errors.New("dialog crashed")
+	})
+	res, err = svc.ExportSupportBundle()
+	if err == nil {
+		t.Fatal("expected error when save dialog fails")
+	}
+
+	// 3. Successful export: builder invoked once, base filename returned, status saved
+	targetPath := filepath.Join(tmpDir, "godownloader-support-bundle.zip")
+	var capturedHost supportbundle.HostSnapshot
+	var capturedDest string
+	svc.setSaveDialogRunner(func(defaultFilename string) (string, error) {
+		return targetPath, nil
+	})
+	svc.setBundleBuilder(func(ctx context.Context, destPath string, host supportbundle.HostSnapshot) (supportbundle.SupportBundleExportResult, error) {
+		builderCalled = true
+		capturedDest = destPath
+		capturedHost = host
+		return supportbundle.SupportBundleExportResult{
+			Status:   "saved",
+			FileName: filepath.Base(destPath),
+		}, nil
+	})
+
+	builderCalled = false
+	res, err = svc.ExportSupportBundle()
+	if err != nil {
+		t.Fatalf("expected successful export, got %v", err)
+	}
+	if !builderCalled {
+		t.Error("expected bundle builder to be called")
+	}
+	if res.Status != "saved" {
+		t.Errorf("expected status 'saved', got %q", res.Status)
+	}
+	if res.FileName != "godownloader-support-bundle.zip" {
+		t.Errorf("expected base filename 'godownloader-support-bundle.zip', got %q", res.FileName)
+	}
+	if capturedDest != targetPath {
+		t.Errorf("expected capturedDest %q, got %q", targetPath, capturedDest)
+	}
+	if capturedHost.DataRootKind != "appdata" {
+		t.Errorf("expected DataRootKind 'appdata', got %q", capturedHost.DataRootKind)
+	}
+	if capturedHost.DataRootNormalized != "%APPDATA%\\GoDownloader" {
+		t.Errorf("expected DataRootNormalized '%%APPDATA%%\\GoDownloader', got %q", capturedHost.DataRootNormalized)
+	}
+
+	// 4. Builder failure: generic safe error, destination path must NOT leak into error
+	secretPath := filepath.Join(tmpDir, "secret-user-vault", "output.zip")
+	svc.setSaveDialogRunner(func(defaultFilename string) (string, error) {
+		return secretPath, nil
+	})
+	svc.setBundleBuilder(func(ctx context.Context, destPath string, host supportbundle.HostSnapshot) (supportbundle.SupportBundleExportResult, error) {
+		return supportbundle.SupportBundleExportResult{}, errors.New("disk write failure")
+	})
+
+	res, err = svc.ExportSupportBundle()
+	if err == nil {
+		t.Fatal("expected error when builder fails")
+	}
+	errMsg := err.Error()
+	if strings.Contains(errMsg, secretPath) || strings.Contains(errMsg, "secret-user-vault") {
+		t.Errorf("error message leaked destination path: %q", errMsg)
+	}
+}
+
+func TestNormalizeDataRoot(t *testing.T) {
+	// Normal APPDATA
+	kind, norm := normalizeDataRoot(`C:\Users\john_doe\AppData\Roaming\GoDownloader`)
+	if kind != "appdata" {
+		t.Errorf("normal APPDATA: kind = %q, want 'appdata'", kind)
+	}
+	if norm != `%APPDATA%\GoDownloader` {
+		t.Errorf("normal APPDATA: norm = %q, want '%%APPDATA%%\\GoDownloader'", norm)
+	}
+
+	// Temporarily redirected APPDATA (e.g. inside temp dir during isolated tests)
+	kindTemp, normTemp := normalizeDataRoot(`C:\Users\runneradmin\AppData\Local\Temp\isolated_appdata\GoDownloader`)
+	if kindTemp != "appdata" {
+		t.Errorf("redirected APPDATA: kind = %q, want 'appdata'", kindTemp)
+	}
+	if normTemp != `%APPDATA%\GoDownloader` {
+		t.Errorf("redirected APPDATA: norm = %q, want '%%APPDATA%%\\GoDownloader'", normTemp)
+	}
+
+	// Empty path
+	kindEmpty, normEmpty := normalizeDataRoot("")
+	if kindEmpty != "unknown" || normEmpty != "unknown" {
+		t.Errorf("empty path: got (%q, %q), want ('unknown', 'unknown')", kindEmpty, normEmpty)
+	}
+
+	// Verify no username or localappdata claim
+	for _, s := range []string{norm, normTemp} {
+		if strings.Contains(s, "john_doe") || strings.Contains(s, "runneradmin") {
+			t.Errorf("normalized token leaks username: %s", s)
+		}
+		if strings.Contains(strings.ToLower(s), "localappdata") {
+			t.Errorf("normalized token claims LOCALAPPDATA: %s", s)
+		}
 	}
 }
 

@@ -11,6 +11,8 @@ vi.mock('../api', () => ({
   getDesktopPreferences: vi.fn(),
   setCloseToTray: vi.fn(),
   setAutostart: vi.fn(),
+  hasSupportBundle: vi.fn(),
+  exportSupportBundle: vi.fn(),
 }));
 
 describe('SettingsPanel Desktop Preferences Integration', () => {
@@ -244,5 +246,144 @@ describe('SettingsPanel Desktop Preferences Integration', () => {
     // Escape dismissal
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(defaultProps.onClose).toHaveBeenCalled();
+  });
+});
+
+describe('SettingsPanel Diagnostics Section', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const defaultProps = {
+    settings: {
+      queue: { maxConcurrentDownloads: 3 },
+      storage: {
+        defaultDownloadDirectory: 'C:\\Downloads',
+        effectiveDefaultDownloadDirectory: 'C:\\Downloads',
+        temporaryDirectory: 'C:\\Temp',
+        effectiveTemporaryDirectory: 'C:\\Temp',
+        minimumFreeSpaceBytes: 1073741824,
+        effectiveMinimumFreeSpaceBytes: 1073741824,
+        defaultConflictPolicy: 'rename' as const,
+        effectiveDefaultConflictPolicy: 'rename' as const,
+        overrides: {
+          defaultDownloadDirectory: false,
+          temporaryDirectory: false,
+          minimumFreeSpaceBytes: false,
+          defaultConflictPolicy: false,
+        },
+      },
+      network: {
+        globalDownloadLimitBytesPerSecond: 0,
+        proxy: { mode: 'disabled' as const },
+        userAgent: '',
+        httpHeaders: [],
+        retryPolicy: { maxAttempts: 3, retryWaitSeconds: 5 },
+        timeoutPolicy: { connectTimeoutSeconds: 30, requestTimeoutSeconds: 60 },
+        directConnections: { split: 5, maxConnectionsPerServer: 1, minSplitSizeBytes: 20971520 },
+      },
+      torrent: {
+        downloadLimitBytesPerSecond: 0,
+        uploadLimitBytesPerSecond: 0,
+        seedingPolicy: { mode: 'none' as const },
+        applyTrackerSubscriptionsToNewTorrents: false,
+        manageQBitGlobalNetworkSettings: false,
+      },
+    },
+    onSave: vi.fn().mockResolvedValue(undefined),
+    onClose: vi.fn(),
+  };
+
+  it('hides Diagnostics tab when supportBundle is not supported (browser mode)', () => {
+    vi.mocked(api.hasSupportBundle).mockReturnValue(false);
+
+    render(<SettingsPanel {...defaultProps} />);
+
+    expect(screen.queryByRole('button', { name: /diagnostics/i })).not.toBeInTheDocument();
+    expect(screen.queryByText('Diagnostic Support Bundle')).not.toBeInTheDocument();
+  });
+
+  it('renders Diagnostics tab when supportBundle is supported (desktop mode)', () => {
+    vi.mocked(api.hasSupportBundle).mockReturnValue(true);
+
+    render(<SettingsPanel {...defaultProps} />);
+
+    expect(screen.getByRole('button', { name: /diagnostics/i })).toBeInTheDocument();
+  });
+
+  it('navigates to Diagnostics section and displays privacy description and export button', () => {
+    vi.mocked(api.hasSupportBundle).mockReturnValue(true);
+
+    render(<SettingsPanel {...defaultProps} />);
+
+    const diagTab = screen.getByRole('button', { name: /diagnostics/i });
+    fireEvent.click(diagTab);
+
+    expect(screen.getByText('Diagnostic Support Bundle')).toBeInTheDocument();
+    expect(screen.getByText(/Creates a diagnostic archive containing runtime and configuration facts/)).toBeInTheDocument();
+    expect(screen.getByText(/It does not include download URLs, downloaded file names, personal paths/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export Support Bundle' })).toBeInTheDocument();
+  });
+
+  it('handles successful bundle export and displays filename only', async () => {
+    vi.mocked(api.hasSupportBundle).mockReturnValue(true);
+    vi.mocked(api.exportSupportBundle).mockResolvedValue({
+      status: 'saved',
+      fileName: 'godownloader-support-20261003.zip',
+    });
+
+    render(<SettingsPanel {...defaultProps} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /diagnostics/i }));
+    const exportBtn = screen.getByRole('button', { name: 'Export Support Bundle' });
+
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => {
+      expect(api.exportSupportBundle).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/godownloader-support-20261003\.zip/)).toBeInTheDocument();
+    });
+
+    // Ensure full path is never displayed
+    expect(screen.queryByText(/C:\\/)).not.toBeInTheDocument();
+  });
+
+  it('handles user cancellation without error styling or alert role', async () => {
+    vi.mocked(api.hasSupportBundle).mockReturnValue(true);
+    vi.mocked(api.exportSupportBundle).mockResolvedValue({
+      status: 'cancelled',
+    });
+
+    render(<SettingsPanel {...defaultProps} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /diagnostics/i }));
+    const exportBtn = screen.getByRole('button', { name: 'Export Support Bundle' });
+
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('Support bundle export was cancelled.')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('handles export error and displays accessible alert', async () => {
+    vi.mocked(api.hasSupportBundle).mockReturnValue(true);
+    vi.mocked(api.exportSupportBundle).mockRejectedValue(new Error('Native dialog failed'));
+
+    render(<SettingsPanel {...defaultProps} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /diagnostics/i }));
+    const exportBtn = screen.getByRole('button', { name: 'Export Support Bundle' });
+
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Native dialog failed');
+    });
   });
 });

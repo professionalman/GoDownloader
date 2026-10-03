@@ -38,6 +38,8 @@ import {
   type SyncOperations,
   type DesktopPreferences,
   type DesktopPreferencesOperations,
+  type SupportBundleExportResult,
+  type SupportBundleOperations,
 } from './types';
 
 /** Error translation converting Go [ERROR_CODE] error prefixes into typed ApiResponseError */
@@ -542,6 +544,19 @@ class DesktopPreferencesOperationsImpl implements DesktopPreferencesOperations {
   }
 }
 
+class SupportBundleOperationsImpl implements SupportBundleOperations {
+  async exportBundle(): Promise<SupportBundleExportResult> {
+    const res = await DesktopService.ExportSupportBundle().catch(wrapIpcError);
+    if (!res) {
+      return { status: 'cancelled' };
+    }
+    return {
+      status: res.status,
+      fileName: res.fileName,
+    };
+  }
+}
+
 /** DesktopBackendClient coordinates all domains via native Wails v3 IPC and Events */
 export class DesktopBackendClient implements BackendClient {
   readonly jobs: JobsOperations = new DesktopJobsOperations();
@@ -552,6 +567,7 @@ export class DesktopBackendClient implements BackendClient {
   readonly mediaAuth: MediaAuthOperations = new DesktopMediaAuthOperations();
   readonly sync: SyncOperations = new DesktopSyncOperations();
   readonly desktopPreferences: DesktopPreferencesOperations = new DesktopPreferencesOperationsImpl();
+  readonly supportBundle: SupportBundleOperations = new SupportBundleOperationsImpl();
 }
 
 /** Singleton instance of the desktop backend client */

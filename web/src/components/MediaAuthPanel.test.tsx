@@ -14,6 +14,9 @@ vi.mock('../api', () => ({
   updateCategory: vi.fn(),
   deleteCategory: vi.fn(),
   getTrackerSources: vi.fn().mockResolvedValue([]),
+  getDesktopPreferences: vi.fn().mockResolvedValue(null),
+  hasSupportBundle: vi.fn().mockReturnValue(false),
+  exportSupportBundle: vi.fn(),
 }));
 
 describe('MediaAuthPanel Component', () => {

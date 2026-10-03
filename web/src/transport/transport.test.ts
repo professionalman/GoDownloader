@@ -22,6 +22,8 @@ import {
   getSyncSnapshot,
   getRecoverySummary,
   subscribeEvents,
+  hasSupportBundle,
+  exportSupportBundle,
 } from '../api';
 import { mountApp } from '../bootstrap';
 import { act } from '@testing-library/react';
@@ -581,6 +583,35 @@ describe('Framework-Neutral Frontend Transport Contracts (DSK-2)', () => {
     const res = await getRecoverySummary();
     expect(res.reconciledFinalizations).toBe(2);
     expect(fake.jobs.getRecoverySummary).toHaveBeenCalledTimes(1);
+
+    resetBackendClient();
+  });
+
+  // R. HttpBackendClient leaves supportBundle undefined
+  it('R. HttpBackendClient leaves supportBundle undefined', () => {
+    const client: BackendClient = httpBackendClient;
+    expect(client.supportBundle).toBeUndefined();
+    expect(hasSupportBundle()).toBe(false);
+  });
+
+  // S. Facade exportSupportBundle returns null when capability is absent
+  it('S. Facade exportSupportBundle returns null when capability is absent', async () => {
+    resetBackendClient();
+    const res = await exportSupportBundle();
+    expect(res).toBeNull();
+  });
+
+  // T. Facade exportSupportBundle routes through supportBundle operations when present
+  it('T. Facade exportSupportBundle routes through supportBundle operations when present', async () => {
+    const fake = new FakeBackendClient();
+    const mockExport = vi.fn(async () => ({ status: 'saved', fileName: 'test.zip' }));
+    (fake as any).supportBundle = { exportBundle: mockExport };
+    setBackendClient(fake);
+
+    expect(hasSupportBundle()).toBe(true);
+    const res = await exportSupportBundle();
+    expect(res).toEqual({ status: 'saved', fileName: 'test.zip' });
+    expect(mockExport).toHaveBeenCalledTimes(1);
 
     resetBackendClient();
   });

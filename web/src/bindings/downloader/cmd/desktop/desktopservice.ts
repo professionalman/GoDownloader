@@ -26,6 +26,9 @@ import * as settings$0 from "../../internal/settings/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as storage$0 from "../../internal/storage/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as supportbundle$0 from "../../internal/supportbundle/models.js";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
@@ -80,6 +83,14 @@ export function DeleteTrackerSource(id: string): $CancellablePromise<void> {
  */
 export function EmitDiagnosticEvent(token: string): $CancellablePromise<void> {
     return $Call.ByID(4230022879, token);
+}
+
+/**
+ * ExportSupportBundle prompts the user via native Windows Save File dialog
+ * and generates a privacy-safe diagnostic support bundle.
+ */
+export function ExportSupportBundle(): $CancellablePromise<supportbundle$0.SupportBundleExportResult | null> {
+    return $Call.ByID(3790769118);
 }
 
 export function GetBackendInstanceID(): $CancellablePromise<string> {

@@ -33,6 +33,7 @@ import {
   type EventSubscription,
   type EventSubscribeOptions,
   type DesktopPreferences,
+  type SupportBundleExportResult,
 } from './transport';
 
 export {
@@ -46,6 +47,7 @@ export type {
   EventSubscription,
   EventSubscribeOptions,
   DesktopPreferences,
+  SupportBundleExportResult,
   RecoverySummary,
   RecoveryIssue,
   RecoveryIssueKind,
@@ -342,5 +344,18 @@ export async function setCloseToTray(enabled: boolean): Promise<DesktopPreferenc
 export async function setAutostart(enabled: boolean): Promise<DesktopPreferences | null> {
   const ops = getBackendClient().desktopPreferences;
   return ops ? ops.setAutostart(enabled) : null;
+}
+
+// ----------------------------------------------------------------------------
+// Support Bundle Domain Facade
+// ----------------------------------------------------------------------------
+
+export function hasSupportBundle(): boolean {
+  return Boolean(getBackendClient().supportBundle);
+}
+
+export async function exportSupportBundle(): Promise<SupportBundleExportResult | null> {
+  const ops = getBackendClient().supportBundle;
+  return ops ? ops.exportBundle() : null;
 }
 

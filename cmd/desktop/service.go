@@ -22,6 +22,7 @@ import (
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
+	"downloader/internal/supportbundle"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -32,6 +33,12 @@ type autostartController interface {
 	EnableWithOptions(opts application.AutostartOptions) error
 	Disable() error
 }
+
+// saveDialogRunner abstracts native file save prompt for testability.
+type saveDialogRunner func(defaultFilename string) (string, error)
+
+// bundleBuilder abstracts ZIP bundle generation for testability.
+type bundleBuilder func(ctx context.Context, destPath string, host supportbundle.HostSnapshot) (supportbundle.SupportBundleExportResult, error)
 
 // DesktopPreferences represents user-configurable desktop lifecycle preferences.
 type DesktopPreferences struct {
@@ -84,6 +91,8 @@ type DesktopService struct {
 	mainWindow         *application.WebviewWindow
 	lifecycle          *DesktopLifecycle
 	autostart          autostartController
+	saveDialogFn       saveDialogRunner
+	bundleBuildFn      bundleBuilder
 	instanceID         string
 	dataRoot           string
 	coreInitCount      int
@@ -1118,6 +1127,108 @@ func (s *DesktopService) ShowNativeDialog(title, message string) {
 		}
 		dialog.Show()
 	}
+}
+
+func normalizeDataRoot(rawPath string) (kind string, normalized string) {
+	if strings.TrimSpace(rawPath) == "" {
+		return "unknown", "unknown"
+	}
+	return "appdata", "%APPDATA%\\GoDownloader"
+}
+
+func (s *DesktopService) setSaveDialogRunner(fn saveDialogRunner) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveDialogFn = fn
+}
+
+func (s *DesktopService) setBundleBuilder(fn bundleBuilder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bundleBuildFn = fn
+}
+
+// ExportSupportBundle prompts the user via native Windows Save File dialog
+// and generates a privacy-safe diagnostic support bundle.
+func (s *DesktopService) ExportSupportBundle() (*supportbundle.SupportBundleExportResult, error) {
+	s.mu.Lock()
+	dlgFn := s.saveDialogFn
+	buildFn := s.bundleBuildFn
+	dataRoot := s.dataRoot
+	lifecycle := s.lifecycle
+	autostartCtrl := s.autostart
+	appInst := s.app
+	wailsApp := s.wailsApp
+	mainWindow := s.mainWindow
+	s.mu.Unlock()
+
+	defaultFilename := fmt.Sprintf("godownloader-support-%s.zip", time.Now().UTC().Format("20060102-150405"))
+
+	var savePath string
+	var err error
+	if dlgFn != nil {
+		savePath, err = dlgFn(defaultFilename)
+	} else if wailsApp != nil && wailsApp.Dialog != nil {
+		dialog := wailsApp.Dialog.SaveFile().
+			SetFilename(defaultFilename).
+			AddFilter("ZIP Archive (*.zip)", "*.zip").
+			AddFilter("All Files (*.*)", "*.*")
+		if mainWindow != nil {
+			dialog.AttachToWindow(mainWindow)
+		}
+		savePath, err = dialog.PromptForSingleSelection()
+	} else {
+		return nil, makeIPCError(job.ErrInternalError, "native dialog manager unavailable")
+	}
+
+	if err != nil {
+		return nil, makeIPCError(job.ErrInternalError, "native save dialog failed")
+	}
+
+	// User cancellation is normal non-error flow
+	if strings.TrimSpace(savePath) == "" {
+		return &supportbundle.SupportBundleExportResult{
+			Status: "cancelled",
+		}, nil
+	}
+
+	kind, norm := normalizeDataRoot(dataRoot)
+	closeToTray := true
+	if lifecycle != nil {
+		closeToTray = lifecycle.CloseToTray()
+	}
+	autostart := false
+	if autostartCtrl != nil {
+		if enabled, err := autostartCtrl.IsEnabled(); err == nil {
+			autostart = enabled
+		}
+	}
+
+	host := supportbundle.HostSnapshot{
+		DataRootKind:       kind,
+		DataRootNormalized: norm,
+		CloseToTray:        closeToTray,
+		AutostartEnabled:   autostart,
+	}
+
+	ctx := context.Background()
+	var res supportbundle.SupportBundleExportResult
+	if buildFn != nil {
+		res, err = buildFn(ctx, savePath, host)
+	} else {
+		provider := app.NewSupportSnapshotProvider(appInst)
+		builder := supportbundle.NewBuilder(provider)
+		res, err = builder.Build(ctx, savePath, host)
+	}
+
+	if err != nil {
+		// INVARIANT: Do not expose destination path in outward error messages
+		return nil, makeIPCError(job.ErrInternalError, "failed to export diagnostic support bundle")
+	}
+
+	res.FileName = filepath.Base(savePath)
+	res.Status = "saved"
+	return &res, nil
 }
 
 func (s *DesktopService) Quit() {

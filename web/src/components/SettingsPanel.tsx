@@ -1,6 +1,7 @@
 import {
   Activity,
   ArrowDownToLine,
+  FileArchive,
   FolderTree,
   Gauge,
   HardDrive,
@@ -24,6 +25,8 @@ import {
   getDesktopPreferences,
   setCloseToTray,
   setAutostart,
+  hasSupportBundle,
+  exportSupportBundle,
   type DesktopPreferences,
 } from '../api';
 import type { AppSettings, Category, FilenameConflictPolicy, UpdateSettingsPayload } from '../types';
@@ -37,9 +40,9 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-type SettingsSection = 'general' | 'storage' | 'categories' | 'media-auth' | 'network' | 'direct' | 'torrents' | 'trackers' | 'dependencies';
+type SettingsSection = 'general' | 'storage' | 'categories' | 'media-auth' | 'network' | 'direct' | 'torrents' | 'trackers' | 'dependencies' | 'diagnostics';
 
-const sections: Array<{ id: SettingsSection; label: string; icon: typeof Settings2 }> = [
+const baseSections: Array<{ id: SettingsSection; label: string; icon: typeof Settings2 }> = [
   { id: 'general', label: 'General', icon: Settings2 },
   { id: 'storage', label: 'Storage', icon: HardDrive },
   { id: 'categories', label: 'Categories', icon: FolderTree },
@@ -89,6 +92,39 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
   const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences | null>(null);
   const [desktopLoading, setDesktopLoading] = useState(false);
   const [desktopError, setDesktopError] = useState('');
+
+  const supportBundleSupported = hasSupportBundle();
+  const effectiveSections = supportBundleSupported
+    ? [...baseSections, { id: 'diagnostics' as SettingsSection, label: 'Diagnostics', icon: FileArchive }]
+    : baseSections;
+
+  const [bundleExporting, setBundleExporting] = useState(false);
+  const [bundleStatus, setBundleStatus] = useState<'idle' | 'exporting' | 'saved' | 'cancelled' | 'error'>('idle');
+  const [bundleFileName, setBundleFileName] = useState('');
+  const [bundleError, setBundleError] = useState('');
+
+  const handleExportSupportBundle = async () => {
+    setBundleExporting(true);
+    setBundleStatus('exporting');
+    setBundleError('');
+    try {
+      const result = await exportSupportBundle();
+      if (!result || result.status === 'cancelled') {
+        setBundleStatus('cancelled');
+      } else if (result.status === 'saved') {
+        setBundleStatus('saved');
+        setBundleFileName(result.fileName || '');
+      } else {
+        setBundleStatus('error');
+        setBundleError('Failed to export diagnostic support bundle.');
+      }
+    } catch (err: unknown) {
+      setBundleStatus('error');
+      setBundleError(err instanceof Error ? err.message : 'Failed to export diagnostic support bundle.');
+    } finally {
+      setBundleExporting(false);
+    }
+  };
 
   useEffect(() => {
     if (!settings) return;
@@ -229,7 +265,7 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
 
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <nav className="scrollbar-thin flex shrink-0 gap-1.5 overflow-x-auto border-b border-border bg-sidebar p-2 md:w-56 md:flex-col md:overflow-y-auto md:border-b-0 md:border-r" aria-label="Settings sections">
-            {sections.map((item) => {
+            {effectiveSections.map((item) => {
               const Icon = item.icon;
               return (
                 <button key={item.id} type="button" onClick={() => setSection(item.id)} aria-current={section === item.id ? 'true' : undefined} className={cx('flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-3 text-sm transition-colors', section === item.id ? 'bg-sidebar-accent text-foreground' : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground')}>
@@ -357,6 +393,49 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
                 ) : (
                   <div className="rounded-lg border border-dashed border-border bg-surface/50 px-4 py-10 text-center"><Gauge className="mx-auto size-5 text-muted-foreground" /><p className="mt-2 text-sm font-medium">No dependency application results</p><p className="mt-1 text-xs text-muted-foreground">Engine availability remains capability-driven and is reported on each job.</p></div>
                 )}
+              </div>
+            )}
+
+            {section === 'diagnostics' && supportBundleSupported && (
+              <div className="max-w-md space-y-5">
+                <SectionTitle
+                  title="Diagnostic Support Bundle"
+                  description="Export diagnostic information to help troubleshoot GoDownloader."
+                />
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Creates a diagnostic archive containing runtime and configuration facts.
+                  It does not include download URLs, downloaded file names, personal paths,
+                  credentials, raw database files, or application logs.
+                </p>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    disabled={bundleExporting}
+                    onClick={() => void handleExportSupportBundle()}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    {bundleExporting ? 'Exporting…' : 'Export Support Bundle'}
+                  </button>
+                </div>
+
+                <div aria-live="polite" className="text-xs space-y-1">
+                  {bundleStatus === 'saved' && (
+                    <p className="text-emerald-500 font-medium">
+                      Diagnostic support bundle exported successfully: {bundleFileName}
+                    </p>
+                  )}
+                  {bundleStatus === 'cancelled' && (
+                    <p className="text-muted-foreground">
+                      Support bundle export was cancelled.
+                    </p>
+                  )}
+                  {bundleStatus === 'error' && (
+                    <p role="alert" className="text-destructive font-medium">
+                      {bundleError || 'Failed to export diagnostic support bundle.'}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </form>

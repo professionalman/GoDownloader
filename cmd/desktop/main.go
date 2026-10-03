@@ -245,6 +245,12 @@ func main() {
 				go service.ShowNativeDialog("GoDownloader Verification", "Native dialog verification message")
 				return
 			}
+			if arg == "--trigger-export-support-bundle" {
+				go func() {
+					_, _ = service.ExportSupportBundle()
+				}()
+				return
+			}
 		}
 	}
 
@@ -290,6 +296,12 @@ func main() {
 						}
 						if arg == "--set-autostart=false" {
 							_, _ = service.SetAutostart(false)
+							break
+						}
+						if arg == "--trigger-export-support-bundle" {
+							go func() {
+								_, _ = service.ExportSupportBundle()
+							}()
 							break
 						}
 					}
