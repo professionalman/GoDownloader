@@ -2,16 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"downloader/internal/api"
 	"downloader/internal/app"
+	"downloader/internal/buildinfo"
 	"downloader/internal/config"
 	"downloader/internal/events"
 )
@@ -25,7 +28,7 @@ func main() {
 func run() error {
 	cfg := config.New()
 
-	log.Printf("Download Manager V0.7.1")
+	log.Printf("GoDownloader Server %s", buildinfo.Current().Version)
 	log.Printf("Listen: %s", cfg.ListenAddr)
 	log.Printf("Download dir: %s", cfg.DownloadDir)
 	log.Printf("Aria2 RPC: %s", cfg.Aria2RPCURL)
@@ -34,9 +37,29 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Parse optional --db flag or DB_PATH env
+	dbPath := os.Getenv("DB_PATH")
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if arg == "--db" && i+1 < len(os.Args) {
+			dbPath = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--db=") {
+			dbPath = strings.TrimPrefix(arg, "--db=")
+		}
+	}
+
+	var opts []app.Option
+	if dbPath != "" {
+		opts = append(opts, app.WithDBPath(dbPath))
+	}
+
 	// Initialize reusable application runtime
-	application, err := app.New(ctx, cfg)
+	application, err := app.New(ctx, cfg, opts...)
 	if err != nil {
+		if errors.Is(err, app.ErrRuntimeAlreadyOwned) {
+			return fmt.Errorf("GoDownloader runtime is already using this data store")
+		}
 		return fmt.Errorf("failed to initialize application runtime: %w", err)
 	}
 	defer func() {
@@ -46,6 +69,10 @@ func run() error {
 			log.Printf("application shutdown error: %v", err)
 		}
 	}()
+
+	if err := cfg.EnsureDirectories(); err != nil {
+		return fmt.Errorf("failed to create server directories: %w", err)
+	}
 
 	// Start application background tasks and recovery
 	if err := application.Start(ctx); err != nil {

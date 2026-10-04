@@ -26,21 +26,19 @@ type Config struct {
 }
 
 // New creates a Config populated from environment variables with sensible defaults.
+// Configuration construction is pure and performs zero filesystem mutations.
 func New() *Config {
 	downloadDir := getEnv("DOWNLOAD_DIR", "./downloads")
 	absDir, err := filepath.Abs(downloadDir)
 	if err != nil {
 		absDir = downloadDir
 	}
-	os.MkdirAll(absDir, 0755)
 
 	dataDir := getEnv("DATA_DIR", "./data")
 	absDataDir, err2 := filepath.Abs(dataDir)
 	if err2 != nil {
 		absDataDir = dataDir
 	}
-	os.MkdirAll(absDataDir, 0755)
-	os.MkdirAll(filepath.Join(absDataDir, "torrents"), 0755)
 
 	qbitTimeout, _ := strconv.Atoi(getEnv("QBIT_TIMEOUT", "30"))
 	if qbitTimeout == 0 {
@@ -72,6 +70,24 @@ func New() *Config {
 		DisableAuth:                getEnv("DISABLE_AUTH", "") == "1",
 		DevMode:                    getEnv("GODOWNLOADER_DEV_MODE", "") == "1" || getEnv("GODOWNLOADER_DEV_MODE", "") == "true",
 	}
+}
+
+// EnsureDirectories explicitly creates the configured DownloadDir and DataDir on disk.
+func (c *Config) EnsureDirectories() error {
+	if c.DownloadDir != "" {
+		if err := os.MkdirAll(c.DownloadDir, 0755); err != nil {
+			return err
+		}
+	}
+	if c.DataDir != "" {
+		if err := os.MkdirAll(c.DataDir, 0755); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(c.DataDir, "torrents"), 0755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {

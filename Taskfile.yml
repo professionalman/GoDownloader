@@ -22,6 +22,11 @@ tasks:
     cmds:
       - task: "{{.GOOS}}:run"
 
+  package:
+    summary: Packages the application installer
+    cmds:
+      - task: "{{.GOOS}}:package"
+
   dev:
     summary: Runs the application in development mode
     cmds:

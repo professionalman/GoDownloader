@@ -254,9 +254,49 @@ func TestSupportBundle_Success(t *testing.T) {
 		}
 		data, _ := io.ReadAll(rc)
 		rc.Close()
-		if len(data) == 0 {
-			t.Errorf("entry %s is empty", f.Name)
+		if f.Name == EntryRuntime {
+			var runtimeSnap RuntimeDTO
+			if err := json.Unmarshal(data, &runtimeSnap); err != nil {
+				t.Fatalf("failed to unmarshal runtime.json: %v", err)
+			}
+			if runtimeSnap.AppVersion != "(devel)" {
+				t.Errorf("expected runtime.json AppVersion '(devel)', got %q", runtimeSnap.AppVersion)
+			}
 		}
+	}
+
+	// Also verify that when built with version 0.9.1 injected, runtime.json reports appVersion = "0.9.1"
+	destVerPath := filepath.Join(tempDir, "support_v091.zip")
+	builderV091 := NewBuilder(provider, func() buildinfo.Info {
+		return buildinfo.Info{
+			Version: "0.9.1",
+			Commit:  "839afbfe04ff790dab3e558df8011dc0c2793582",
+		}
+	})
+	if _, err := builderV091.Build(context.Background(), destVerPath, sampleHostSnapshot()); err != nil {
+		t.Fatalf("Build with v0.9.1 failed: %v", err)
+	}
+	rVer, err := zip.OpenReader(destVerPath)
+	if err != nil {
+		t.Fatalf("failed to open zip: %v", err)
+	}
+	defer rVer.Close()
+	foundV091 := false
+	for _, f := range rVer.File {
+		if f.Name == EntryRuntime {
+			rc, _ := f.Open()
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			var runtimeSnap RuntimeDTO
+			_ = json.Unmarshal(data, &runtimeSnap)
+			if runtimeSnap.AppVersion != "0.9.1" {
+				t.Errorf("expected runtime.json AppVersion '0.9.1', got %q", runtimeSnap.AppVersion)
+			}
+			foundV091 = true
+		}
+	}
+	if !foundV091 {
+		t.Error("runtime.json not found in v0.9.1 bundle")
 	}
 }
 

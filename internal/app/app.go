@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"sync"
 
 	"downloader/internal/config"
@@ -11,12 +12,16 @@ import (
 	"downloader/internal/job"
 	"downloader/internal/mediaauth"
 	"downloader/internal/process"
+	"downloader/internal/runtimeguard"
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
 	"downloader/internal/toolmanager"
 	"downloader/internal/tracker"
 )
+
+// ErrRuntimeAlreadyOwned indicates another GoDownloader core holds durable data store ownership.
+var ErrRuntimeAlreadyOwned = runtimeguard.ErrRuntimeAlreadyOwned
 
 // App represents the unified, host-agnostic application runtime.
 // It owns the database, repositories, secure store, background services,
@@ -49,6 +54,7 @@ type App struct {
 	manager           *job.Manager
 	resourceGovernor  *job.ResourceGovernor
 	scheduler         *job.Scheduler
+	runtimeGuard      io.Closer
 
 	// Lifecycle state coordination
 	mu            sync.Mutex

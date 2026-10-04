@@ -1,15 +1,26 @@
 {
-	"fixed": {
-		"file_version": "0.9.0"
-	},
-	"info": {
-		"0000": {
-			"ProductVersion": "0.9.0",
-			"CompanyName": "GoDownloader",
-			"FileDescription": "GoDownloader Windows Desktop Technical Preview",
-			"LegalCopyright": "© 2026 GoDownloader",
-			"ProductName": "GoDownloader",
-			"Comments": "Windows Desktop Technical Preview"
-		}
-	}
+  "info": {
+    "040904b0": {
+      "ProductName": "GoDownloader",
+      "ProductVersion": "0.9.1",
+      "FileVersion": "0.9.1",
+      "LegalCopyright": "© 2026 GoDownloader",
+      "FileDescription": "GoDownloader Windows Desktop Beta",
+      "Comments": "Windows Desktop Beta",
+      "CompanyName": "GoDownloader"
+    },
+    "0000": {
+      "ProductName": "GoDownloader",
+      "ProductVersion": "0.9.1",
+      "FileVersion": "0.9.1",
+      "LegalCopyright": "© 2026 GoDownloader",
+      "FileDescription": "GoDownloader Windows Desktop Beta",
+      "Comments": "Windows Desktop Beta",
+      "CompanyName": "GoDownloader"
+    }
+  },
+  "fixed": {
+    "file_version": "0.9.1.0",
+    "product_version": "0.9.1.0"
+  }
 }

@@ -18,6 +18,7 @@ import (
 	"downloader/internal/job"
 	"downloader/internal/mediaauth"
 	"downloader/internal/process"
+	"downloader/internal/runtimeguard"
 	"downloader/internal/securestore"
 	"downloader/internal/settings"
 	"downloader/internal/storage"
@@ -62,6 +63,15 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 			cleanup.run()
 		}
 	}()
+
+	// 0. Acquire Core Runtime Ownership Guard BEFORE touching SQLite or any other subsystem
+	guard, err := runtimeguard.Acquire(opt.dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire runtime ownership: %w", err)
+	}
+	cleanup.add(func() {
+		_ = guard.Close()
+	})
 
 	// 1. Initialize SQLite Database
 	db, err := database.New(opt.dbPath)
@@ -206,6 +216,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 		manager:           manager,
 		resourceGovernor:  resourceGovernor,
 		scheduler:         scheduler,
+		runtimeGuard:      guard,
 	}
 
 	success = true
@@ -278,6 +289,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	manager := a.manager
 	supervisor := a.processSupervisor
 	db := a.db
+	guard := a.runtimeGuard
 	a.mu.Unlock()
 
 	var errs []error
@@ -310,6 +322,13 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if db != nil {
 		if err := db.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("database close: %w", err))
+		}
+	}
+
+	// Step 5: Release core runtime ownership guard strictly after database closure
+	if guard != nil {
+		if err := guard.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("runtime guard close: %w", err))
 		}
 	}
 

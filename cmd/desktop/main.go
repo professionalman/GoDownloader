@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -51,6 +52,11 @@ func main() {
 
 			cfg := config.New()
 			cfg.DownloadDir = filepath.Join(dataRoot, "downloads")
+			cfg.DataDir = filepath.Join(dataRoot, "data")
+			if err := cfg.EnsureDirectories(); err != nil {
+				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: directories: %v\n", err)
+				os.Exit(1)
+			}
 			appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: app.New: %v\n", err)
@@ -186,9 +192,19 @@ func main() {
 	dbPath := filepath.Join(dataRoot, "downloader.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(dataRoot, "downloads")
+	cfg.DataDir = filepath.Join(dataRoot, "data")
+
 	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 	if err != nil {
+		if errors.Is(err, app.ErrRuntimeAlreadyOwned) {
+			showNativeCollisionError()
+			os.Exit(1)
+		}
 		log.Fatalf("Fatal: failed to construct application core: %v", err)
+	}
+
+	if err := cfg.EnsureDirectories(); err != nil {
+		log.Fatalf("Fatal: failed to initialize desktop directories: %v", err)
 	}
 
 	startCtx, cancelStart := context.WithTimeout(context.Background(), 15*time.Second)

@@ -2,37 +2,43 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
-func TestConfig_QBitMetadataTimeout(t *testing.T) {
-	// 1. Default should be 300
-	os.Unsetenv("QBIT_METADATA_TIMEOUT_SECONDS")
-	cfgDefault := New()
-	if cfgDefault.QBitMetadataTimeoutSeconds != 300 {
-		t.Errorf("expected default timeout 300, got %d", cfgDefault.QBitMetadataTimeoutSeconds)
+func TestConfig_NewIsPure(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get wd: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	// Calling New must NOT create ./downloads or ./data in the current working directory
+	cfg := New()
+	if cfg == nil {
+		t.Fatalf("expected non-nil config")
 	}
 
-	// 2. Below minimum (<10) should reset to default 300 in production config
-	os.Setenv("QBIT_METADATA_TIMEOUT_SECONDS", "5")
-	cfgLow := New()
-	if cfgLow.QBitMetadataTimeoutSeconds != 300 {
-		t.Errorf("expected low timeout (<10) to reset to 300, got %d", cfgLow.QBitMetadataTimeoutSeconds)
+	if _, err := os.Stat("downloads"); !os.IsNotExist(err) {
+		t.Errorf("expected downloads directory NOT to be created by New(), but it exists")
+	}
+	if _, err := os.Stat("data"); !os.IsNotExist(err) {
+		t.Errorf("expected data directory NOT to be created by New(), but it exists")
 	}
 
-	// 3. Above maximum (>3600) should clamp to 3600
-	os.Setenv("QBIT_METADATA_TIMEOUT_SECONDS", "5000")
-	cfgHigh := New()
-	if cfgHigh.QBitMetadataTimeoutSeconds != 3600 {
-		t.Errorf("expected high timeout (>3600) to clamp to 3600, got %d", cfgHigh.QBitMetadataTimeoutSeconds)
+	// Calling EnsureDirectories must create them
+	if err := cfg.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories failed: %v", err)
 	}
 
-	// 4. Valid value (e.g. 600)
-	os.Setenv("QBIT_METADATA_TIMEOUT_SECONDS", "600")
-	cfgValid := New()
-	if cfgValid.QBitMetadataTimeoutSeconds != 600 {
-		t.Errorf("expected valid timeout 600, got %d", cfgValid.QBitMetadataTimeoutSeconds)
+	if _, err := os.Stat("downloads"); err != nil {
+		t.Errorf("expected downloads directory to exist after EnsureDirectories(), got error: %v", err)
 	}
-
-	os.Unsetenv("QBIT_METADATA_TIMEOUT_SECONDS")
+	if _, err := os.Stat(filepath.Join("data", "torrents")); err != nil {
+		t.Errorf("expected data/torrents directory to exist after EnsureDirectories(), got error: %v", err)
+	}
 }
