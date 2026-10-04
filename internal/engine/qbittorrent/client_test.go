@@ -222,11 +222,13 @@ func TestClient_403_Reauth(t *testing.T) {
 
 func TestClient_ValidateCompatibility(t *testing.T) {
 	tests := []struct {
-		name        string
-		version     string
-		apiVersion  string
-		authFail    bool
-		expectError bool
+		name              string
+		version           string
+		apiVersion        string
+		authFail          bool
+		capabilityFail    bool
+		badCapabilityJSON bool
+		expectError       bool
 	}{
 		{
 			name:        "4.x version rejected",
@@ -259,9 +261,29 @@ func TestClient_ValidateCompatibility(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name:        "Web API version < 2.0 rejected",
+			version:     "5.0.0",
+			apiVersion:  "1.9.2",
+			expectError: true,
+		},
+		{
 			name:        "Authentication failure rejected",
 			authFail:    true,
 			expectError: true,
+		},
+		{
+			name:           "Capability probe failure rejected",
+			version:        "5.0.0",
+			apiVersion:     "2.9.3",
+			capabilityFail: true,
+			expectError:    true,
+		},
+		{
+			name:              "Capability probe malformed JSON rejected",
+			version:           "5.0.0",
+			apiVersion:        "2.9.3",
+			badCapabilityJSON: true,
+			expectError:       true,
 		},
 	}
 
@@ -290,6 +312,20 @@ func TestClient_ValidateCompatibility(t *testing.T) {
 					}
 					w.WriteHeader(http.StatusOK)
 					w.Write([]byte(tt.apiVersion))
+					return
+				}
+				if r.URL.Path == "/api/v2/torrents/info" {
+					if tt.capabilityFail {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					if tt.badCapabilityJSON {
+						w.WriteHeader(http.StatusOK)
+						w.Write([]byte("invalid json"))
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte("[]"))
 					return
 				}
 			}))

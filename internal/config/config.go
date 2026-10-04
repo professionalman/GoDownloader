@@ -6,6 +6,11 @@ import (
 	"strconv"
 )
 
+const (
+	DefaultQBitURL      = "http://127.0.0.1:8081"
+	DefaultQBitUsername = "admin"
+)
+
 // Config holds the application configuration.
 type Config struct {
 	ListenAddr                 string
@@ -61,8 +66,8 @@ func New() *Config {
 		WebDir:                     getEnv("WEB_DIR", "./web/dist"),
 		YtdlpPath:                  getEnv("YTDLP_PATH", "yt-dlp"),
 		FFmpegPath:                 getEnv("FFMPEG_PATH", ""),
-		QBitURL:                    getEnv("QBIT_URL", "http://127.0.0.1:8081"),
-		QBitUsername:               getEnv("QBIT_USERNAME", "admin"),
+		QBitURL:                    getEnv("QBIT_URL", DefaultQBitURL),
+		QBitUsername:               getEnv("QBIT_USERNAME", DefaultQBitUsername),
 		QBitPassword:               getEnv("QBIT_PASSWORD", ""),
 		QBitTimeout:                qbitTimeout,
 		QBitMetadataTimeoutSeconds: qbitMetaTimeout,

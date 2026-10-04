@@ -4,6 +4,7 @@
 export type {
     AppSettings,
     ApplicationResult,
+    QBitSettings,
     QueueSettings,
     StorageOverrides,
     StorageSettings

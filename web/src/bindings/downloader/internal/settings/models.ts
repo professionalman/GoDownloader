@@ -13,6 +13,7 @@ export interface AppSettings {
     "storage": StorageSettings;
     "network": networkpolicy$0.NetworkSettings;
     "torrent": networkpolicy$0.TorrentSettings;
+    "qbittorrent": QBitSettings;
     "overrides"?: { [_ in string]?: boolean } | null;
     "applicationResults"?: ApplicationResult[] | null;
 }
@@ -22,6 +23,19 @@ export interface ApplicationResult {
     "status": string;
     "code"?: string;
     "message"?: string;
+}
+
+/**
+ * QBitSettings represents safe, non-sensitive qBittorrent connection configuration facts.
+ * Passwords are write-only and never exposed in this DTO.
+ */
+export interface QBitSettings {
+    "url": string;
+    "username": string;
+    "hasPassword": boolean;
+    "urlEnvironmentOverride": boolean;
+    "usernameEnvironmentOverride": boolean;
+    "passwordEnvironmentOverride": boolean;
 }
 
 /**

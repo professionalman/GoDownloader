@@ -647,7 +647,7 @@ func (s *DesktopService) UpdateSettings(settingsJSON string) (*settings.AppSetti
 		}
 	}
 
-	if req.Network != nil || req.Torrent != nil {
+	if req.Network != nil || req.Torrent != nil || req.QBittorrent != nil {
 		st, err = s.app.Settings().UpdatePowerSettings(ctx, &req)
 		if err != nil {
 			if errors.Is(err, securestore.ErrUnavailable) {

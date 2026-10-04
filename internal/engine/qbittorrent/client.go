@@ -232,7 +232,8 @@ func (c *Client) SetPreferences(ctx context.Context, preferences qbPreferences) 
 	return c.postForm(ctx, "/api/v2/app/setPreferences", data)
 }
 
-// ValidateCompatibility checks if qBittorrent version is >= 5.0 and Web API version is >= 2.0.
+// ValidateCompatibility checks if qBittorrent version is >= 5.0 and Web API version is >= 2.0,
+// and performs a bounded read-only capability probe against /api/v2/torrents/info?limit=1.
 func (c *Client) ValidateCompatibility(ctx context.Context) error {
 	vStr, err := c.GetVersion(ctx)
 	if err != nil {
@@ -267,6 +268,22 @@ func (c *Client) ValidateCompatibility(ctx context.Context) error {
 	apiMajor, err := strconv.Atoi(apiParts[0])
 	if err != nil || apiMajor < 2 {
 		return fmt.Errorf("unsupported qBittorrent Web API version %s: API version must be >= 2.0", apiVersion)
+	}
+
+	// Bounded read-only capability probe proving required torrent-info inspection API surface is operational.
+	resp, err := c.doAuthenticatedRequest(ctx, "GET", "/api/v2/torrents/info?limit=1", nil, "")
+	if err != nil {
+		return fmt.Errorf("failed qBittorrent capability probe: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unsupported qBittorrent capability: torrents info probe returned status %d", resp.StatusCode)
+	}
+
+	var infos []qbTorrentInfo
+	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+		return fmt.Errorf("unsupported qBittorrent capability: malformed torrents info response: %w", err)
 	}
 
 	return nil

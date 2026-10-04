@@ -3,12 +3,15 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"downloader/internal/config"
 	"downloader/internal/networkpolicy"
 	"downloader/internal/securestore"
 )
@@ -21,6 +24,8 @@ const (
 	KeyDefaultConflictPolicy    = "default_conflict_policy"
 	KeyV07PowerSettings         = "v07_power_settings"
 	KeyCloseToTray              = "close_to_tray"
+	KeyQBitURL                  = "qbittorrent_url"
+	KeyQBitUsername             = "qbittorrent_username"
 
 	DefaultMaxConcurrent  = 3
 	MinMaxConcurrent      = 1
@@ -28,9 +33,45 @@ const (
 	DefaultMinFreeSpace   = 1073741824 // 1 GiB
 	DefaultConflictPolicy = "rename"
 	DefaultCloseToTray    = true
+	DefaultQBitURL        = config.DefaultQBitURL
+	DefaultQBitUsername   = config.DefaultQBitUsername
 	FallbackDownloadDir   = "./downloads"
 	FallbackDataDir       = "./data"
+
+	SecretScopeSettings = "settings"
+	SecretOwnerGlobal   = "global"
+	SecretFieldQBitPass = "qbittorrent_password"
 )
+
+// ValidateQBitEndpoint validates and normalizes a qBittorrent Web API URL.
+func ValidateQBitEndpoint(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", errors.New("qBittorrent endpoint URL cannot be empty")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid qBittorrent endpoint URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("qBittorrent endpoint scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", errors.New("qBittorrent endpoint host cannot be empty")
+	}
+	if u.User != nil {
+		return "", errors.New("qBittorrent endpoint must not contain embedded user credentials")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return "", errors.New("qBittorrent endpoint must not contain query parameters")
+	}
+	if u.Fragment != "" {
+		return "", errors.New("qBittorrent endpoint must not contain URL fragments")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	normalized := strings.TrimRight(u.String(), "/")
+	return normalized, nil
+}
 
 // SettingsService manages application settings logic and environment overrides.
 type SettingsService struct {
@@ -69,6 +110,87 @@ func NewSettingsService(repo ISettingsRepository, initialDownloadDir, initialDat
 		s.secrets = secretStore[0]
 	}
 	return s
+}
+
+// QBitFallback holds optional programmatic fallback connection values from host config.
+type QBitFallback struct {
+	URL      string
+	Username string
+	Password string
+}
+
+// GetEffectiveQBitCredentials resolves effective connection parameters with precedence:
+// 1. Explicit environment variables (QBIT_URL, QBIT_USERNAME, QBIT_PASSWORD)
+// 2. Persisted settings (app_settings for URL/user, SecureStore for password)
+// 3. Programmatic host Config fallbacks (if non-empty and non-default)
+// 4. Canonical defaults (http://127.0.0.1:8081, admin, "")
+// Note: Environment-provided passwords are NEVER persisted into SecureStore.
+func (s *SettingsService) GetEffectiveQBitCredentials(ctx context.Context, fallback ...QBitFallback) (resolvedURL, resolvedUser, resolvedPass string, err error) {
+	var fb QBitFallback
+	if len(fallback) > 0 {
+		fb = fallback[0]
+	}
+
+	// 1. URL resolution
+	if envVal := os.Getenv("QBIT_URL"); envVal != "" {
+		normURL, valErr := ValidateQBitEndpoint(envVal)
+		if valErr != nil {
+			return "", "", "", fmt.Errorf("invalid QBIT_URL environment override: %w", valErr)
+		}
+		resolvedURL = normURL
+	} else if valStr, getErr := s.repo.Get(ctx, KeyQBitURL); getErr != nil {
+		return "", "", "", fmt.Errorf("read persisted %s: %w", KeyQBitURL, getErr)
+	} else if valStr != "" {
+		normURL, valErr := ValidateQBitEndpoint(valStr)
+		if valErr != nil {
+			return "", "", "", fmt.Errorf("invalid persisted %s: %w", KeyQBitURL, valErr)
+		}
+		resolvedURL = normURL
+	} else if fb.URL != "" && fb.URL != DefaultQBitURL {
+		normURL, valErr := ValidateQBitEndpoint(fb.URL)
+		if valErr != nil {
+			return "", "", "", fmt.Errorf("invalid programmatic qBittorrent URL fallback: %w", valErr)
+		}
+		resolvedURL = normURL
+	} else {
+		resolvedURL = DefaultQBitURL
+	}
+
+	// 2. Username resolution
+	if envVal := os.Getenv("QBIT_USERNAME"); envVal != "" {
+		resolvedUser = envVal
+	} else if valStr, getErr := s.repo.Get(ctx, KeyQBitUsername); getErr != nil {
+		return "", "", "", fmt.Errorf("read persisted %s: %w", KeyQBitUsername, getErr)
+	} else if valStr != "" {
+		resolvedUser = valStr
+	} else if fb.Username != "" && fb.Username != DefaultQBitUsername {
+		resolvedUser = fb.Username
+	} else {
+		resolvedUser = DefaultQBitUsername
+	}
+
+	// 3. Password resolution
+	if envVal := os.Getenv("QBIT_PASSWORD"); envVal != "" {
+		resolvedPass = envVal
+	} else if s.secrets != nil {
+		hasSecret, hasErr := s.secrets.Has(ctx, SecretScopeSettings, SecretOwnerGlobal, SecretFieldQBitPass)
+		if hasErr != nil {
+			return "", "", "", fmt.Errorf("check protected %s: %w", SecretFieldQBitPass, hasErr)
+		}
+		if hasSecret {
+			secVal, secErr := s.secrets.Get(ctx, SecretScopeSettings, SecretOwnerGlobal, SecretFieldQBitPass)
+			if secErr != nil {
+				return "", "", "", fmt.Errorf("retrieve protected %s: %w", SecretFieldQBitPass, secErr)
+			}
+			resolvedPass = secVal
+		} else if fb.Password != "" {
+			resolvedPass = fb.Password
+		}
+	} else if fb.Password != "" {
+		resolvedPass = fb.Password
+	}
+
+	return resolvedURL, resolvedUser, resolvedPass, nil
 }
 
 func defaultPowerSettings() (networkpolicy.NetworkSettings, networkpolicy.TorrentSettings) {
@@ -224,6 +346,8 @@ func (s *SettingsService) getPowerSettings(ctx context.Context) (networkpolicy.N
 			warn("DEFAULT_SEEDING_MODE/DEFAULT_SEED_*", "torrent.seedingPolicy")
 		}
 	}
+	// In ExternalUserManaged mode, global qBittorrent network settings mutation is unavailable.
+	torrent.ManageQBitGlobalNetworkSettings = false
 	return nw, torrent, overrides, warnings, nil
 }
 
@@ -308,6 +432,51 @@ func (s *SettingsService) GetSettings(ctx context.Context) (*AppSettings, error)
 		}
 	}
 
+	// QBittorrent settings
+	persistedQBitURL := DefaultQBitURL
+	if valStr, err := s.repo.Get(ctx, KeyQBitURL); err == nil && valStr != "" {
+		persistedQBitURL = valStr
+	}
+	effectiveQBitURL := persistedQBitURL
+	qbitURLEnvOverride := false
+	if envVal := os.Getenv("QBIT_URL"); envVal != "" {
+		effectiveQBitURL = envVal
+		qbitURLEnvOverride = true
+	}
+
+	persistedQBitUser := DefaultQBitUsername
+	if valStr, err := s.repo.Get(ctx, KeyQBitUsername); err == nil && valStr != "" {
+		persistedQBitUser = valStr
+	}
+	effectiveQBitUser := persistedQBitUser
+	qbitUserEnvOverride := false
+	if envVal := os.Getenv("QBIT_USERNAME"); envVal != "" {
+		effectiveQBitUser = envVal
+		qbitUserEnvOverride = true
+	}
+
+	hasPassword := false
+	qbitPassEnvOverride := false
+	if envVal := os.Getenv("QBIT_PASSWORD"); envVal != "" {
+		hasPassword = true
+		qbitPassEnvOverride = true
+	} else if s.secrets != nil && s.secrets.Available() {
+		has, hasErr := s.secrets.Has(ctx, SecretScopeSettings, SecretOwnerGlobal, SecretFieldQBitPass)
+		if hasErr != nil {
+			return nil, fmt.Errorf("check protected %s: %w", SecretFieldQBitPass, hasErr)
+		}
+		hasPassword = has
+	}
+
+	qbSettings := QBitSettings{
+		URL:                         effectiveQBitURL,
+		Username:                    effectiveQBitUser,
+		HasPassword:                 hasPassword,
+		URLEnvironmentOverride:      qbitURLEnvOverride,
+		UsernameEnvironmentOverride: qbitUserEnvOverride,
+		PasswordEnvironmentOverride: qbitPassEnvOverride,
+	}
+
 	nw, torrent, overrides, applicationResults, err := s.getPowerSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -336,6 +505,7 @@ func (s *SettingsService) GetSettings(ctx context.Context) (*AppSettings, error)
 		},
 		Network:            nw,
 		Torrent:            torrent,
+		QBittorrent:        qbSettings,
 		Overrides:          overrides,
 		ApplicationResults: applicationResults,
 	}, nil
@@ -395,6 +565,8 @@ func (s *SettingsService) UpdatePowerSettings(ctx context.Context, req *UpdateSe
 			torrent.ManageQBitGlobalNetworkSettings = *v.ManageQBitGlobalNetworkSettings
 		}
 	}
+	// ExternalUserManaged mode: global daemon settings are unavailable in shared mode.
+	torrent.ManageQBitGlobalNetworkSettings = false
 	policy := networkpolicy.JobNetworkPolicy{
 		DownloadLimitBytesPerSecond: nw.GlobalDownloadLimitBytesPerSecond,
 		Proxy:                       nw.Proxy, UserAgent: nw.UserAgent, HTTPHeaders: nw.HTTPHeaders,
@@ -468,6 +640,42 @@ func (s *SettingsService) UpdatePowerSettings(ctx context.Context, req *UpdateSe
 			}
 		}
 	}
+	if req.QBittorrent != nil {
+		q := req.QBittorrent
+		if q.URL != nil {
+			normURL, err := ValidateQBitEndpoint(*q.URL)
+			if err != nil {
+				return nil, err
+			}
+			if err := s.repo.Set(ctx, KeyQBitURL, normURL); err != nil {
+				return nil, fmt.Errorf("persist qbittorrent_url: %w", err)
+			}
+		}
+		if q.Username != nil {
+			trimmedUser := strings.TrimSpace(*q.Username)
+			if trimmedUser == "" {
+				return nil, errors.New("qbittorrent username cannot be empty")
+			}
+			if err := s.repo.Set(ctx, KeyQBitUsername, trimmedUser); err != nil {
+				return nil, fmt.Errorf("persist qbittorrent_username: %w", err)
+			}
+		}
+		if q.ClearPassword {
+			if s.secrets == nil || !s.secrets.Available() {
+				return nil, securestore.ErrUnavailable
+			}
+			if err := s.secrets.Delete(ctx, SecretScopeSettings, SecretOwnerGlobal, SecretFieldQBitPass); err != nil {
+				return nil, err
+			}
+		} else if q.Password != nil && *q.Password != "" {
+			if s.secrets == nil || !s.secrets.Available() {
+				return nil, securestore.ErrUnavailable
+			}
+			if err := s.secrets.Put(ctx, SecretScopeSettings, SecretOwnerGlobal, SecretFieldQBitPass, *q.Password); err != nil {
+				return nil, err
+			}
+		}
+	}
 	data, err := json.Marshal(persistedPowerSettings{Network: nw, Torrent: torrent})
 	if err != nil {
 		return nil, err
@@ -509,6 +717,23 @@ func (s *SettingsService) ValidateUpdate(ctx context.Context, req *UpdateSetting
 			if policy != "rename" && policy != "overwrite" && policy != "fail" {
 				return fmt.Errorf("defaultConflictPolicy must be rename, overwrite, or fail")
 			}
+		}
+	}
+	if req.Torrent != nil && req.Torrent.ManageQBitGlobalNetworkSettings != nil && *req.Torrent.ManageQBitGlobalNetworkSettings {
+		return errors.New("global qBittorrent network settings are unavailable while using a shared, user-managed qBittorrent instance")
+	}
+	if req.QBittorrent != nil {
+		q := req.QBittorrent
+		if q.URL != nil {
+			if _, err := ValidateQBitEndpoint(*q.URL); err != nil {
+				return err
+			}
+		}
+		if q.Username != nil && strings.TrimSpace(*q.Username) == "" {
+			return errors.New("qbittorrent username cannot be empty")
+		}
+		if (q.ClearPassword || (q.Password != nil && *q.Password != "")) && (s.secrets == nil || !s.secrets.Available()) {
+			return securestore.ErrUnavailable
 		}
 	}
 	if req.Network == nil && req.Torrent == nil {

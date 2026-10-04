@@ -1132,12 +1132,13 @@ func (m *Manager) acquireTorrentMetadata(jobID, source, torrentFilePath string) 
 			}
 		}
 
-		// 4. Orphaned GoDownloader-owned torrent -> safely adopt it
-		log.Printf("acquireTorrentMetadata: adopting orphaned godownloader torrent %s into job %s", expectedHash, jobID)
-		if adoptErr := torrentEng.AdoptTorrent(ctx, expectedHash, jobID); adoptErr != nil {
-			return false, fmt.Errorf("failed to adopt existing torrent: %w", adoptErr)
+		// 4. Ambiguous / unowned GoDownloader torrent -> refuse by default.
+		// Never adopt, retag, or recategorize an unowned or ambiguously-tagged torrent.
+		log.Printf("acquireTorrentMetadata: torrent %s exists in qBittorrent with godownloader category but durable ownership cannot be proven for job %s; refusing by default", expectedHash, jobID)
+		return false, &AppError{
+			Code:    ErrTorrentAlreadyExistsExternally,
+			Message: "This torrent already exists in qBittorrent but is not managed by this GoDownloader instance.",
 		}
-		return true, nil
 	}
 
 	var infoHash string

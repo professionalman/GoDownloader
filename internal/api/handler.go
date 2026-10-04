@@ -653,7 +653,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.Network != nil || req.Torrent != nil {
+	if req.Network != nil || req.Torrent != nil || req.QBittorrent != nil {
 		st, err = h.settings.UpdatePowerSettings(r.Context(), &req)
 		if err != nil {
 			code := job.ErrInvalidNetworkPolicy

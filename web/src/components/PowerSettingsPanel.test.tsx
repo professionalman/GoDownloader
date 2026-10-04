@@ -142,3 +142,107 @@ describe('PowerSettingsPanel tracker source management', () => {
     expect(screen.getByText(/Last error: temporary fetch failure/)).toBeInTheDocument();
   });
 });
+
+describe('PowerSettingsPanel qBittorrent connection settings', () => {
+  const qbitSettings: AppSettings = {
+    ...settings,
+    qbittorrent: {
+      url: 'http://127.0.0.1:8081',
+      username: 'admin',
+      hasPassword: true,
+      urlEnvironmentOverride: false,
+      usernameEnvironmentOverride: false,
+      passwordEnvironmentOverride: false,
+    },
+  };
+
+  it('populates fields from safe DTO and never renders stored password in input', () => {
+    render(<PowerSettingsPanel settings={qbitSettings} onSave={vi.fn()} />);
+    expect(screen.getByLabelText('qBittorrent Web API endpoint URL')).toHaveValue('http://127.0.0.1:8081');
+    expect(screen.getByLabelText('qBittorrent username')).toHaveValue('admin');
+    expect(screen.getByLabelText('qBittorrent password')).toHaveValue('');
+    expect(screen.getByLabelText('qBittorrent password').closest('label')).toHaveTextContent('Configured');
+  });
+
+  it('leaves password unchanged when password input is left blank on save', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PowerSettingsPanel settings={qbitSettings} onSave={onSave} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save network controls' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      qbittorrent: {
+        url: 'http://127.0.0.1:8081',
+        username: 'admin',
+        password: undefined,
+        clearPassword: false,
+      },
+    })));
+  });
+
+  it('sends explicit clear action with clearPassword=true', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PowerSettingsPanel settings={qbitSettings} onSave={onSave} />);
+    fireEvent.click(screen.getByLabelText('Clear configured qBittorrent password'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save network controls' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      qbittorrent: {
+        url: 'http://127.0.0.1:8081',
+        username: 'admin',
+        password: undefined,
+        clearPassword: true,
+      },
+    })));
+  });
+
+  it('sends replacement password in write-only field and clears input after save', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PowerSettingsPanel settings={qbitSettings} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText('qBittorrent password'), { target: { value: 'brand-new-secret-999' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save network controls' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      qbittorrent: {
+        url: 'http://127.0.0.1:8081',
+        username: 'admin',
+        password: 'brand-new-secret-999',
+        clearPassword: false,
+      },
+    })));
+    expect(screen.getByLabelText('qBittorrent password')).toHaveValue('');
+    expect(screen.queryByText('brand-new-secret-999')).not.toBeInTheDocument();
+  });
+
+  it('displays restart-required message after successful qB settings save', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PowerSettingsPanel settings={qbitSettings} onSave={onSave} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save network controls' }));
+    expect(await screen.findByText(/Restart GoDownloader to apply qBittorrent connection changes/)).toBeInTheDocument();
+  });
+
+  it('shows environment override notice and disables inputs when environment overrides are active', () => {
+    const overriddenSettings: AppSettings = {
+      ...settings,
+      qbittorrent: {
+        url: 'http://env-host:9999',
+        username: 'env-user',
+        hasPassword: true,
+        urlEnvironmentOverride: true,
+        usernameEnvironmentOverride: true,
+        passwordEnvironmentOverride: true,
+      },
+    };
+    render(<PowerSettingsPanel settings={overriddenSettings} onSave={vi.fn()} />);
+    expect(screen.getByText('(Overridden by QBIT_URL)')).toBeInTheDocument();
+    expect(screen.getByText('(Overridden by QBIT_USERNAME)')).toBeInTheDocument();
+    expect(screen.getByText('(Overridden by QBIT_PASSWORD)')).toBeInTheDocument();
+    expect(screen.getByLabelText('qBittorrent Web API endpoint URL')).toBeDisabled();
+    expect(screen.getByLabelText('qBittorrent username')).toBeDisabled();
+    expect(screen.getByLabelText('qBittorrent password')).toBeDisabled();
+  });
+
+  it('disables shared qB global network settings control and displays explanation', () => {
+    render(<PowerSettingsPanel settings={qbitSettings} onSave={vi.fn()} />);
+    const checkbox = screen.getByLabelText(/Manage dedicated qB global network settings/i);
+    expect(checkbox).toBeDisabled();
+    expect(checkbox).not.toBeChecked();
+    expect(screen.getByText(/Global qBittorrent network settings are unavailable while using a shared, user-managed qBittorrent instance/)).toBeInTheDocument();
+  });
+});

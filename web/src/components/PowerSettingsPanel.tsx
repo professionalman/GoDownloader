@@ -85,7 +85,11 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave, activeSe
   const [seedRatio, setSeedRatio] = useState(torrent?.seedingPolicy.ratioLimit ?? 1);
   const [seedHours, setSeedHours] = useState((torrent?.seedingPolicy.timeLimitSeconds ?? 86400) / 3600);
   const [autoTrackers, setAutoTrackers] = useState(torrent?.applyTrackerSubscriptionsToNewTorrents ?? false);
-  const [manageQBit, setManageQBit] = useState(torrent?.manageQBitGlobalNetworkSettings ?? false);
+  const qbit = settings?.qbittorrent;
+  const [qbitURL, setQBitURL] = useState(qbit?.url ?? 'http://127.0.0.1:8081');
+  const [qbitUsername, setQBitUsername] = useState(qbit?.username ?? 'admin');
+  const [qbitPassword, setQBitPassword] = useState('');
+  const [clearQBitPassword, setClearQBitPassword] = useState(false);
   const [sources, setSources] = useState<TrackerSource[]>([]);
   const [sourceName, setSourceName] = useState('');
   const [sourceURL, setSourceURL] = useState('');
@@ -96,6 +100,13 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave, activeSe
   useEffect(() => {
     getTrackerSources().then(setSources).catch(() => setSources([]));
   }, []);
+
+  useEffect(() => {
+    if (settings?.qbittorrent) {
+      setQBitURL(settings.qbittorrent.url);
+      setQBitUsername(settings.qbittorrent.username);
+    }
+  }, [settings?.qbittorrent]);
 
   const savePower = async () => {
     const seedingPolicy: SeedingPolicy = { mode: seedingMode };
@@ -127,12 +138,20 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave, activeSe
         uploadLimitBytesPerSecond: torrentUpload,
         seedingPolicy,
         applyTrackerSubscriptionsToNewTorrents: autoTrackers,
-        manageQBitGlobalNetworkSettings: manageQBit,
+        manageQBitGlobalNetworkSettings: false,
+      },
+      qbittorrent: {
+        url: qbitURL,
+        username: qbitUsername,
+        password: qbitPassword || undefined,
+        clearPassword: clearQBitPassword,
       },
     });
     setProxyPassword('');
     setClearPassword(false);
-    setStatus('Network and torrent settings saved.');
+    setQBitPassword('');
+    setClearQBitPassword(false);
+    setStatus('Settings saved. Restart GoDownloader to apply qBittorrent connection changes.');
   };
 
   const addSource = async () => {
@@ -186,9 +205,72 @@ export const PowerSettingsPanel: React.FC<Props> = ({ settings, onSave, activeSe
           {(seedingMode === 'ratio' || seedingMode === 'ratio_or_duration') && <label>Ratio target<input type="number" min="0.01" max="1000" value={seedRatio} onChange={(e) => setSeedRatio(Number(e.target.value))} /></label>}
           {(seedingMode === 'duration' || seedingMode === 'ratio_or_duration') && <label>Active hours<input type="number" min="0.01" value={seedHours} onChange={(e) => setSeedHours(Number(e.target.value))} /></label>}
           <label><input type="checkbox" checked={autoTrackers} onChange={(e) => setAutoTrackers(e.target.checked)} /> Apply subscriptions to new public torrents</label>
-          <label><input type="checkbox" checked={manageQBit} onChange={(e) => setManageQBit(e.target.checked)} /> Manage dedicated qB global network settings</label>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input type="checkbox" checked={false} disabled={true} />
+              Manage dedicated qB global network settings
+            </label>
+            <span className="setting-hint" style={{ display: 'block', marginTop: '4px' }}>
+              Global qBittorrent network settings are unavailable while using a shared, user-managed qBittorrent instance.
+            </span>
+          </div>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => savePower().catch((error) => setStatus(error.message))}>Save network controls</button>
+
+        <h5 style={{ marginTop: '16px', marginBottom: '8px' }}>qBittorrent Connection</h5>
+        <div className="power-grid">
+          <label>
+            Web API endpoint URL
+            {qbit?.urlEnvironmentOverride && <span className="setting-hint" style={{ marginLeft: '8px', color: '#888' }}>(Overridden by QBIT_URL)</span>}
+            <input
+              type="text"
+              aria-label="qBittorrent Web API endpoint URL"
+              value={qbitURL}
+              onChange={(e) => setQBitURL(e.target.value)}
+              disabled={qbit?.urlEnvironmentOverride}
+              placeholder="http://127.0.0.1:8081"
+            />
+          </label>
+          <label>
+            Username
+            {qbit?.usernameEnvironmentOverride && <span className="setting-hint" style={{ marginLeft: '8px', color: '#888' }}>(Overridden by QBIT_USERNAME)</span>}
+            <input
+              type="text"
+              aria-label="qBittorrent username"
+              value={qbitUsername}
+              onChange={(e) => setQBitUsername(e.target.value)}
+              disabled={qbit?.usernameEnvironmentOverride}
+              placeholder="admin"
+            />
+          </label>
+          <label>
+            Password <span className="secret-state">{qbit?.hasPassword ? 'Configured' : 'Not configured'}</span>
+            {qbit?.passwordEnvironmentOverride && <span className="setting-hint" style={{ marginLeft: '8px', color: '#888' }}>(Overridden by QBIT_PASSWORD)</span>}
+            <input
+              type="password"
+              aria-label="qBittorrent password"
+              value={qbitPassword}
+              onChange={(e) => { setQBitPassword(e.target.value); setClearQBitPassword(false); }}
+              disabled={qbit?.passwordEnvironmentOverride}
+              placeholder={qbit?.hasPassword ? 'Leave blank to keep unchanged' : 'Set password'}
+            />
+          </label>
+          {qbit?.hasPassword && !qbit?.passwordEnvironmentOverride && (
+            <label style={{ gridColumn: '1 / -1' }}>
+              <input
+                type="checkbox"
+                aria-label="Clear configured qBittorrent password"
+                checked={clearQBitPassword}
+                onChange={(e) => {
+                  setClearQBitPassword(e.target.checked);
+                  if (e.target.checked) setQBitPassword('');
+                }}
+              />
+              Clear configured qBittorrent password
+            </label>
+          )}
+        </div>
+
+        <button type="button" className="btn btn-primary" onClick={() => savePower().catch((error) => setStatus(error.message))} style={{ marginTop: '12px' }}>Save network controls</button>
         {status && <div className="setting-notice">{status}</div>}
       </section>
       <section className="setting-section" hidden={activeSection !== 'all' && activeSection !== 'trackers'}>

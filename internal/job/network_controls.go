@@ -322,46 +322,9 @@ func (m *Manager) ReconcileNetworkPoliciesWithResults(ctx context.Context) []app
 }
 
 func (m *Manager) reconcileManagedTorrentProxy(ctx context.Context) {
-	if m.settings == nil {
-		return
-	}
-	settings, err := m.settings.GetSettings(ctx)
-	if err != nil || !settings.Torrent.ManageQBitGlobalNetworkSettings {
-		return
-	}
-	engine, ok := m.engines.Get("qbittorrent")
-	if !ok {
-		return
-	}
-	controller, ok := engine.(IManagedTorrentProxyController)
-	if !ok {
-		return
-	}
-	ownership, err := controller.ListTorrentOwnership(ctx)
-	if err != nil {
-		return
-	}
-	jobs, err := m.repo.List(ctx)
-	if err != nil {
-		return
-	}
-	owned := make(map[string]string, len(jobs))
-	for i := range jobs {
-		if jobs[i].Type == TypeTorrent && jobs[i].EngineID != "" {
-			owned[strings.ToLower(jobs[i].EngineID)] = jobs[i].ID
-		}
-	}
-	for _, torrent := range ownership {
-		jobID, exists := owned[strings.ToLower(torrent.Hash)]
-		if !exists || torrent.Category != "godownloader" || !containsString(torrent.Tags, jobID) {
-			return
-		}
-	}
-	runtime, err := m.settings.RuntimeGlobalNetworkPolicy(ctx)
-	if err != nil {
-		return
-	}
-	_ = controller.ApplyManagedProxy(ctx, runtime)
+	// ExternalUserManaged mode: daemon-global settings mutation is disabled in shared mode.
+	// GoDownloader must never mutate the user's shared qBittorrent daemon proxy settings.
+	return
 }
 
 func containsString(values []string, target string) bool {

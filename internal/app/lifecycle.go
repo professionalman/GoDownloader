@@ -102,12 +102,22 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 	secretStore := securestore.NewStore(secretRepo, cipher)
 	settingsService := settings.NewSettingsService(settingsRepo, cfg.DownloadDir, cfg.DataDir, secretStore)
 
+	// Resolve effective qBittorrent connection parameters (env > settings/SecureStore > programmatic cfg > defaults)
+	effectiveQBitURL, effectiveQBitUser, effectiveQBitPass, err := settingsService.GetEffectiveQBitCredentials(ctx, settings.QBitFallback{
+		URL:      cfg.QBitURL,
+		Username: cfg.QBitUsername,
+		Password: cfg.QBitPassword,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve qBittorrent connection settings: %w", err)
+	}
+
 	// 4. Initialize ToolManager & resolve external tools
 	toolMgr := toolmanager.New(cfg.DataDir, execRepo)
 	toolMgr.RegisterConfig(toolmanager.ToolYtdlp, cfg.YtdlpPath)
 	toolMgr.RegisterConfig(toolmanager.ToolFFmpeg, cfg.FFmpegPath)
 	toolMgr.RegisterConfig(toolmanager.ToolAria2, cfg.Aria2RPCURL)
-	toolMgr.RegisterConfig(toolmanager.ToolQBittorrent, cfg.QBitURL)
+	toolMgr.RegisterConfig(toolmanager.ToolQBittorrent, effectiveQBitURL)
 
 	_ = toolMgr.RevalidateActiveRecords(ctx)
 
@@ -161,12 +171,12 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 		}
 	}
 
-	qbitEng := qbittorrent.NewEngine(cfg.QBitURL, cfg.QBitUsername, cfg.QBitPassword, cfg.QBitTimeout)
+	qbitEng := qbittorrent.NewEngine(effectiveQBitURL, effectiveQBitUser, effectiveQBitPass, cfg.QBitTimeout)
 	registry.Register("qbittorrent", qbitEng)
 	if err := qbitEng.HealthCheck(ctx); err != nil {
 		log.Printf("qBittorrent engine: registered but not reachable (%v)", err)
 	} else {
-		log.Printf("qBittorrent engine: available at %s", cfg.QBitURL)
+		log.Printf("qBittorrent engine: available at %s", effectiveQBitURL)
 	}
 
 	// 9. Initialize event bus & tracker service

@@ -930,9 +930,8 @@ func TestExistingMagnet_StillFetchingMetadata_NotPrematurelyStopped(t *testing.T
 	}
 }
 
-// 13. Orphan-magnet metadata-incomplete: AdoptTorrent must NOT stop the torrent.
-// After adoption, metadata acquisition must continue to completion.
-func TestOrphanMagnet_MetadataIncomplete_AdoptDoesNotStop(t *testing.T) {
+// 13. Ambiguous orphan-magnet refusal: unowned torrent in qBittorrent is refused by default under TOR-EXT.
+func TestOrphanMagnet_MetadataIncomplete_RefusesByDefault(t *testing.T) {
 	jobID := "job_orphan_mag_adopt"
 	infoHash := "dddddddddddddddddddddddddddddddddddddddd"
 	j := &Job{
@@ -951,10 +950,6 @@ func TestOrphanMagnet_MetadataIncomplete_AdoptDoesNotStop(t *testing.T) {
 	torrentRepo := newFakeTorrentRepository(repo)
 	torrentRepo.torrentJobs[jobID] = &TorrentJobRecord{JobID: jobID, InfoHash: infoHash}
 
-	var metadataFetchPolls int32
-	var mu sync.Mutex
-	isStoppedState := false
-	metadataKilled := false
 	var adoptCalled int32
 
 	torrentEng := &fakeTorrentEngine{
@@ -967,79 +962,32 @@ func TestOrphanMagnet_MetadataIncomplete_AdoptDoesNotStop(t *testing.T) {
 			atomic.AddInt32(&adoptCalled, 1)
 			return nil
 		},
-		getTorrentInfoFunc: func(hash string) (*TorrentInfo, error) {
-			mu.Lock()
-			killed := metadataKilled
-			mu.Unlock()
-			if killed {
-				return &TorrentInfo{Name: "", InfoHash: infoHash, TotalSize: 0}, nil
-			}
-			count := atomic.AddInt32(&metadataFetchPolls, 1)
-			if count < 3 {
-				return &TorrentInfo{Name: "", InfoHash: infoHash, TotalSize: 0}, nil
-			}
-			return &TorrentInfo{Name: "orphan.iso", InfoHash: infoHash, TotalSize: 8000}, nil
-		},
-		getFilesFunc: func(hash string) ([]TorrentFile, error) {
-			mu.Lock()
-			killed := metadataKilled
-			mu.Unlock()
-			if killed {
-				return nil, errors.New("no files — metadata killed by premature stop")
-			}
-			count := atomic.LoadInt32(&metadataFetchPolls)
-			if count < 3 {
-				return nil, errors.New("no files yet")
-			}
-			return []TorrentFile{
-				{Index: 0, Path: "orphan.iso", Size: 8000, Priority: PriorityNormal, Selected: true},
-			}, nil
-		},
-		stopDownloadFunc: func(hash string) error {
-			mu.Lock()
-			isStoppedState = true
-			metadataKilled = true // premature stop prevents metadata from completing
-			mu.Unlock()
-			return nil
-		},
-	}
-
-	torrentEng.statusFunc = func(ctx context.Context, j *Job) (*EngineStatus, error) {
-		mu.Lock()
-		st := "downloading"
-		if isStoppedState {
-			st = "stoppedDL"
-		}
-		mu.Unlock()
-		return &EngineStatus{Status: StatusDownloading, RawState: st}, nil
 	}
 
 	engines := &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": torrentEng}}
 	bus := newFakeEventBus()
 	manager := NewManager(repo, engines, bus, t.TempDir(), torrentRepo)
 
-	// The stale job must not exist in the repo, so the ownership check falls through to adopt
+	// The stale job must not exist in the repo, so the ownership check refuses by default
 	go manager.acquireTorrentMetadata(jobID, j.Source, "")
 
-	deadline := time.Now().Add(6 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for {
 		saved, _ := repo.GetByID(context.Background(), jobID)
-		if saved != nil && saved.Status == StatusAwaitingSelection {
+		if saved != nil && saved.Status == StatusFailed {
 			break
 		}
-		if saved != nil && saved.Status == StatusFailed {
-			t.Fatalf("job FAILED — premature stop during adopt killed metadata: %s", saved.Error)
-		}
 		if time.Now().After(deadline) {
-			t.Fatalf("job did not reach AwaitingSelection (premature stop killed metadata), current status=%v, error=%v", saved.Status, saved.Error)
+			t.Fatalf("job did not reach Failed (refusal), current status=%v, error=%v", saved.Status, saved.Error)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
-	if atomic.LoadInt32(&adoptCalled) != 1 {
-		t.Fatalf("expected AdoptTorrent to be called exactly once, got %d", atomic.LoadInt32(&adoptCalled))
+	saved, _ := repo.GetByID(context.Background(), jobID)
+	if !strings.Contains(saved.Error, "not managed by this GoDownloader instance") {
+		t.Fatalf("expected refusal error, got: %s", saved.Error)
 	}
-	if atomic.LoadInt32(&metadataFetchPolls) < 3 {
-		t.Fatalf("expected metadata polling to continue until metadata arrives after adoption, got %d polls", metadataFetchPolls)
+	if atomic.LoadInt32(&adoptCalled) != 0 {
+		t.Fatalf("expected AdoptTorrent to NOT be called for ambiguous torrent, got %d", atomic.LoadInt32(&adoptCalled))
 	}
 }

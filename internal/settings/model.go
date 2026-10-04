@@ -38,12 +38,24 @@ type StorageSettings struct {
 	Overrides                         StorageOverrides `json:"overrides"`
 }
 
+// QBitSettings represents safe, non-sensitive qBittorrent connection configuration facts.
+// Passwords are write-only and never exposed in this DTO.
+type QBitSettings struct {
+	URL                         string `json:"url"`
+	Username                    string `json:"username"`
+	HasPassword                 bool   `json:"hasPassword"`
+	URLEnvironmentOverride      bool   `json:"urlEnvironmentOverride"`
+	UsernameEnvironmentOverride bool   `json:"usernameEnvironmentOverride"`
+	PasswordEnvironmentOverride bool   `json:"passwordEnvironmentOverride"`
+}
+
 // AppSettings represents user-configurable application settings.
 type AppSettings struct {
 	Queue              QueueSettings                 `json:"queue"`
 	Storage            StorageSettings               `json:"storage"`
 	Network            networkpolicy.NetworkSettings `json:"network"`
 	Torrent            networkpolicy.TorrentSettings `json:"torrent"`
+	QBittorrent        QBitSettings                  `json:"qbittorrent"`
 	Overrides          map[string]bool               `json:"overrides,omitempty"`
 	ApplicationResults []ApplicationResult           `json:"applicationResults,omitempty"`
 }
@@ -91,4 +103,10 @@ type UpdateSettingsRequest struct {
 		ApplyTrackerSubscriptionsToNewTorrents *bool                        `json:"applyTrackerSubscriptionsToNewTorrents,omitempty"`
 		ManageQBitGlobalNetworkSettings        *bool                        `json:"manageQBitGlobalNetworkSettings,omitempty"`
 	} `json:"torrent,omitempty"`
+	QBittorrent *struct {
+		URL           *string `json:"url,omitempty"`
+		Username      *string `json:"username,omitempty"`
+		Password      *string `json:"password,omitempty"`
+		ClearPassword bool    `json:"clearPassword,omitempty"`
+	} `json:"qbittorrent,omitempty"`
 }

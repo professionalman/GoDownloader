@@ -370,8 +370,18 @@ export interface AppSettings {
     applyTrackerSubscriptionsToNewTorrents: boolean;
     manageQBitGlobalNetworkSettings: boolean;
   };
+  qbittorrent?: QBitSettings;
   overrides?: Record<string, boolean>;
   applicationResults?: { target: string; status: string; code?: string; message?: string }[];
+}
+
+export interface QBitSettings {
+  url: string;
+  username: string;
+  hasPassword: boolean;
+  urlEnvironmentOverride: boolean;
+  usernameEnvironmentOverride: boolean;
+  passwordEnvironmentOverride: boolean;
 }
 
 export interface UpdateSettingsPayload {
@@ -401,6 +411,12 @@ export interface UpdateSettingsPayload {
     seedingPolicy?: SeedingPolicy;
     applyTrackerSubscriptionsToNewTorrents?: boolean;
     manageQBitGlobalNetworkSettings?: boolean;
+  };
+  qbittorrent?: {
+    url?: string;
+    username?: string;
+    password?: string;
+    clearPassword?: boolean;
   };
 }
 

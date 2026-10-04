@@ -5,7 +5,6 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -336,10 +335,12 @@ func TestTorrentReconciliation_SameJobExisting_ReusesTorrentWithoutCallingAdd(t 
 }
 
 // 5. Adoption fails closed when StopTorrents returns an error
-func TestTorrentReconciliation_AdoptionFailClosed_StopTorrentsError(t *testing.T) {
+// 5. Ambiguous/unowned GoDownloader torrent in qB is refused by default under TOR-EXT
+func TestTorrentReconciliation_AmbiguousOrphanedTorrent_RefusesByDefault(t *testing.T) {
 	jobRepo := newFakeJobRepository()
 	torrentRepo := newFakeTorrentRepository(jobRepo)
 	var startDownloadCalled int32
+	var adoptCalled int32
 
 	targetHash := "3333333333333333333333333333333333333333"
 
@@ -350,13 +351,14 @@ func TestTorrentReconciliation_AdoptionFailClosed_StopTorrentsError(t *testing.T
 				return &TorrentOwnership{
 					Hash:     targetHash,
 					Category: "godownloader",
-					Tags:     []string{"job_deadbeef"},
+					Tags:     []string{"job_deadbeef"}, // Unowned / ambiguous tag
 				}, nil
 			}
 			return nil, nil
 		},
 		adoptTorrentFunc: func(hash, jobID string) error {
-			return errors.New("simulated StopTorrents daemon communication error")
+			atomic.AddInt32(&adoptCalled, 1)
+			return nil
 		},
 		startDownloadFunc: func(hash string) error {
 			atomic.AddInt32(&startDownloadCalled, 1)
@@ -383,13 +385,16 @@ func TestTorrentReconciliation_AdoptionFailClosed_StopTorrentsError(t *testing.T
 
 	jobObj, _ := mgr.Get(context.Background(), j.ID)
 	if jobObj.Status != StatusFailed {
-		t.Fatalf("expected StatusFailed when adoption fails closed, got %s", jobObj.Status)
+		t.Fatalf("expected StatusFailed when ambiguous torrent is refused, got %s", jobObj.Status)
 	}
-	if !strings.Contains(jobObj.Error, "StopTorrents") {
-		t.Fatalf("expected StopTorrents error in job.Error, got: %s", jobObj.Error)
+	if !strings.Contains(jobObj.Error, "not managed by this GoDownloader instance") {
+		t.Fatalf("expected error mentioning not managed by this GoDownloader instance, got: %s", jobObj.Error)
+	}
+	if atomic.LoadInt32(&adoptCalled) != 0 {
+		t.Fatalf("AdoptTorrent must NEVER be called for ambiguous/unowned torrent, called %d times", adoptCalled)
 	}
 	if atomic.LoadInt32(&startDownloadCalled) != 0 {
-		t.Fatalf("StartDownload must NEVER be called when adoption fails, called %d times", startDownloadCalled)
+		t.Fatalf("StartDownload must NEVER be called when ambiguous torrent is refused, called %d times", startDownloadCalled)
 	}
 }
 
@@ -533,6 +538,7 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 	torrentRepo := newFakeTorrentRepository(jobRepo)
 	var getOwnershipCallCount int32
 	var addMagnetCallCount int32
+	var currentJobID string
 
 	targetHash := "6666666666666666666666666666666666666666"
 
@@ -546,7 +552,7 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 			return &TorrentOwnership{
 				Hash:     targetHash,
 				Category: "godownloader",
-				Tags:     []string{"job_deadbeef"},
+				Tags:     []string{currentJobID}, // Tagged by current job!
 			}, nil
 		},
 		addMagnetFunc: func(magnet string) (string, error) {
@@ -575,6 +581,7 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Create failed: %v", err)
 	}
+	currentJobID = j.ID
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -598,6 +605,72 @@ func TestTorrentReconciliation_AddRace409_RequeriesAndReconciles(t *testing.T) {
 	}
 }
 
+// 8b. Add returns HTTP 409: re-queries and refuses if ambiguous/unowned
+func TestTorrentReconciliation_AddRace409_AmbiguousRefused(t *testing.T) {
+	jobRepo := newFakeJobRepository()
+	torrentRepo := newFakeTorrentRepository(jobRepo)
+	var getOwnershipCallCount int32
+	var addMagnetCallCount int32
+	var adoptCallCount int32
+
+	targetHash := "7777777777777777777777777777777777777777"
+
+	eng := &fakeTorrentEngine{
+		fakeEngine: &fakeEngine{},
+		getOwnershipFunc: func(hash string) (*TorrentOwnership, error) {
+			count := atomic.AddInt32(&getOwnershipCallCount, 1)
+			if count == 1 {
+				return nil, nil // Initial check: not found yet
+			}
+			return &TorrentOwnership{
+				Hash:     targetHash,
+				Category: "godownloader",
+				Tags:     []string{"unowned_deadbeef_job"}, // Unowned tag!
+			}, nil
+		},
+		addMagnetFunc: func(magnet string) (string, error) {
+			atomic.AddInt32(&addMagnetCallCount, 1)
+			return "", &EngineAPIError{
+				Operation:  "AddMagnet",
+				StatusCode: http.StatusConflict,
+				Detail:     "torrent already exists",
+			}
+		},
+		adoptTorrentFunc: func(hash, jobID string) error {
+			atomic.AddInt32(&adoptCallCount, 1)
+			return nil
+		},
+	}
+	reg := &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": eng}}
+	bus := newFakeEventBus()
+	mgr := NewManager(jobRepo, reg, bus, t.TempDir(), torrentRepo)
+
+	j, err := mgr.Create(context.Background(), "magnet:?xt=urn:btih:"+targetHash)
+	if err != nil {
+		t.Fatalf("mgr.Create failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		jobObj, _ := mgr.Get(context.Background(), j.ID)
+		if jobObj != nil && jobObj.Status == StatusFailed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	jobObj, _ := mgr.Get(context.Background(), j.ID)
+	if jobObj.Status != StatusFailed {
+		t.Fatalf("expected StatusFailed after 409 with unowned tag, got %s", jobObj.Status)
+	}
+	if !strings.Contains(jobObj.Error, "not managed by this GoDownloader instance") {
+		t.Fatalf("expected refusal error after 409, got: %s", jobObj.Error)
+	}
+	if atomic.LoadInt32(&adoptCallCount) != 0 {
+		t.Fatalf("AdoptTorrent must NOT be called on 409 ambiguous re-query, got %d", adoptCallCount)
+	}
+}
+
 // 9. Uploaded .torrent v2 and hybrid file reconciliation using 40-character QBitTorrentID
 func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T) {
 	jobRepo := newFakeJobRepository()
@@ -617,6 +690,7 @@ func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T
 	}
 
 	var lookedUpHash string
+	var createdJobID string
 	eng := &fakeTorrentEngine{
 		fakeEngine: &fakeEngine{},
 		getOwnershipFunc: func(infoHash string) (*TorrentOwnership, error) {
@@ -625,7 +699,7 @@ func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T
 				return &TorrentOwnership{
 					Hash:     ident.QBitTorrentID,
 					Category: "godownloader",
-					Tags:     []string{"job_old123"},
+					Tags:     []string{createdJobID}, // Owned by current job
 				}, nil
 			}
 			return nil, nil
@@ -653,6 +727,7 @@ func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T
 	if err != nil {
 		t.Fatalf("CreateTorrentFromFile failed: %v", err)
 	}
+	createdJobID = j.ID
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -675,8 +750,8 @@ func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T
 	if jobObj.EngineID != ident.QBitTorrentID {
 		t.Fatalf("Job.EngineID must be 40-character QBitTorrentID, got %s", jobObj.EngineID)
 	}
-	if atomic.LoadInt32(&adoptCalled) != 1 {
-		t.Fatalf("expected AdoptTorrent to be called 1 time, got %d", adoptCalled)
+	if atomic.LoadInt32(&adoptCalled) != 0 {
+		t.Fatalf("expected AdoptTorrent to NOT be called for owned torrent, got %d", adoptCalled)
 	}
 	if atomic.LoadInt32(&addTorrentFileCalled) != 0 {
 		t.Fatalf("expected AddTorrentFile to NOT be called when existing in qBittorrent, got %d", addTorrentFileCalled)
