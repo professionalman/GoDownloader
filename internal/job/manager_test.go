@@ -252,6 +252,14 @@ type fakeJobRepository struct {
 	updateErr          error
 	deleteErr          error
 	listRecoverableErr error
+
+	// queue mirrors the shared SQLite transaction: SelectMediaFormat/CancelAwaitingSelection write it atomically
+	// with the job row. selectErr simulates a failed selection transaction. The before* hooks run outside the
+	// repository lock immediately before the compare-and-set, giving tests deterministic interleaving points.
+	queue                         IQueueRepository
+	selectErr                     error
+	beforeSelectMediaFormat       func()
+	beforeCancelAwaitingSelection func()
 }
 
 func newFakeJobRepository() *fakeJobRepository {
@@ -363,6 +371,91 @@ func (f *fakeJobRepository) ListPendingEngineCleanups(ctx context.Context) ([]Jo
 		}
 	}
 	return list, nil
+}
+
+func (f *fakeJobRepository) CompleteMediaAnalysis(ctx context.Context, jobID, title string, info *MediaInfo) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, exists := f.jobs[jobID]
+	if !exists || j.Status != StatusAnalyzing {
+		return false, nil
+	}
+	j.Status = StatusAwaitingSelection
+	j.MediaInfo = info
+	if title != "" {
+		j.Name = title
+	}
+	j.UpdatedAt = time.Now()
+	return true, nil
+}
+
+func (f *fakeJobRepository) SelectMediaFormat(ctx context.Context, jobID string, info *MediaInfo, entry *QueueEntry) (bool, error) {
+	if hook := f.beforeSelectMediaFormat; hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.selectErr != nil {
+		return false, f.selectErr
+	}
+	j, exists := f.jobs[jobID]
+	if !exists || j.Status != StatusAwaitingSelection {
+		return false, nil
+	}
+	if entry != nil && f.queue != nil {
+		pos, err := f.queue.NextPosition(ctx, j.Priority)
+		if err != nil {
+			return false, err
+		}
+		entry.JobID = jobID
+		entry.Position = pos
+		if err := f.queue.Enqueue(ctx, entry); err != nil {
+			return false, err
+		}
+	}
+	infoCopy := *info
+	j.MediaInfo = &infoCopy
+	j.Status = StatusQueued
+	j.UpdatedAt = time.Now()
+	return true, nil
+}
+
+func (f *fakeJobRepository) CancelAwaitingSelection(ctx context.Context, jobID string) (bool, error) {
+	if hook := f.beforeCancelAwaitingSelection; hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return false, f.updateErr
+	}
+	j, exists := f.jobs[jobID]
+	if !exists || j.Status != StatusAwaitingSelection {
+		return false, nil
+	}
+	if f.queue != nil {
+		if err := f.queue.Delete(ctx, jobID); err != nil {
+			return false, err
+		}
+	}
+	j.Status = StatusCancelled
+	j.SpeedBytesPerSecond = 0
+	j.ETASeconds = 0
+	j.UpdatedAt = time.Now()
+	return true, nil
+}
+
+func (f *fakeJobRepository) FailMediaAnalysis(ctx context.Context, jobID, reason string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, exists := f.jobs[jobID]
+	if !exists || j.Status != StatusAnalyzing {
+		return false, nil
+	}
+	j.Status = StatusFailed
+	j.Error = reason
+	j.UpdatedAt = time.Now()
+	return true, nil
 }
 
 type fakeEventBus struct {
@@ -2302,6 +2395,18 @@ func (f *failingUpdateJobRepo) Create(ctx context.Context, j *Job) error {
 }
 func (f *failingUpdateJobRepo) Update(ctx context.Context, j *Job) error {
 	return errors.New("simulated DB update failure")
+}
+func (f *failingUpdateJobRepo) CompleteMediaAnalysis(ctx context.Context, jobID, title string, info *MediaInfo) (bool, error) {
+	return false, errors.New("simulated DB update failure")
+}
+func (f *failingUpdateJobRepo) FailMediaAnalysis(ctx context.Context, jobID, reason string) (bool, error) {
+	return false, errors.New("simulated DB update failure")
+}
+func (f *failingUpdateJobRepo) SelectMediaFormat(ctx context.Context, jobID string, info *MediaInfo, entry *QueueEntry) (bool, error) {
+	return false, errors.New("simulated DB update failure")
+}
+func (f *failingUpdateJobRepo) CancelAwaitingSelection(ctx context.Context, jobID string) (bool, error) {
+	return false, errors.New("simulated DB update failure")
 }
 func (f *failingUpdateJobRepo) UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority JobPriority, newPosition int64) error {
 	return errors.New("simulated DB atomic update failure")

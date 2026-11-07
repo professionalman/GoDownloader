@@ -302,6 +302,127 @@ func TestRepository_MediaJobPersistence(t *testing.T) {
 	}
 }
 
+func TestRepository_CompleteMediaAnalysis(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := NewSQLiteJobRepository(db)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &job.Job{
+		ID:        "test-an-1",
+		Source:    "https://youtube.com/watch?v=123",
+		Name:      "Analyzing...",
+		Status:    job.StatusAnalyzing,
+		Type:      job.TypeMedia,
+		Engine:    "ytdlp",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	info := &job.MediaInfo{
+		Title: "Final Video Title",
+		Formats: []job.MediaFormat{
+			{FormatID: "22", Resolution: "1280x720"},
+		},
+	}
+
+	// 1. Won = true on analyzing job
+	won, err := repo.CompleteMediaAnalysis(ctx, j.ID, info.Title, info)
+	if err != nil {
+		t.Fatalf("CompleteMediaAnalysis failed: %v", err)
+	}
+	if !won {
+		t.Fatalf("expected won == true")
+	}
+
+	updated, err := repo.GetByID(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("GetByID failed: %v", err)
+	}
+	if updated.Status != job.StatusAwaitingSelection {
+		t.Errorf("expected StatusAwaitingSelection, got %s", updated.Status)
+	}
+	if updated.Name != "Final Video Title" {
+		t.Errorf("expected Final Video Title, got %s", updated.Name)
+	}
+	if updated.MediaInfo == nil || len(updated.MediaInfo.Formats) != 1 {
+		t.Fatalf("expected persisted MediaInfo")
+	}
+
+	// 2. Won = false on non-analyzing job (already awaiting_selection)
+	wonAgain, err := repo.CompleteMediaAnalysis(ctx, j.ID, "Another Title", info)
+	if err != nil {
+		t.Fatalf("second CompleteMediaAnalysis returned error: %v", err)
+	}
+	if wonAgain {
+		t.Errorf("expected won == false on already-completed job")
+	}
+
+	// 3. Won = false on non-existent job
+	wonMissing, err := repo.CompleteMediaAnalysis(ctx, "non-existent", "Title", info)
+	if err != nil {
+		t.Fatalf("CompleteMediaAnalysis on missing job returned error: %v", err)
+	}
+	if wonMissing {
+		t.Errorf("expected won == false on missing job")
+	}
+}
+
+func TestRepository_FailMediaAnalysis(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := NewSQLiteJobRepository(db)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	j := &job.Job{
+		ID:        "test-an-fail",
+		Source:    "https://youtube.com/watch?v=456",
+		Name:      "Analyzing...",
+		Status:    job.StatusAnalyzing,
+		Type:      job.TypeMedia,
+		Engine:    "ytdlp",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.Create(ctx, j); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	won, err := repo.FailMediaAnalysis(ctx, j.ID, "Media analysis failed: boom")
+	if err != nil || !won {
+		t.Fatalf("expected conditional failure to win, won=%v err=%v", won, err)
+	}
+	updated, _ := repo.GetByID(ctx, j.ID)
+	if updated.Status != job.StatusFailed || updated.Error != "Media analysis failed: boom" {
+		t.Fatalf("unexpected persisted state: status=%s error=%q", updated.Status, updated.Error)
+	}
+
+	// A cancelled job must not be overwritten by a stale analysis failure.
+	updated.Status = job.StatusCancelled
+	updated.Error = ""
+	if err := repo.Update(ctx, updated); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	won, err = repo.FailMediaAnalysis(ctx, j.ID, "stale failure")
+	if err != nil || won {
+		t.Fatalf("expected stale failure to lose, won=%v err=%v", won, err)
+	}
+	final, _ := repo.GetByID(ctx, j.ID)
+	if final.Status != job.StatusCancelled || final.Error != "" {
+		t.Fatalf("cancellation overwritten: status=%s error=%q", final.Status, final.Error)
+	}
+
+	// CompleteMediaAnalysis refuses nil metadata rather than persisting an empty selection state.
+	if _, err := repo.CompleteMediaAnalysis(ctx, j.ID, "t", nil); err == nil {
+		t.Fatal("expected error for nil media info")
+	}
+}
+
 func TestRepository_GetActiveTorrentJobByInfoHash(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()

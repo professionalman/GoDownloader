@@ -18,6 +18,14 @@ type IJobRepository interface {
 	ListRecoverable(ctx context.Context) ([]Job, error)
 	ListPendingEngineCleanups(ctx context.Context) ([]Job, error)
 	CountDownloading(ctx context.Context) (int, error)
+	CompleteMediaAnalysis(ctx context.Context, jobID, title string, info *MediaInfo) (bool, error)
+	FailMediaAnalysis(ctx context.Context, jobID, reason string) (bool, error)
+	// SelectMediaFormat atomically moves an AWAITING_SELECTION job to QUEUED with info and, when entry is
+	// non-nil, inserts its queue entry in the same transaction. It returns false if the job left AWAITING_SELECTION.
+	SelectMediaFormat(ctx context.Context, jobID string, info *MediaInfo, entry *QueueEntry) (bool, error)
+	// CancelAwaitingSelection atomically moves an AWAITING_SELECTION job to CANCELLED and removes any queue
+	// entry in the same transaction. It returns false if the job left AWAITING_SELECTION.
+	CancelAwaitingSelection(ctx context.Context, jobID string) (bool, error)
 }
 
 // IEventBus defines the interface for publishing and subscribing to events.

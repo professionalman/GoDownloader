@@ -20,7 +20,7 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 		ID:     "sub-test-job-1",
 		Source: "https://example.com/watch?v=subtest",
 		Type:   job.TypeMedia,
-		Status: job.StatusAnalyzing,
+		Status: job.StatusAwaitingSelection,
 		MediaInfo: &job.MediaInfo{
 			Title: "Subtitle Test Video",
 			Formats: []job.MediaFormat{
@@ -66,7 +66,7 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 
 	t.Run("Valid format selection with subtitles and English translation", func(t *testing.T) {
 		// Reset job to analyzing
-		j.Status = job.StatusAnalyzing
+		j.Status = job.StatusAwaitingSelection
 		j.MediaInfo.SelectedFmt = ""
 		_ = jobRepo.Update(context.Background(), j)
 
@@ -115,7 +115,7 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 	})
 
 	t.Run("Invalid subtitle mode returns 400", func(t *testing.T) {
-		j.Status = job.StatusAnalyzing
+		j.Status = job.StatusAwaitingSelection
 		_ = jobRepo.Update(context.Background(), j)
 
 		body := `{
@@ -137,7 +137,7 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 	})
 
 	t.Run("Auto-only language without includeAuto returns 400", func(t *testing.T) {
-		j.Status = job.StatusAnalyzing
+		j.Status = job.StatusAwaitingSelection
 		_ = jobRepo.Update(context.Background(), j)
 
 		body := `{
@@ -160,7 +160,7 @@ func TestSelectFormatWithSubtitlesAPI(t *testing.T) {
 	})
 
 	t.Run("Auto-only language with includeAuto returns 200", func(t *testing.T) {
-		j.Status = job.StatusAnalyzing
+		j.Status = job.StatusAwaitingSelection
 		_ = jobRepo.Update(context.Background(), j)
 
 		body := `{

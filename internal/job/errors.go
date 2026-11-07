@@ -68,6 +68,14 @@ const (
 	ErrSeedingPolicyStateAmbiguous     = "SEEDING_POLICY_STATE_AMBIGUOUS"
 	ErrTorrentAlreadyManaged           = "TORRENT_ALREADY_MANAGED"
 	ErrTorrentAlreadyExistsExternally  = "TORRENT_ALREADY_EXISTS_EXTERNALLY"
+	ErrYtDlpUnavailable                = "YT_DLP_UNAVAILABLE"
+)
+
+var (
+	// ErrLeaseConflict is returned when TryAcquire is called for a job holding a lease with different requirements.
+	ErrLeaseConflict = errors.New("lease conflict: job holds lease with different requirements")
+	// ErrGovernorClosed is returned when operations are attempted on a stopped governor.
+	ErrGovernorClosed = errors.New("resource governor closed")
 )
 
 // EngineAPIError represents a non-200 HTTP response from an engine API.

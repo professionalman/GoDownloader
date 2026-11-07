@@ -1,6 +1,7 @@
 package job
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -12,25 +13,42 @@ var ErrResourceCapacityExceeded = errors.New("resource capacity exceeded")
 
 // ResourceRequirements specifies the scarce capacity needed to execute a job.
 type ResourceRequirements struct {
-	Engine string // "aria2", "qbittorrent", "ytdlp", etc.
+	Engine           string // "aria2", "qbittorrent", "ytdlp", etc.
+	MediaAnalysis    bool   // Acquire analysis capacity (does not acquire global transfer)
+	FFmpegProcessing bool   // Acquire conservative FFmpeg processing reservation with download
 }
 
 // ResourceLease represents an acquired, tracked set of resources for a job.
 type ResourceLease struct {
-	JobID      string
-	Engine     string
-	AcquiredAt time.Time
+	JobID            string
+	Engine           string
+	AcquiredAt       time.Time
+	GlobalTransfer   bool
+	MediaAnalysis    bool
+	FFmpegProcessing bool
+}
+
+// matchesRequirements checks if an existing lease matches requested requirements.
+func (l *ResourceLease) matchesRequirements(req ResourceRequirements) bool {
+	if req.MediaAnalysis {
+		return l.MediaAnalysis && !l.GlobalTransfer && !l.FFmpegProcessing
+	}
+	return !l.MediaAnalysis && l.GlobalTransfer && l.Engine == req.Engine && l.FFmpegProcessing == req.FFmpegProcessing
 }
 
 // ResourceGovernorConfig defines capacity thresholds for the governor.
 type ResourceGovernorConfig struct {
-	GlobalTransferLimit int
-	EngineLimits        map[string]int
+	GlobalTransferLimit   int
+	EngineLimits          map[string]int
+	MediaAnalysisLimit    int
+	FFmpegProcessingLimit int
 }
 
 const (
-	DefaultGlobalTransferLimit = 3
-	DefaultYtdlpEngineLimit    = 2
+	DefaultGlobalTransferLimit   = 3
+	DefaultYtdlpEngineLimit      = 2
+	DefaultMediaAnalysisLimit    = 2
+	DefaultFFmpegProcessingLimit = 1
 )
 
 // DefaultResourceGovernorConfig returns safe, conservative baseline limits.
@@ -43,29 +61,48 @@ func DefaultResourceGovernorConfig() ResourceGovernorConfig {
 		EngineLimits: map[string]int{
 			"ytdlp": DefaultYtdlpEngineLimit,
 		},
+		MediaAnalysisLimit:    DefaultMediaAnalysisLimit,
+		FFmpegProcessingLimit: DefaultFFmpegProcessingLimit,
 	}
 }
 
 // ResourceGovernorSnapshot represents a point-in-time view of limits and usage.
 type ResourceGovernorSnapshot struct {
-	GlobalTransferLimit int            `json:"globalTransferLimit"`
-	ActiveTransfers     int            `json:"activeTransfers"`
-	EngineLimits        map[string]int `json:"engineLimits"`
-	ActivePerEngine     map[string]int `json:"activePerEngine"`
-	ActiveLeases        int            `json:"activeLeases"`
+	GlobalTransferLimit    int            `json:"globalTransferLimit"`
+	ActiveTransfers        int            `json:"activeTransfers"`
+	EngineLimits           map[string]int `json:"engineLimits"`
+	ActivePerEngine        map[string]int `json:"activePerEngine"`
+	MediaAnalysisLimit     int            `json:"mediaAnalysisLimit"`
+	ActiveAnalysis         int            `json:"activeAnalysis"`
+	FFmpegProcessingLimit  int            `json:"ffmpegProcessingLimit"`
+	ActiveFFmpegProcessing int            `json:"activeFFmpegProcessing"`
+	ActiveLeases           int            `json:"activeLeases"`
+}
+
+type analysisWaiter struct {
+	jobID string
+	ready chan struct{}
+	lease *ResourceLease
 }
 
 // ResourceGovernor manages admission of scarce runtime execution resources.
 // It is fully in-memory, concurrency-safe, and reconstructible after restarts.
 type ResourceGovernor struct {
-	mu                  sync.Mutex
-	globalLimitFn       func() int
-	globalTransferLimit int
-	engineLimits        map[string]int
+	mu                    sync.Mutex
+	globalLimitFn         func() int
+	globalTransferLimit   int
+	engineLimits          map[string]int
+	mediaAnalysisLimit    int
+	ffmpegProcessingLimit int
 
-	leases          map[string]*ResourceLease
-	activeTransfers int
-	activePerEngine map[string]int
+	leases                 map[string]*ResourceLease
+	activeTransfers        int
+	activePerEngine        map[string]int
+	activeAnalysis         int
+	activeFFmpegProcessing int
+
+	analysisWaiters []*analysisWaiter
+	closed          bool
 }
 
 // NewResourceGovernor creates a new ResourceGovernor instance.
@@ -75,6 +112,16 @@ func NewResourceGovernor(cfg ResourceGovernorConfig, globalLimitFn ...func() int
 	gLimit := cfg.GlobalTransferLimit
 	if gLimit <= 0 {
 		gLimit = DefaultGlobalTransferLimit
+	}
+
+	analysisLimit := cfg.MediaAnalysisLimit
+	if analysisLimit <= 0 {
+		analysisLimit = DefaultMediaAnalysisLimit
+	}
+
+	procLimit := cfg.FFmpegProcessingLimit
+	if procLimit <= 0 {
+		procLimit = DefaultFFmpegProcessingLimit
 	}
 
 	eLimits := make(map[string]int)
@@ -95,11 +142,14 @@ func NewResourceGovernor(cfg ResourceGovernorConfig, globalLimitFn ...func() int
 	}
 
 	return &ResourceGovernor{
-		globalLimitFn:       fn,
-		globalTransferLimit: gLimit,
-		engineLimits:        eLimits,
-		leases:              make(map[string]*ResourceLease),
-		activePerEngine:     make(map[string]int),
+		globalLimitFn:         fn,
+		globalTransferLimit:   gLimit,
+		engineLimits:          eLimits,
+		mediaAnalysisLimit:    analysisLimit,
+		ffmpegProcessingLimit: procLimit,
+		leases:                make(map[string]*ResourceLease),
+		activePerEngine:       make(map[string]int),
+		analysisWaiters:       make([]*analysisWaiter, 0),
 	}
 }
 
@@ -120,8 +170,21 @@ func (g *ResourceGovernor) effectiveEngineLimit(engine string) int {
 	if limit, ok := g.engineLimits[engine]; ok && limit > 0 {
 		return limit
 	}
-	// Fall back to the effective global limit if no engine-specific limit is declared
 	return g.effectiveGlobalTransferLimit()
+}
+
+func (g *ResourceGovernor) effectiveAnalysisLimit() int {
+	if g.mediaAnalysisLimit > 0 {
+		return g.mediaAnalysisLimit
+	}
+	return DefaultMediaAnalysisLimit
+}
+
+func (g *ResourceGovernor) effectiveProcessingLimit() int {
+	if g.ffmpegProcessingLimit > 0 {
+		return g.ffmpegProcessingLimit
+	}
+	return DefaultFFmpegProcessingLimit
 }
 
 // CanAdmit performs a non-mutating check whether the given requirements can currently be admitted.
@@ -133,6 +196,18 @@ func (g *ResourceGovernor) CanAdmit(req ResourceRequirements) (bool, string) {
 }
 
 func (g *ResourceGovernor) canAdmitLocked(req ResourceRequirements) (bool, string) {
+	if req.MediaAnalysis {
+		// Non-blocking admission must not jump ahead of FIFO waiters.
+		if len(g.analysisWaiters) > 0 {
+			return false, fmt.Sprintf("media analysis admission queue not empty (%d waiting)", len(g.analysisWaiters))
+		}
+		analysisLimit := g.effectiveAnalysisLimit()
+		if g.activeAnalysis >= analysisLimit {
+			return false, fmt.Sprintf("media analysis capacity full (%d/%d)", g.activeAnalysis, analysisLimit)
+		}
+		return true, ""
+	}
+
 	// Normal download transfer
 	globalLimit := g.effectiveGlobalTransferLimit()
 	if g.activeTransfers >= globalLimit {
@@ -147,23 +222,42 @@ func (g *ResourceGovernor) canAdmitLocked(req ResourceRequirements) (bool, strin
 		}
 	}
 
+	if req.FFmpegProcessing {
+		procLimit := g.effectiveProcessingLimit()
+		if g.activeFFmpegProcessing >= procLimit {
+			return false, fmt.Sprintf("ffmpeg processing capacity full (%d/%d)", g.activeFFmpegProcessing, procLimit)
+		}
+	}
+
 	return true, ""
 }
 
 // TryAcquire atomically validates and acquires transfer capacity for jobID.
 // If any resource dimension is unavailable, zero capacity is allocated and an error is returned.
 // Calling TryAcquire for a jobID that already holds an equivalent lease is an idempotent no-op.
+// Calling TryAcquire with different requirements returns ErrLeaseConflict.
 func (g *ResourceGovernor) TryAcquire(jobID string, req ResourceRequirements) (*ResourceLease, error) {
 	if jobID == "" {
 		return nil, fmt.Errorf("jobID cannot be empty")
 	}
 
+	if req.MediaAnalysis && req.FFmpegProcessing {
+		return nil, fmt.Errorf("invalid resource requirements: cannot request MediaAnalysis and FFmpegProcessing together")
+	}
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// Idempotency: if already holding lease for this job, return it directly
+	if g.closed {
+		return nil, ErrGovernorClosed
+	}
+
+	// Check existing lease for this jobID
 	if existing, ok := g.leases[jobID]; ok && existing != nil {
-		return existing, nil
+		if existing.matchesRequirements(req) {
+			return existing, nil
+		}
+		return nil, ErrLeaseConflict
 	}
 
 	admissible, reason := g.canAdmitLocked(req)
@@ -172,18 +266,151 @@ func (g *ResourceGovernor) TryAcquire(jobID string, req ResourceRequirements) (*
 	}
 
 	lease := &ResourceLease{
-		JobID:      jobID,
-		Engine:     req.Engine,
-		AcquiredAt: time.Now(),
+		JobID:            jobID,
+		Engine:           req.Engine,
+		AcquiredAt:       time.Now(),
+		GlobalTransfer:   !req.MediaAnalysis,
+		MediaAnalysis:    req.MediaAnalysis,
+		FFmpegProcessing: req.FFmpegProcessing,
 	}
 
-	g.activeTransfers++
-	if req.Engine != "" {
-		g.activePerEngine[req.Engine]++
+	if req.MediaAnalysis {
+		g.activeAnalysis++
+	} else {
+		g.activeTransfers++
+		if req.Engine != "" {
+			g.activePerEngine[req.Engine]++
+		}
+		if req.FFmpegProcessing {
+			g.activeFFmpegProcessing++
+		}
 	}
 
 	g.leases[jobID] = lease
 	return lease, nil
+}
+
+// WaitAcquireAnalysis acquires a media analysis slot for jobID, waiting in FIFO order if capacity is full.
+func (g *ResourceGovernor) WaitAcquireAnalysis(ctx context.Context, jobID string) (*ResourceLease, error) {
+	if jobID == "" {
+		return nil, fmt.Errorf("jobID cannot be empty")
+	}
+
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return nil, ErrGovernorClosed
+	}
+
+	if err := ctx.Err(); err != nil {
+		g.mu.Unlock()
+		return nil, err
+	}
+
+	// Check if already holding a lease
+	if existing, ok := g.leases[jobID]; ok && existing != nil {
+		if existing.MediaAnalysis {
+			g.mu.Unlock()
+			return existing, nil
+		}
+		g.mu.Unlock()
+		return nil, ErrLeaseConflict
+	}
+
+	// Check if already waiting
+	for _, w := range g.analysisWaiters {
+		if w.jobID == jobID {
+			g.mu.Unlock()
+			return nil, fmt.Errorf("job %s is already waiting for analysis admission", jobID)
+		}
+	}
+
+	// Immediate admission if no waiters and capacity available
+	if len(g.analysisWaiters) == 0 && g.activeAnalysis < g.effectiveAnalysisLimit() {
+		lease := &ResourceLease{
+			JobID:         jobID,
+			Engine:        "ytdlp",
+			AcquiredAt:    time.Now(),
+			MediaAnalysis: true,
+		}
+		g.activeAnalysis++
+		g.leases[jobID] = lease
+		g.mu.Unlock()
+		return lease, nil
+	}
+
+	waiter := &analysisWaiter{
+		jobID: jobID,
+		ready: make(chan struct{}),
+	}
+	g.analysisWaiters = append(g.analysisWaiters, waiter)
+	g.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		g.mu.Lock()
+		select {
+		case <-waiter.ready:
+			// Lease was already assigned before lock was acquired; release only that exact lease.
+			if waiter.lease != nil && g.leases[waiter.jobID] == waiter.lease {
+				g.releaseLocked(waiter.jobID)
+			}
+			g.mu.Unlock()
+			return nil, ctx.Err()
+		default:
+			// Remove from waiter queue
+			for i, w := range g.analysisWaiters {
+				if w == waiter {
+					g.analysisWaiters = append(g.analysisWaiters[:i], g.analysisWaiters[i+1:]...)
+					break
+				}
+			}
+			g.mu.Unlock()
+			return nil, ctx.Err()
+		}
+
+	case <-waiter.ready:
+		if waiter.lease == nil {
+			return nil, ErrGovernorClosed
+		}
+		if err := ctx.Err(); err != nil {
+			g.ReleaseLease(waiter.lease)
+			return nil, err
+		}
+		return waiter.lease, nil
+	}
+}
+
+func (g *ResourceGovernor) wakeNextAnalysisWaiterLocked() {
+	if g.closed {
+		return
+	}
+	for len(g.analysisWaiters) > 0 && g.activeAnalysis < g.effectiveAnalysisLimit() {
+		w := g.analysisWaiters[0]
+		g.analysisWaiters = g.analysisWaiters[1:]
+
+		lease := &ResourceLease{
+			JobID:         w.jobID,
+			Engine:        "ytdlp",
+			AcquiredAt:    time.Now(),
+			MediaAnalysis: true,
+		}
+		g.activeAnalysis++
+		g.leases[w.jobID] = lease
+		w.lease = lease
+		close(w.ready)
+	}
+}
+
+// Stop closes the governor and unparks any waiting analysis callers.
+func (g *ResourceGovernor) Stop() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
+	for _, w := range g.analysisWaiters {
+		close(w.ready)
+	}
+	g.analysisWaiters = nil
 }
 
 // Release idempotently restores capacity held by jobID.
@@ -196,6 +423,45 @@ func (g *ResourceGovernor) Release(jobID string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	return g.releaseLocked(jobID)
+}
+
+// ReleaseLease releases the capacity held by lease only if the lease matches the currently held lease for that JobID.
+// This prevents older workers from releasing a lease that was subsequently acquired by a newer worker for the same JobID.
+func (g *ResourceGovernor) ReleaseLease(lease *ResourceLease) bool {
+	if lease == nil || lease.JobID == "" {
+		return false
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	current, ok := g.leases[lease.JobID]
+	if !ok || current != lease {
+		return false
+	}
+
+	return g.releaseLocked(lease.JobID)
+}
+
+// ReleaseTransfer releases jobID's lease only if it is not a media analysis lease.
+// Analysis leases are owned by the analysis worker and released solely via ReleaseLease once the
+// probe subprocess has terminated, so generic terminal cleanup cannot free a permit still in use.
+func (g *ResourceGovernor) ReleaseTransfer(jobID string) bool {
+	if jobID == "" {
+		return false
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if lease, ok := g.leases[jobID]; ok && lease != nil && lease.MediaAnalysis {
+		return false
+	}
+	return g.releaseLocked(jobID)
+}
+
+func (g *ResourceGovernor) releaseLocked(jobID string) bool {
 	lease, ok := g.leases[jobID]
 	if !ok || lease == nil {
 		return false
@@ -203,14 +469,30 @@ func (g *ResourceGovernor) Release(jobID string) bool {
 
 	delete(g.leases, jobID)
 
-	g.activeTransfers--
-	if g.activeTransfers < 0 {
-		g.activeTransfers = 0
-	}
-	if lease.Engine != "" {
-		g.activePerEngine[lease.Engine]--
-		if g.activePerEngine[lease.Engine] < 0 {
-			g.activePerEngine[lease.Engine] = 0
+	if lease.MediaAnalysis {
+		g.activeAnalysis--
+		if g.activeAnalysis < 0 {
+			g.activeAnalysis = 0
+		}
+		g.wakeNextAnalysisWaiterLocked()
+	} else {
+		if lease.GlobalTransfer {
+			g.activeTransfers--
+			if g.activeTransfers < 0 {
+				g.activeTransfers = 0
+			}
+		}
+		if lease.Engine != "" {
+			g.activePerEngine[lease.Engine]--
+			if g.activePerEngine[lease.Engine] < 0 {
+				g.activePerEngine[lease.Engine] = 0
+			}
+		}
+		if lease.FFmpegProcessing {
+			g.activeFFmpegProcessing--
+			if g.activeFFmpegProcessing < 0 {
+				g.activeFFmpegProcessing = 0
+			}
 		}
 	}
 
@@ -238,9 +520,10 @@ func (g *ResourceGovernor) ReconstructJob(j *Job) bool {
 
 	now := time.Now()
 	lease := &ResourceLease{
-		JobID:      j.ID,
-		Engine:     j.Engine,
-		AcquiredAt: now,
+		JobID:          j.ID,
+		Engine:         j.Engine,
+		AcquiredAt:     now,
+		GlobalTransfer: true,
 	}
 
 	switch j.Status {
@@ -251,7 +534,6 @@ func (g *ResourceGovernor) ReconstructJob(j *Job) bool {
 		}
 	case StatusSeeding:
 		// StatusSeeding does not consume transfer capacity.
-		// Seeding capacity is an explicitly deferred hard admission dimension under YAGNI.
 		return false
 	default:
 		// Not in a resource-consuming state
@@ -291,11 +573,15 @@ func (g *ResourceGovernor) Snapshot() ResourceGovernorSnapshot {
 	}
 
 	return ResourceGovernorSnapshot{
-		GlobalTransferLimit: g.effectiveGlobalTransferLimit(),
-		ActiveTransfers:     g.activeTransfers,
-		EngineLimits:        engLimits,
-		ActivePerEngine:     activeEng,
-		ActiveLeases:        len(g.leases),
+		GlobalTransferLimit:    g.effectiveGlobalTransferLimit(),
+		ActiveTransfers:        g.activeTransfers,
+		EngineLimits:           engLimits,
+		ActivePerEngine:        activeEng,
+		MediaAnalysisLimit:     g.effectiveAnalysisLimit(),
+		ActiveAnalysis:         g.activeAnalysis,
+		FFmpegProcessingLimit:  g.effectiveProcessingLimit(),
+		ActiveFFmpegProcessing: g.activeFFmpegProcessing,
+		ActiveLeases:           len(g.leases),
 	}
 }
 
@@ -321,4 +607,25 @@ func (g *ResourceGovernor) SetEngineLimit(engine string, limit int) {
 	} else {
 		delete(g.engineLimits, engine)
 	}
+}
+
+// SetMediaAnalysisLimit dynamically updates the media analysis limit.
+func (g *ResourceGovernor) SetMediaAnalysisLimit(limit int) {
+	if limit <= 0 {
+		limit = DefaultMediaAnalysisLimit
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.mediaAnalysisLimit = limit
+	g.wakeNextAnalysisWaiterLocked()
+}
+
+// SetFFmpegProcessingLimit dynamically updates the FFmpeg processing limit.
+func (g *ResourceGovernor) SetFFmpegProcessingLimit(limit int) {
+	if limit <= 0 {
+		limit = DefaultFFmpegProcessingLimit
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ffmpegProcessingLimit = limit
 }

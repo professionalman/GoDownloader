@@ -14,7 +14,7 @@ var validTransitions = map[JobStatus][]JobStatus{
 	StatusDownloading:       {StatusPaused, StatusFailed, StatusCompleted, StatusCancelled, StatusProcessing, StatusSeeding},
 	StatusPaused:            {StatusQueued, StatusDownloading, StatusCancelled},
 	StatusFailed:            {StatusQueued, StatusAnalyzing},
-	StatusAnalyzing:         {StatusQueued, StatusDownloading, StatusFailed, StatusCancelled, StatusAwaitingSelection},
+	StatusAnalyzing:         {StatusAwaitingSelection, StatusFailed, StatusCancelled},
 	StatusProcessing:        {StatusCompleted, StatusFailed, StatusCancelled},
 	StatusAwaitingSelection: {StatusQueued, StatusDownloading, StatusCancelled},
 	StatusSeeding:           {StatusCompleted, StatusFailed},

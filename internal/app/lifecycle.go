@@ -148,11 +148,12 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 	registry := engine.NewRegistry()
 	registry.Register("aria2", eng)
 
-	resolvedYtdlpPath := cfg.YtdlpPath
-	if ytdlpInfo != nil && ytdlpInfo.Available() {
+	resolvedYtdlpPath := ""
+	ytdlpAvailable := ytdlpInfo != nil && ytdlpInfo.Available()
+	if ytdlpAvailable {
 		resolvedYtdlpPath = ytdlpInfo.ExecutablePath
 	}
-	resolvedFFmpegPath := cfg.FFmpegPath
+	resolvedFFmpegPath := ""
 	if ffmpegInfo != nil && ffmpegInfo.Available() {
 		resolvedFFmpegPath = ffmpegInfo.ExecutablePath
 	}
@@ -160,7 +161,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 	ytdlpEng := ytdlp.NewEngine(resolvedYtdlpPath, resolvedFFmpegPath)
 	ytdlpEng.SetAuthProvider(mediaAuthService)
 	ytdlpEng.SetProcessSupervisor(processSupervisor)
-	if ytdlpEng.Available() {
+	if ytdlpAvailable && ytdlpEng.Available() {
 		registry.Register("ytdlp", ytdlpEng)
 		log.Printf("yt-dlp engine: available (provenance=%s, version=%s, path=%s)", ytdlpInfo.Provenance, ytdlpInfo.Version, resolvedYtdlpPath)
 	} else {

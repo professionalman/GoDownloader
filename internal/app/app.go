@@ -111,3 +111,18 @@ func (a *App) MediaAuth() *mediaauth.Service {
 func (a *App) EventBus() *events.InMemoryBus {
 	return a.bus
 }
+
+// Registry returns the engine registry.
+func (a *App) Registry() *engine.Registry {
+	return a.registry
+}
+
+// ToolManager returns the tool manager.
+func (a *App) ToolManager() *toolmanager.Manager {
+	return a.toolMgr
+}
+
+// Repo returns the job repository.
+func (a *App) Repo() *database.SQLiteJobRepository {
+	return a.repo
+}

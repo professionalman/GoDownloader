@@ -13,7 +13,7 @@ func TestValidateTransition_Valid(t *testing.T) {
 		{StatusQueued, StatusAnalyzing},
 		{StatusQueued, StatusCancelled},
 		{StatusQueued, StatusFailed},
-		{StatusAnalyzing, StatusDownloading},
+		{StatusAnalyzing, StatusAwaitingSelection},
 		{StatusAnalyzing, StatusFailed},
 		{StatusAnalyzing, StatusCancelled},
 		{StatusDownloading, StatusPaused},

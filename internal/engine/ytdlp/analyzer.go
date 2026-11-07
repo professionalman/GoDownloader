@@ -56,6 +56,12 @@ func (e *Engine) Analyze(ctx context.Context, url string) (*job.MediaInfo, error
 
 // AnalyzeWithPolicy applies server-resolved network controls and media authentication without exposing raw flags.
 func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *networkpolicy.RuntimePolicy) (*job.MediaInfo, error) {
+	usageRelease, err := e.AcquireUse()
+	if err != nil {
+		return nil, fmt.Errorf("cannot start media analysis: %w", err)
+	}
+	defer usageRelease()
+
 	var authArgs []string
 	cleanup := func() {}
 	e.mu.RLock()

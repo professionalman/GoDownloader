@@ -26,13 +26,19 @@ func TestRegistry_Detect(t *testing.T) {
 		{"Direct ISO", "https://releases.ubuntu.com/22.04/ubuntu-22.04-desktop-amd64.iso", "aria2"},
 		{"Direct PDF", "https://example.com/docs/paper.pdf", "aria2"},
 		{"YouTube Video", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "ytdlp"},
+		{"YouTube Mobile", "https://m.youtube.com/watch?v=dQw4w9WgXcQ", "ytdlp"},
 		{"YouTube Short", "https://youtu.be/dQw4w9WgXcQ", "ytdlp"},
 		{"Vimeo Video", "https://vimeo.com/123456789", "ytdlp"},
+		{"Vimeo Subdomain", "https://player.vimeo.com/video/123456789", "ytdlp"},
 		{"Extensionless direct URL", "https://example.com/download?id=123", "aria2"},
 		{"Extensionless file link", "https://files.example.com/get/ABC123", "aria2"},
 		{"URL with word magnet but HTTP scheme", "https://example.com/magnetic-file.zip", "aria2"},
 		{"URL with word magnet in path", "https://example.com/magnet/file.iso", "aria2"},
 		{"Unsupported scheme", "ftp://example.com/file.txt", "aria2"},
+		// Anti-spoofing tests
+		{"Attacker spoofed suffix", "https://youtube.com.attacker.com/watch?v=123", "aria2"},
+		{"Attacker spoofed prefix", "https://fakeyoutube.com/watch?v=123", "aria2"},
+		{"Attacker spoofed vimeo", "https://notvimeo.com/123", "aria2"},
 	}
 
 	for _, tt := range tests {
@@ -57,6 +63,18 @@ func TestRegistry_Detect(t *testing.T) {
 		}
 		if got := rNoQbit.Detect("/tmp/file.torrent"); got != "aria2" {
 			t.Errorf("expected aria2 fallback for .torrent path, got %q", got)
+		}
+	})
+
+	t.Run("Zero aria2 fallback for known media URLs when ytdlp is unregistered", func(t *testing.T) {
+		rNoYtdlp := NewRegistry()
+		rNoYtdlp.engines["aria2"] = nil
+
+		if got := rNoYtdlp.Detect("https://www.youtube.com/watch?v=dQw4w9WgXcQ"); got != "ytdlp" {
+			t.Errorf("expected ytdlp classification even when unregistered, got %q", got)
+		}
+		if got := rNoYtdlp.Detect("https://vimeo.com/12345"); got != "ytdlp" {
+			t.Errorf("expected ytdlp classification even when unregistered, got %q", got)
 		}
 	})
 }

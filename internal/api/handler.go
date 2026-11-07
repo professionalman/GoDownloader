@@ -496,7 +496,7 @@ func writeAppError(w http.ResponseWriter, err error) {
 		case job.ErrCapabilityNotSupported, job.ErrPrivateTorrentTrackerRejected:
 			httpStatus = http.StatusUnprocessableEntity
 		case job.ErrInvalidJobState, job.ErrNetworkSettingStateAmbiguous, job.ErrSeedingPolicyStateAmbiguous,
-			job.ErrTorrentAlreadyManaged, job.ErrTorrentAlreadyExistsExternally:
+			job.ErrTorrentAlreadyManaged, job.ErrTorrentAlreadyExistsExternally, job.ErrYtDlpUnavailable:
 			httpStatus = http.StatusConflict
 		case job.ErrNetworkSettingApplicationFailed, job.ErrSeedingPolicyApplicationFailed:
 			httpStatus = http.StatusServiceUnavailable

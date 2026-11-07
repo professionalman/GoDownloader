@@ -44,12 +44,15 @@ type Manager struct {
 
 	metadataTimeoutSeconds int
 
-	mu              sync.RWMutex
-	activeJobs      map[string]*Job // id -> job (in-memory cache for active jobs)
-	activeCancels   map[string]context.CancelFunc
-	appliedLimits   map[string]int64
-	terminalLocks   map[string]*sync.Mutex
-	reconcileCancel context.CancelFunc
+	mu                              sync.RWMutex
+	activeJobs                      map[string]*Job // id -> job (in-memory cache for active jobs)
+	activeCancels                   map[string]context.CancelFunc
+	activeAnalysisWorkers           map[string]*analysisWorker
+	inFlightSelections              map[string]bool
+	pendingMediaAnalysisResumptions []string
+	appliedLimits                   map[string]int64
+	terminalLocks                   map[string]*sync.Mutex
+	reconcileCancel                 context.CancelFunc
 
 	monitor *Monitor
 
@@ -64,17 +67,20 @@ func NewManager(repo IJobRepository, engines IEngineRegistry, bus IEventBus, dow
 		dDir = dataDir[0]
 	}
 	m := &Manager{
-		repo:                   repo,
-		engines:                engines,
-		bus:                    bus,
-		downloadDir:            downloadDir,
-		dataDir:                dDir,
-		torrentRepo:            torrentRepo,
-		metadataTimeoutSeconds: 300,
-		activeJobs:             make(map[string]*Job),
-		activeCancels:          make(map[string]context.CancelFunc),
-		appliedLimits:          make(map[string]int64),
-		terminalLocks:          make(map[string]*sync.Mutex),
+		repo:                            repo,
+		engines:                         engines,
+		bus:                             bus,
+		downloadDir:                     downloadDir,
+		dataDir:                         dDir,
+		torrentRepo:                     torrentRepo,
+		metadataTimeoutSeconds:          300,
+		activeJobs:                      make(map[string]*Job),
+		activeCancels:                   make(map[string]context.CancelFunc),
+		activeAnalysisWorkers:           make(map[string]*analysisWorker),
+		inFlightSelections:              make(map[string]bool),
+		pendingMediaAnalysisResumptions: make([]string, 0),
+		appliedLimits:                   make(map[string]int64),
+		terminalLocks:                   make(map[string]*sync.Mutex),
 	}
 	return m
 }
@@ -213,6 +219,7 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 		}
 		m.mu.RUnlock()
 	}
+	m.dispatchPendingMediaAnalyses(ctx)
 	m.ReconcileNetworkPolicies(ctx)
 	m.processPendingEngineCleanups(ctx)
 	reconcileCtx, cancel := context.WithCancel(ctx)
@@ -263,17 +270,24 @@ func (m *Manager) Stop() {
 	if m.scheduler != nil {
 		m.scheduler.Stop()
 	}
+	if gov := m.GetResourceGovernor(); gov != nil {
+		gov.Stop()
+	}
 	if m.monitor != nil {
 		m.monitor.Stop()
 	}
 
 	m.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(m.activeCancels))
+	cancels := make([]context.CancelFunc, 0, len(m.activeCancels)+len(m.activeAnalysisWorkers))
 	for id, cancel := range m.activeCancels {
 		if cancel != nil {
 			cancels = append(cancels, cancel)
 		}
 		delete(m.activeCancels, id)
+	}
+	// Analysis workers stay registered until they exit; they own and release their permits.
+	for _, w := range m.activeAnalysisWorkers {
+		cancels = append(cancels, w.cancel)
 	}
 	m.mu.Unlock()
 
@@ -306,9 +320,71 @@ func (m *Manager) triggerCancel(jobID string) {
 	if exists {
 		delete(m.activeCancels, jobID)
 	}
+	// Signal the analysis worker but keep it registered: it remains the owner of its permit and
+	// subprocess until it exits, which also blocks a duplicate worker for the same JobID meanwhile.
+	var analysisCancel context.CancelFunc
+	if w, ok := m.activeAnalysisWorkers[jobID]; ok {
+		analysisCancel = w.cancel
+	}
 	m.mu.Unlock()
 	if exists && cancel != nil {
 		cancel()
+	}
+	if analysisCancel != nil {
+		analysisCancel()
+	}
+}
+
+// analysisWorker identifies one analyzeMedia invocation so only that invocation can unregister itself.
+type analysisWorker struct {
+	cancel context.CancelFunc
+}
+
+func (m *Manager) registerAnalysisWorker(jobID string, cancel context.CancelFunc) (*analysisWorker, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.activeAnalysisWorkers[jobID]; exists {
+		return nil, false
+	}
+	w := &analysisWorker{cancel: cancel}
+	m.activeAnalysisWorkers[jobID] = w
+	return w, true
+}
+
+func (m *Manager) unregisterAnalysisWorker(jobID string, w *analysisWorker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.activeAnalysisWorkers[jobID] == w {
+		delete(m.activeAnalysisWorkers, jobID)
+	}
+}
+
+func (m *Manager) isAnalysisWorkerActive(jobID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.activeAnalysisWorkers[jobID]
+	return exists
+}
+
+func (m *Manager) recordPendingMediaAnalysis(jobID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pendingMediaAnalysisResumptions = append(m.pendingMediaAnalysisResumptions, jobID)
+}
+
+func (m *Manager) dispatchPendingMediaAnalyses(ctx context.Context) {
+	m.mu.Lock()
+	jobIDs := make([]string, len(m.pendingMediaAnalysisResumptions))
+	copy(jobIDs, m.pendingMediaAnalysisResumptions)
+	m.pendingMediaAnalysisResumptions = nil
+	m.mu.Unlock()
+
+	for _, id := range jobIDs {
+		j, err := m.repo.GetByID(ctx, id)
+		if err != nil || j == nil || j.Status != StatusAnalyzing {
+			continue
+		}
+		go m.analyzeMedia(ctx, j.ID, j.Source)
 	}
 }
 
@@ -422,6 +498,20 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 
 	// For media engine, set type and start analysis
 	if engineName == "ytdlp" {
+		eng, ok := m.engines.Get("ytdlp")
+		if !ok {
+			return nil, &AppError{
+				Code:    ErrYtDlpUnavailable,
+				Message: "yt-dlp is unavailable. Install yt-dlp in Settings and restart GoDownloader to enable media downloads.",
+			}
+		}
+		if avail, hasAvail := eng.(interface{ Available() bool }); hasAvail && !avail.Available() {
+			return nil, &AppError{
+				Code:    ErrYtDlpUnavailable,
+				Message: "yt-dlp is unavailable. Install yt-dlp in Settings and restart GoDownloader to enable media downloads.",
+			}
+		}
+
 		j.Type = TypeMedia
 		j.Status = StatusAnalyzing
 		j.Name = "Analyzing..."
@@ -682,80 +772,161 @@ func (m *Manager) attachCreationPolicy(ctx context.Context, j *Job, opts CreateO
 // analyzeMedia runs yt-dlp analysis in the background and updates the job.
 func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) {
 	ctx, cancel := context.WithCancel(context.Background())
-	m.registerCancel(jobID, cancel)
-	defer m.unregisterCancel(jobID)
+	defer cancel()
+	worker, registered := m.registerAnalysisWorker(jobID, cancel)
+	if !registered {
+		log.Printf("analyzeMedia: worker already active for job %s, aborting duplicate", jobID)
+		return
+	}
+	defer m.unregisterAnalysisWorker(jobID, worker)
 
 	j, err := m.repo.GetByID(ctx, jobID)
 	if err != nil || j == nil {
 		log.Printf("analyzeMedia: job %s not found", jobID)
 		return
 	}
+	if j.Status != StatusAnalyzing {
+		log.Printf("analyzeMedia: job %s is not in analyzing state (%s), aborting", jobID, j.Status)
+		return
+	}
 
 	eng, ok := m.engines.Get("ytdlp")
 	if !ok {
-		j.Status = StatusFailed
-		j.Error = "yt-dlp engine not available"
-		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
-		m.publish(EventJobFailed, j)
+		m.failMediaAnalysis(ctx, jobID, "yt-dlp engine not available")
 		return
 	}
 
 	analyzer, ok := eng.(IMediaAnalyzer)
 	if !ok {
-		j.Status = StatusFailed
-		j.Error = "yt-dlp engine does not support media analysis"
-		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
-		m.publish(EventJobFailed, j)
+		m.failMediaAnalysis(ctx, jobID, "yt-dlp engine does not support media analysis")
 		return
 	}
 
+	gov := m.GetResourceGovernor()
+	govLeaseHeld := false
+	var analysisLease *ResourceLease
+	if gov != nil {
+		var err error
+		analysisLease, err = gov.WaitAcquireAnalysis(ctx, jobID)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("analyzeMedia: wait for analysis slot cancelled for job %s", jobID)
+				return
+			}
+			if errors.Is(err, ErrGovernorClosed) {
+				// Application shutdown: leave the job ANALYZING so startup recovery resumes it.
+				log.Printf("analyzeMedia: governor closed while job %s waited for analysis admission", jobID)
+				return
+			}
+			m.failMediaAnalysis(ctx, jobID, fmt.Sprintf("failed to acquire analysis slot: %v", err))
+			return
+		}
+		govLeaseHeld = true
+		defer func() {
+			if govLeaseHeld && analysisLease != nil {
+				gov.ReleaseLease(analysisLease)
+			}
+		}()
+
+		// Verify durable DB state is still StatusAnalyzing immediately before executing probe.
+		currentJob, err := m.repo.GetByID(ctx, jobID)
+		if err != nil || currentJob == nil || currentJob.Status != StatusAnalyzing {
+			log.Printf("analyzeMedia: job %s status changed while waiting for admission, aborting probe", jobID)
+			gov.ReleaseLease(analysisLease)
+			govLeaseHeld = false
+			return
+		}
+	}
+
+	execCtx, execCancel := context.WithTimeout(ctx, 180*time.Second)
+	defer execCancel()
+
 	var info *MediaInfo
 	if policyAnalyzer, policyOK := eng.(INetworkMediaAnalyzer); policyOK {
-		runtime, policyErr := m.runtimePolicyForJob(ctx, j)
+		runtime, policyErr := m.runtimePolicyForJob(execCtx, j)
 		if policyErr != nil {
 			err = policyErr
 		} else {
-			info, err = policyAnalyzer.AnalyzeWithPolicy(ctx, source, runtime)
+			info, err = policyAnalyzer.AnalyzeWithPolicy(execCtx, source, runtime)
 		}
 	} else {
-		info, err = analyzer.Analyze(ctx, source)
+		info, err = analyzer.Analyze(execCtx, source)
 	}
+
+	// Subprocess termination -> release governor lease immediately
+	if govLeaseHeld && analysisLease != nil {
+		gov.ReleaseLease(analysisLease)
+		govLeaseHeld = false
+	}
+
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Printf("analyzeMedia: job %s analysis was cancelled", jobID)
 			return
 		}
-		j.Status = StatusFailed
-		j.Error = fmt.Sprintf("Media analysis failed: %v", err)
-		j.UpdatedAt = time.Now()
-		m.repo.Update(ctx, j)
-		m.publish(EventJobFailed, j)
+		m.failMediaAnalysis(ctx, jobID, fmt.Sprintf("Media analysis failed: %v", err))
 		return
 	}
 
-	// Verify job is still in analyzing state before committing metadata
-	current, err := m.repo.GetByID(ctx, jobID)
-	if err != nil || current == nil || current.Status == StatusCancelled {
-		log.Printf("analyzeMedia: job %s was cancelled or deleted, aborting commit", jobID)
+	if info == nil {
+		m.failMediaAnalysis(ctx, jobID, "Media analysis returned empty information")
 		return
 	}
 
-	// Update job with analysis results
-	j.MediaInfo = info
-	if info.Title != "" {
-		j.Name = info.Title
+	title := info.Title
+	if title == "" {
+		title = j.Name
 	}
-	j.UpdatedAt = time.Now()
-	m.repo.Update(ctx, j)
-	m.publish(EventJobUpdated, j)
 
-	log.Printf("analyzeMedia: job %s analyzed successfully: %s (%d formats)", jobID, info.Title, len(info.Formats))
+	won, updateErr := m.repo.CompleteMediaAnalysis(ctx, jobID, title, info)
+	if updateErr != nil {
+		log.Printf("analyzeMedia: failed to commit media analysis for job %s: %v", jobID, updateErr)
+		return
+	}
+	if !won {
+		log.Printf("analyzeMedia: job %s was cancelled or transitioned concurrently, aborting commit", jobID)
+		return
+	}
+
+	if updatedJ, err := m.repo.GetByID(ctx, jobID); err == nil && updatedJ != nil {
+		m.publish(EventJobUpdated, updatedJ)
+	}
+
+	log.Printf("analyzeMedia: job %s analyzed successfully: %s (%d formats)", jobID, title, len(info.Formats))
+}
+
+// failMediaAnalysis conditionally transitions an ANALYZING media job to FAILED.
+// A concurrent cancellation or newer transition wins; in that case nothing is persisted or published.
+func (m *Manager) failMediaAnalysis(ctx context.Context, jobID, reason string) {
+	won, err := m.repo.FailMediaAnalysis(ctx, jobID, reason)
+	if err != nil {
+		log.Printf("analyzeMedia: failed to persist analysis failure for job %s: %v", jobID, err)
+		return
+	}
+	if !won {
+		log.Printf("analyzeMedia: job %s left analyzing state concurrently, not marking failed", jobID)
+		return
+	}
+	if failed, getErr := m.repo.GetByID(ctx, jobID); getErr == nil && failed != nil {
+		m.publish(EventJobFailed, failed)
+	}
 }
 
 // SelectFormat selects a format for a media job and enqueues or starts the download.
 func (m *Manager) SelectFormat(ctx context.Context, id, formatID string, subtitleOpts ...*SubtitleOptions) (*Job, error) {
+	m.mu.Lock()
+	if m.inFlightSelections[id] {
+		m.mu.Unlock()
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "format selection is already in progress for this job"}
+	}
+	m.inFlightSelections[id] = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.inFlightSelections, id)
+		m.mu.Unlock()
+	}()
+
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
 		return nil, err
@@ -765,7 +936,7 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string, subtitl
 		return nil, &AppError{Code: ErrInvalidJobState, Message: "format selection is only available for media jobs"}
 	}
 
-	if j.Status != StatusAnalyzing {
+	if j.Status != StatusAwaitingSelection {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot select format for a %s job", j.Status)}
 	}
 
@@ -794,24 +965,28 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string, subtitl
 		}
 	}
 
-	// Set selected format & subtitle options & transition to StatusQueued
-	j.MediaInfo.SelectedFmt = formatID
-	j.MediaInfo.SubtitleOptions = subOpts
-	oldStatus := j.Status
+	// Record the selection and transition AWAITING_SELECTION -> QUEUED together with the queue entry in one
+	// conditional transaction, so a concurrent Cancel either wins entirely or observes the queued job.
+	selected := *j.MediaInfo
+	selected.SelectedFmt = formatID
+	selected.SubtitleOptions = subOpts
 
-	if err := m.enqueueJob(ctx, j, QueueActionStart); err != nil {
-		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to enqueue media job: %v", err)}
+	now := time.Now()
+	var entry *QueueEntry
+	if m.queueRepo != nil {
+		entry = &QueueEntry{JobID: j.ID, Action: QueueActionStart, EnqueuedAt: now, UpdatedAt: now}
+	}
+	won, err := m.repo.SelectMediaFormat(ctx, j.ID, &selected, entry)
+	if err != nil {
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist format selection: %v", err)}
+	}
+	if !won {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "job is no longer awaiting format selection"}
 	}
 
+	j.MediaInfo = &selected
 	j.Status = StatusQueued
-	j.UpdatedAt = time.Now()
-	if err := m.repo.Update(ctx, j); err != nil {
-		if m.queueRepo != nil {
-			m.queueRepo.Delete(ctx, j.ID)
-		}
-		j.Status = oldStatus
-		return nil, fmt.Errorf("update job status: %w", err)
-	}
+	j.UpdatedAt = now
 
 	// Fallback for test doubles created without scheduler
 	if m.scheduler == nil {
@@ -1894,6 +2069,10 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Job, error) {
 		return nil, err
 	}
 
+	if j.Status == StatusAwaitingSelection {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "cannot resume a job awaiting format selection"}
+	}
+
 	if err := ValidateTransition(j.Status, StatusQueued); err != nil {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot resume a %s job", j.Status)}
 	}
@@ -2002,7 +2181,14 @@ func (m *Manager) cleanupTerminalEngineState(j *Job) {
 	}
 }
 
+// maxCancelAttempts bounds re-evaluation when a conditional cancel loses a race to a concurrent transition.
+const maxCancelAttempts = 3
+
 func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
+	return m.cancel(ctx, id, 1)
+}
+
+func (m *Manager) cancel(ctx context.Context, id string, attempt int) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
 		return nil, err
@@ -2010,6 +2196,10 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 
 	if err := ValidateTransition(j.Status, StatusCancelled); err != nil {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: fmt.Sprintf("cannot cancel a %s job", j.Status)}
+	}
+
+	if j.Status == StatusAwaitingSelection {
+		return m.cancelAwaitingSelection(ctx, j, attempt)
 	}
 
 	// If job has an EngineID, cancel in engine first and enforce success
@@ -2065,6 +2255,48 @@ func (m *Manager) Cancel(ctx context.Context, id string) (*Job, error) {
 	}
 
 	return j, nil
+}
+
+// cancelAwaitingSelection cancels a job observed in AWAITING_SELECTION with a conditional transaction that
+// cannot be overwritten by SelectFormat. If selection (or another transition) won first, the cancel is
+// re-evaluated from the authoritative state, e.g. as an ordinary QUEUED cancellation that removes the queue entry.
+func (m *Manager) cancelAwaitingSelection(ctx context.Context, j *Job, attempt int) (*Job, error) {
+	won, err := m.repo.CancelAwaitingSelection(ctx, j.ID)
+	if err != nil {
+		log.Printf("Cancel: CANCELLED state persistence failed for awaiting-selection job %s: %v", j.ID, err)
+		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist cancel state: %v", err)}
+	}
+	if !won {
+		if attempt >= maxCancelAttempts {
+			return nil, &AppError{Code: ErrInvalidJobState, Message: "job state changed during cancellation; retry the cancel"}
+		}
+		return m.cancel(ctx, j.ID, attempt+1)
+	}
+
+	cancelled, getErr := m.repo.GetByID(ctx, j.ID)
+	if getErr != nil || cancelled == nil {
+		cancelled = j
+		cancelled.Status = StatusCancelled
+		cancelled.SpeedBytesPerSecond = 0
+		cancelled.ETASeconds = 0
+		cancelled.UpdatedAt = time.Now()
+	}
+
+	m.removeActive(cancelled.ID)
+	m.publish(EventJobCancelled, cancelled)
+	m.cleanupTerminalEngineState(cancelled)
+
+	if cancelled.Type == TypeMedia && m.storageService != nil && cancelled.WorkDir != "" {
+		if err := m.storageService.CleanupWorkDir(ctx, cancelled.ID, cancelled.WorkDir); err != nil {
+			log.Printf("Cancel: cleanup workdir error for job %s: %v", cancelled.ID, err)
+		}
+	}
+
+	if m.scheduler != nil {
+		m.scheduler.Kick()
+	}
+
+	return cancelled, nil
 }
 
 // DeleteJobOptions configures the job deletion operation.
@@ -2377,6 +2609,13 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 	j, err := m.getJobOrError(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+
+	if j.Status == StatusAnalyzing || m.isAnalysisWorkerActive(j.ID) {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "cannot retry a job that is currently analyzing"}
+	}
+	if j.Status == StatusAwaitingSelection {
+		return nil, &AppError{Code: ErrInvalidJobState, Message: "cannot retry a job awaiting format selection"}
 	}
 
 	if err := ValidateTransition(j.Status, StatusQueued); err != nil {
@@ -3844,7 +4083,8 @@ func (m *Manager) removeActive(id string) bool {
 	m.mu.Unlock()
 	released := false
 	if gov != nil {
-		released = gov.Release(id)
+		// Analysis permits are released only by the owning analysis worker after its probe terminates.
+		released = gov.ReleaseTransfer(id)
 	}
 	return hadActive || released
 }

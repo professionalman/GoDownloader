@@ -87,14 +87,10 @@ func (r *Registry) Detect(rawURL string) string {
 
 	host := strings.ToLower(u.Hostname())
 
-	// Check for known media hosts
+	// Check for known media hosts (semantic classification regardless of registration)
 	for _, mediaHost := range mediaHosts {
 		if host == mediaHost || strings.HasSuffix(host, "."+mediaHost) {
-			// Only use ytdlp if the engine is registered
-			if _, ok := r.engines["ytdlp"]; ok {
-				return "ytdlp"
-			}
-			return "aria2"
+			return "ytdlp"
 		}
 	}
 

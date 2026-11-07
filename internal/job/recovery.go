@@ -135,8 +135,55 @@ func (m *Manager) recoverJob(ctx context.Context, j *Job, summary *RecoverySumma
 		return
 	}
 
+	// 2c. Media jobs in ANALYZING: check if metadata was already completed or needs resumption
+	if (j.Type == TypeMedia || j.Engine == "ytdlp") && j.Status == StatusAnalyzing {
+		if j.MediaInfo != nil && len(j.MediaInfo.Formats) > 0 {
+			// Legacy/interrupted row that finished analysis before restart: normalize to awaiting_selection
+			log.Printf("recovery: media job %s has completed analysis metadata, normalizing to awaiting_selection", j.ID)
+			j.Status = StatusAwaitingSelection
+			j.UpdatedAt = time.Now()
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("recovery error: failed to normalize analyzing job %s: %v", j.ID, updateErr)
+				return
+			}
+			m.publish(EventJobUpdated, j)
+			return
+		}
+
+		// Analyzing without metadata: resume analysis through bounded admission
+		log.Printf("recovery: media job %s was analyzing without metadata, queuing for bounded analysis resumption", j.ID)
+		m.publish(EventJobUpdated, j)
+		if summary != nil {
+			summary.RestartedMetadataAcquisitions++
+		}
+		m.recordPendingMediaAnalysis(j.ID)
+		return
+	}
+
+	// 2d. Media jobs in AWAITING_SELECTION: preserve state or fail if metadata lost
+	if (j.Type == TypeMedia || j.Engine == "ytdlp") && j.Status == StatusAwaitingSelection {
+		if j.MediaInfo == nil || len(j.MediaInfo.Formats) == 0 {
+			j.Status = StatusFailed
+			j.Error = "Media metadata was lost during restart. Retry the job."
+			j.UpdatedAt = time.Now()
+			if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+				log.Printf("recovery error: failed to persist failed status for awaiting_selection media job %s: %v", j.ID, updateErr)
+				return
+			}
+			m.publish(EventJobFailed, j)
+			if summary != nil {
+				summary.Issues = append(summary.Issues, RecoveryIssue{JobID: j.ID, Kind: RecoveryIssueExternalStateUnrecoverable})
+			}
+			return
+		}
+
+		log.Printf("recovery: media job %s in awaiting_selection with valid metadata, preserving state", j.ID)
+		m.publish(EventJobUpdated, j)
+		return
+	}
+
 	// 3. Media subprocesses in DOWNLOADING or PROCESSING state do not survive backend restart.
-	if j.Type == TypeMedia || j.Engine == "ytdlp" {
+	if (j.Type == TypeMedia || j.Engine == "ytdlp") && (j.Status == StatusDownloading || j.Status == StatusProcessing) {
 		log.Printf("recovery: active media job %s was in status %s during restart, marking failed", j.ID, j.Status)
 		j.Status = StatusFailed
 		j.Error = "Media download was interrupted by application restart. Retry the job."

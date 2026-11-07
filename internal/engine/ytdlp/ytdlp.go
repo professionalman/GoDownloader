@@ -43,6 +43,7 @@ type Engine struct {
 	ffmpegPath   string
 	authProvider job.IMediaAuthProvider
 	supervisor   process.ISupervisor
+	usageGate    *UsageGate
 
 	mu        sync.RWMutex
 	downloads map[string]*downloadState // keyed by job ID
@@ -50,15 +51,47 @@ type Engine struct {
 
 // NewEngine creates a new yt-dlp engine.
 func NewEngine(ytdlpPath, ffmpegPath string) *Engine {
-	if ytdlpPath == "" {
-		ytdlpPath = "yt-dlp"
-	}
 	return &Engine{
 		ytdlpPath:  ytdlpPath,
 		ffmpegPath: ffmpegPath,
 		downloads:  make(map[string]*downloadState),
 		supervisor: process.NewSupervisor(),
+		usageGate:  NewUsageGate(),
 	}
+}
+
+// UsageGate returns the tool usage gate for coordinating shared execution and maintenance.
+func (e *Engine) UsageGate() *UsageGate {
+	return e.usageGate
+}
+
+// InUse returns true if any yt-dlp downloads or analyses are actively executing.
+func (e *Engine) InUse() bool {
+	if e.usageGate == nil {
+		return false
+	}
+	return e.usageGate.InUse()
+}
+
+// AcquireUse acquires a shared execution reservation on the engine's usage gate.
+func (e *Engine) AcquireUse() (func(), error) {
+	if e.usageGate == nil {
+		return func() {}, nil
+	}
+	return e.usageGate.AcquireUse()
+}
+
+// TryExclusive attempts to acquire exclusive maintenance access on the engine's usage gate.
+func (e *Engine) TryExclusive() (func(), error) {
+	if e.usageGate == nil {
+		return func() {}, nil
+	}
+	return e.usageGate.TryExclusive()
+}
+
+// RequiresProcessing implements job.IProcessingResourceAdvisor.
+func (e *Engine) RequiresProcessing(j *job.Job) bool {
+	return RequiresFFmpeg(j)
 }
 
 // SetProcessSupervisor configures the process supervisor for child process trees.
@@ -92,15 +125,26 @@ func (e *Engine) Capabilities() networkpolicy.EngineCapabilities {
 	}
 }
 
-// Available checks if yt-dlp is installed and accessible.
+// Available checks if yt-dlp path is configured and exists on the filesystem or system PATH without executing it.
 func (e *Engine) Available() bool {
-	cmd := exec.Command(e.ytdlpPath, "--version")
-	err := cmd.Run()
+	if e == nil || e.ytdlpPath == "" {
+		return false
+	}
+	if filepath.IsAbs(e.ytdlpPath) || strings.ContainsRune(e.ytdlpPath, os.PathSeparator) || strings.ContainsRune(e.ytdlpPath, '/') {
+		info, err := os.Stat(e.ytdlpPath)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(e.ytdlpPath)
 	return err == nil
 }
 
 // Start begins a new yt-dlp download. The engine ID is the job ID itself.
 func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (string, error) {
+	usageRelease, err := e.AcquireUse()
+	if err != nil {
+		return "", fmt.Errorf("cannot start media download: %w", err)
+	}
+
 	var authArgs []string
 	cleanup := func() {}
 	e.mu.RLock()
@@ -111,6 +155,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 		var err error
 		authArgs, cleanup, err = provider.PrepareAuthArgs(ctx)
 		if err != nil {
+			usageRelease()
 			return "", fmt.Errorf("media auth preparation failed: %w", err)
 		}
 	}
@@ -142,6 +187,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 		args, err = appendSubtitleArgs(args, j.MediaInfo.SubtitleOptions, j.MediaInfo.Subtitles)
 		if err != nil {
 			cleanup()
+			usageRelease()
 			return "", fmt.Errorf("invalid subtitle options: %w", err)
 		}
 	}
@@ -160,7 +206,7 @@ func (e *Engine) Start(ctx context.Context, j *job.Job, downloadDir string) (str
 	e.mu.Unlock()
 
 	// Launch download in background goroutine
-	go e.runDownload(dlCtx, j.ID, state, downloadDir, args, cleanup)
+	go e.runDownload(dlCtx, j.ID, state, downloadDir, args, cleanup, usageRelease)
 
 	return j.ID, nil
 }
@@ -477,7 +523,10 @@ func (e *Engine) handleYTDLPLine(jobID string, state *downloadState, line string
 }
 
 // runDownload executes yt-dlp and parses its output in real-time.
-func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, downloadDir string, args []string, cleanup func()) {
+func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadState, downloadDir string, args []string, cleanup func(), usageRelease func()) {
+	if usageRelease != nil {
+		defer usageRelease()
+	}
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -681,4 +730,14 @@ func buildFormatSelector(j *job.Job) string {
 	}
 
 	return j.MediaInfo.SelectedFmt
+}
+
+// RequiresFFmpeg returns true if the media job configuration may invoke FFmpeg during downloading or post-processing.
+// For V0.9.1, all yt-dlp media downloads conservatively reserve an FFmpeg permit because yt-dlp may invoke FFmpeg
+// for muxing, remuxing, metadata embedding, fixups, or container formatting.
+func RequiresFFmpeg(j *job.Job) bool {
+	if j == nil || j.Type != job.TypeMedia {
+		return false
+	}
+	return true
 }

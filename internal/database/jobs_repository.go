@@ -188,6 +188,148 @@ func (r *SQLiteJobRepository) UpdateJobPriorityAndQueuePosition(ctx context.Cont
 	return nil
 }
 
+// CompleteMediaAnalysis atomically transitions a job from StatusAnalyzing to StatusAwaitingSelection,
+// persisting the extracted media metadata and title conditionally. If the job is no longer in StatusAnalyzing
+// (e.g. cancelled, deleted, or transitioned), the update is aborted and returns false, nil.
+func (r *SQLiteJobRepository) CompleteMediaAnalysis(ctx context.Context, jobID, title string, info *job.MediaInfo) (bool, error) {
+	if info == nil {
+		return false, fmt.Errorf("complete media analysis: media info is required")
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return false, fmt.Errorf("complete media analysis: marshal media info: %w", err)
+	}
+	mediaInfoJSON := string(data)
+	now := time.Now()
+	var res sql.Result
+	if title != "" {
+		query := `UPDATE jobs SET status = ?, media_info = ?, name = ?, updated_at = ? WHERE id = ? AND status = ?`
+		res, err = r.db.conn.ExecContext(ctx, query, job.StatusAwaitingSelection, mediaInfoJSON, title, now, jobID, job.StatusAnalyzing)
+	} else {
+		query := `UPDATE jobs SET status = ?, media_info = ?, updated_at = ? WHERE id = ? AND status = ?`
+		res, err = r.db.conn.ExecContext(ctx, query, job.StatusAwaitingSelection, mediaInfoJSON, now, jobID, job.StatusAnalyzing)
+	}
+	if err != nil {
+		return false, fmt.Errorf("complete media analysis: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("complete media analysis rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// SelectMediaFormat atomically transitions a job from StatusAwaitingSelection to StatusQueued with the selected
+// media info and, when entry is non-nil, inserts its queue entry within the same transaction. The status predicate
+// makes the transition a compare-and-set against concurrent cancellation; if it no longer matches, nothing is
+// written and false, nil is returned. The queue position is computed inside the transaction.
+func (r *SQLiteJobRepository) SelectMediaFormat(ctx context.Context, jobID string, info *job.MediaInfo, entry *job.QueueEntry) (bool, error) {
+	if info == nil {
+		return false, fmt.Errorf("select media format: media info is required")
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return false, fmt.Errorf("select media format: marshal media info: %w", err)
+	}
+
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin select format tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = ?, media_info = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		job.StatusQueued, string(data), now, jobID, job.StatusAwaitingSelection)
+	if err != nil {
+		return false, fmt.Errorf("select media format: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("select media format rows affected: %w", err)
+	}
+	if rows == 0 {
+		return false, nil
+	}
+
+	if entry != nil {
+		var nextPos int64
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(q.position), 0) + 1
+			FROM job_queue q
+			JOIN jobs j ON q.job_id = j.id
+			WHERE j.priority = (SELECT priority FROM jobs WHERE id = ?)`, jobID).Scan(&nextPos)
+		if err != nil {
+			return false, fmt.Errorf("select media format next position: %w", err)
+		}
+		entry.JobID = jobID
+		entry.Position = nextPos
+		_, err = tx.ExecContext(ctx, `INSERT INTO job_queue (job_id, position, action, retry_count, not_before, enqueued_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(job_id) DO UPDATE SET
+				position=excluded.position,
+				action=excluded.action,
+				retry_count=excluded.retry_count,
+				not_before=excluded.not_before,
+				updated_at=excluded.updated_at`,
+			entry.JobID, entry.Position, entry.Action, entry.RetryCount, entry.NotBefore, entry.EnqueuedAt, entry.UpdatedAt)
+		if err != nil {
+			return false, fmt.Errorf("select media format enqueue: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit select format tx: %w", err)
+	}
+	return true, nil
+}
+
+// CancelAwaitingSelection atomically transitions a job from StatusAwaitingSelection to StatusCancelled and removes
+// any queue entry within the same transaction. If the job is no longer awaiting selection (for example a concurrent
+// SelectMediaFormat already queued it), nothing is written and false, nil is returned.
+func (r *SQLiteJobRepository) CancelAwaitingSelection(ctx context.Context, jobID string) (bool, error) {
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin cancel selection tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = ?, speed_bytes_per_second = 0, eta_seconds = 0, updated_at = ? WHERE id = ? AND status = ?`,
+		job.StatusCancelled, time.Now(), jobID, job.StatusAwaitingSelection)
+	if err != nil {
+		return false, fmt.Errorf("cancel awaiting selection: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("cancel awaiting selection rows affected: %w", err)
+	}
+	if rows == 0 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_queue WHERE job_id = ?`, jobID); err != nil {
+		return false, fmt.Errorf("cancel awaiting selection queue delete: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit cancel selection tx: %w", err)
+	}
+	return true, nil
+}
+
+// FailMediaAnalysis atomically transitions a job from StatusAnalyzing to StatusFailed with reason.
+// If the job is no longer in StatusAnalyzing (e.g. cancelled or deleted), nothing is written and false, nil is returned.
+func (r *SQLiteJobRepository) FailMediaAnalysis(ctx context.Context, jobID, reason string) (bool, error) {
+	query := `UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = ?`
+	res, err := r.db.conn.ExecContext(ctx, query, job.StatusFailed, reason, time.Now(), jobID, job.StatusAnalyzing)
+	if err != nil {
+		return false, fmt.Errorf("fail media analysis: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("fail media analysis rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
 // GetByID retrieves a single job by ID. Returns nil if not found.
 func (r *SQLiteJobRepository) GetByID(ctx context.Context, id string) (*job.Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobColumns)

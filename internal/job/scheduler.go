@@ -431,7 +431,24 @@ func (s *Scheduler) schedule() {
 				}
 
 				engine := candidate.Job.Engine
-				req := ResourceRequirements{Engine: engine}
+				needsProcessing := false
+				if s.engines != nil {
+					if eng, ok := s.engines.Get(engine); ok {
+						if advisor, ok := eng.(IProcessingResourceAdvisor); ok {
+							needsProcessing = advisor.RequiresProcessing(&candidate.Job)
+						} else if candidate.Job.Type == TypeMedia {
+							needsProcessing = true
+						}
+					} else if candidate.Job.Type == TypeMedia {
+						needsProcessing = true
+					}
+				} else if candidate.Job.Type == TypeMedia {
+					needsProcessing = true
+				}
+				req := ResourceRequirements{
+					Engine:           engine,
+					FFmpegProcessing: needsProcessing,
+				}
 
 				_, acquireErr := s.governor.TryAcquire(candidate.JobID, req)
 				if acquireErr != nil {

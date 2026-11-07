@@ -721,7 +721,7 @@ func TestTorrentReconciliation_UploadedTorrentV2AndHybrid_SameRules(t *testing.T
 	}
 	reg := &fakeEngineRegistry{engines: map[string]IEngine{"qbittorrent": eng}}
 	bus := newFakeEventBus()
-	mgr := NewManager(jobRepo, reg, bus, t.TempDir(), torrentRepo)
+	mgr := NewManager(jobRepo, reg, bus, t.TempDir(), torrentRepo, t.TempDir())
 
 	j, err := mgr.CreateTorrentFromFile(context.Background(), filePath)
 	if err != nil {

@@ -101,6 +101,11 @@ type IMediaAnalyzer interface {
 	Analyze(ctx context.Context, url string) (*MediaInfo, error)
 }
 
+// IProcessingResourceAdvisor is optionally implemented by engines that require post-processing (e.g. FFmpeg muxing).
+type IProcessingResourceAdvisor interface {
+	RequiresProcessing(j *Job) bool
+}
+
 // ICleanupableEngine is optionally implemented by engines that maintain in-memory tracking state after terminal status.
 type ICleanupableEngine interface {
 	Cleanup(jobID string)
