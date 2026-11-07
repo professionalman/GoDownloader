@@ -32,6 +32,8 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 			h.SetTrackerService(value)
 		case *mediaauth.Service:
 			h.SetMediaAuthService(value)
+		case ManagedToolService:
+			h.SetManagedToolService(value)
 		}
 	}
 	if secManager == nil {
@@ -89,6 +91,13 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 	api.HandleFunc("/media-auth", h.UpdateMediaAuth).Methods("PUT")
 	api.HandleFunc("/media-auth/cookies", h.ImportMediaCookies).Methods("POST")
 	api.HandleFunc("/media-auth/cookies", h.DeleteMediaCookies).Methods("DELETE")
+
+	// Managed yt-dlp (authenticated acquisition). Same session/origin protection as every /api/v1 route.
+	api.HandleFunc("/tools/yt-dlp", h.GetYtdlpTool).Methods("GET")
+	// Mutations require the authentication system (refused under DISABLE_AUTH) plus an allowed origin.
+	api.Handle("/tools/yt-dlp/install", secManager.RequireAuthenticatedSensitiveAction(http.HandlerFunc(h.InstallYtdlpTool))).Methods("POST")
+	api.Handle("/tools/yt-dlp/update", secManager.RequireAuthenticatedSensitiveAction(http.HandlerFunc(h.UpdateYtdlpTool))).Methods("POST")
+	api.Handle("/tools/yt-dlp/check-update", secManager.RequireAuthenticatedSensitiveAction(http.HandlerFunc(h.CheckYtdlpToolUpdate))).Methods("POST")
 
 	api.HandleFunc("/queue", h.GetQueueSnapshot).Methods("GET")
 	api.HandleFunc("/queue/reorder", h.ReorderQueue).Methods("PUT")

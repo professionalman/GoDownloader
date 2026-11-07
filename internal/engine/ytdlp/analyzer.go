@@ -230,7 +230,38 @@ func qualityScore(f job.MediaFormat) int {
 }
 
 // cleanError extracts meaningful error text from yt-dlp stderr.
+// jsRuntimeMarkers are lower-case yt-dlp messages indicating a missing JavaScript runtime or challenge-solver
+// component (recent YouTube extraction requires an external runtime such as Deno plus yt-dlp-ejs).
+var jsRuntimeMarkers = []string{
+	"javascript runtime",
+	"js runtime",
+	"challenge solving failed",
+	"n challenge",
+	"signature solving failed",
+	"yt-dlp-ejs",
+	"--remote-components",
+}
+
+// jsRuntimeHint is appended to yt-dlp failures that indicate a missing JavaScript runtime. GoDownloader does not
+// install or manage JavaScript runtimes and never enables remote challenge-solver downloads.
+const jsRuntimeHint = " (This site may require a JavaScript runtime for yt-dlp, such as Deno. GoDownloader does not install it: install a supported runtime, make sure it is on PATH, and retry.)"
+
+// withJSRuntimeHint appends jsRuntimeHint to msg when the yt-dlp output indicates a missing JavaScript runtime.
+func withJSRuntimeHint(output, msg string) string {
+	lower := strings.ToLower(output)
+	for _, marker := range jsRuntimeMarkers {
+		if strings.Contains(lower, marker) {
+			return msg + jsRuntimeHint
+		}
+	}
+	return msg
+}
+
 func cleanError(stderr string) string {
+	return withJSRuntimeHint(stderr, cleanErrorLine(stderr))
+}
+
+func cleanErrorLine(stderr string) string {
 	lines := strings.Split(strings.TrimSpace(stderr), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])

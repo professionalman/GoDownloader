@@ -125,6 +125,8 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 	ffmpegInfo, _ := toolMgr.Resolve(ctx, toolmanager.ToolFFmpeg)
 	_, _ = toolMgr.Resolve(ctx, toolmanager.ToolAria2)
 	_, _ = toolMgr.Resolve(ctx, toolmanager.ToolQBittorrent)
+	// No yt-dlp process exists yet: remove orphaned staging files and binaries the managed ledger no longer selects.
+	toolMgr.CleanupManagedStore(ctx)
 
 	// 5. Initialize media auth service & perform startup stale temp cleanup
 	mediaAuthService := mediaauth.NewService(settingsRepo, secretStore, filepath.Join(cfg.DataDir, "tmp", "auth"))
@@ -161,6 +163,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 	ytdlpEng := ytdlp.NewEngine(resolvedYtdlpPath, resolvedFFmpegPath)
 	ytdlpEng.SetAuthProvider(mediaAuthService)
 	ytdlpEng.SetProcessSupervisor(processSupervisor)
+	// Managed activation coordinates with yt-dlp executions through this engine's shared UsageGate. The registry
+	// is never changed at runtime: a newly activated binary is registered on the next backend start.
+	toolMgr.SetUsageCoordinator(ytdlpEng)
 	if ytdlpAvailable && ytdlpEng.Available() {
 		registry.Register("ytdlp", ytdlpEng)
 		log.Printf("yt-dlp engine: available (provenance=%s, version=%s, path=%s)", ytdlpInfo.Provenance, ytdlpInfo.Version, resolvedYtdlpPath)

@@ -138,8 +138,9 @@ func TestToolManager_A_ManagedYtdlp_OwnershipManaged(t *testing.T) {
 	if info.OwnershipMode != OwnershipManaged {
 		t.Errorf("expected ownership managed, got %s", info.OwnershipMode)
 	}
-	if info.Provenance != ProvenanceManaged {
-		t.Errorf("expected provenance managed, got %s", info.Provenance)
+	// The legacy managed-directory binary is only version-probed; it never gains release provenance.
+	if info.Provenance != ProvenanceManagedLegacy {
+		t.Errorf("expected provenance managed_legacy, got %s", info.Provenance)
 	}
 	if info.ExecutablePath != expectedManaged {
 		t.Errorf("expected path %s, got %s", expectedManaged, info.ExecutablePath)
@@ -669,8 +670,9 @@ func TestToolManager_DiscoveryPrecedence_Ytdlp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if info.Provenance != ProvenanceManaged {
-		t.Errorf("expected provenance managed, got %s", info.Provenance)
+	// The legacy managed-directory binary is only version-probed; it never gains release provenance.
+	if info.Provenance != ProvenanceManagedLegacy {
+		t.Errorf("expected provenance managed_legacy, got %s", info.Provenance)
 	}
 	if info.ExecutablePath != expectedManaged {
 		t.Errorf("expected path %s, got %s", expectedManaged, info.ExecutablePath)
@@ -739,11 +741,17 @@ func TestToolManager_ConcurrentResolution(t *testing.T) {
 	}
 }
 
-func TestToolManager_AcquireYtdlp_Gated(t *testing.T) {
+// The FND-4A acquisition gate is replaced by authenticated acquisition (MED-OWN Checkpoint 2). Acquisition still
+// fails closed when it cannot record authenticated provenance or the platform is unsupported.
+func TestToolManager_AcquireYtdlp_FailsClosedWithoutLedgerOrPlatform(t *testing.T) {
 	mgr := New(t.TempDir(), nil)
-	err := mgr.AcquireYtdlp(context.Background())
-	if !errors.Is(err, ErrAcquisitionGated) {
-		t.Fatalf("expected ErrAcquisitionGated, got %v", err)
+	mgr.platformSupportedFn = func() bool { return true }
+	if _, err := mgr.InstallYtdlp(context.Background()); !errors.Is(err, ErrActivationFailed) {
+		t.Fatalf("expected ErrActivationFailed without a managed ledger, got %v", err)
+	}
+	mgr.platformSupportedFn = func() bool { return false }
+	if _, err := mgr.InstallYtdlp(context.Background()); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("expected ErrUnsupportedPlatform, got %v", err)
 	}
 }
 

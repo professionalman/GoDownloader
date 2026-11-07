@@ -90,7 +90,7 @@ func run() error {
 
 	// Setup security and router
 	secManager := api.NewSecurityManager(cfg)
-	router := api.NewRouter(cfg, application.Manager(), sseHandler, application.Settings(), secManager, application.Categories(), application.Tracker(), application.MediaAuth())
+	router := api.NewRouter(cfg, application.Manager(), sseHandler, application.Settings(), secManager, application.Categories(), application.Tracker(), application.MediaAuth(), application.ToolManager())
 
 	// Start server
 	server := &http.Server{

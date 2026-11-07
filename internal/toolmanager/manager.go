@@ -36,6 +36,8 @@ type Manager struct {
 	// probeAria2Fn probes an aria2 RPC endpoint and returns (version, error).
 	probeAria2Fn func(ctx context.Context, url string) (string, error)
 	httpClient   *http.Client
+
+	managedState
 }
 
 // New creates a new ToolManager instance.
@@ -53,6 +55,7 @@ func New(dataDir string, execRepo job.IExecutionRepository) *Manager {
 	}
 	m.probeQBitFn = m.defaultProbeQBit
 	m.probeAria2Fn = m.defaultProbeAria2
+	m.initManagedState(dataDir, execRepo)
 
 	// Ensure managed directory exists
 	_ = os.MkdirAll(m.ManagedDir(), 0755)
@@ -119,14 +122,9 @@ func (m *Manager) ResolveAll(ctx context.Context) map[string]*ToolInfo {
 	return m.GetAll()
 }
 
-// AcquireYtdlp is the entry point for managed yt-dlp acquisition.
-// In FND-4A, remote download is gated pending signed manifest verification (ADR-SYN2-006).
-func (m *Manager) AcquireYtdlp(ctx context.Context) error {
-	return ErrAcquisitionGated
-}
-
 // resolveYtdlp resolves yt-dlp following precedence:
-// 1. Managed path (dataDir/bin/yt-dlp[.exe])
+// 0. Authenticated managed release selected by the managed ledger (hash-verified before any execution)
+// 1. Legacy managed path (dataDir/bin/yt-dlp[.exe]) — version-probed only, never authenticated
 // 2. Explicitly configured path (if non-default)
 // 3. System PATH lookup
 func (m *Manager) resolveYtdlp(ctx context.Context) (*ToolInfo, error) {
@@ -134,9 +132,15 @@ func (m *Manager) resolveYtdlp(ctx context.Context) (*ToolInfo, error) {
 	cfgPath := m.configuredPaths[ToolYtdlp]
 	m.mu.RUnlock()
 
+	// Step 0: Authenticated managed release
+	if info := m.resolveManagedYtdlp(ctx); info != nil {
+		m.recordTool(ctx, info)
+		return info, nil
+	}
+
 	managedCandidate := m.ManagedPath(ToolYtdlp)
 
-	// Step 1: Check managed application-owned binary
+	// Step 1: Check legacy managed-directory binary
 	if isRegularFile(managedCandidate) {
 		ver, err := m.probeVersion(ctx, managedCandidate, "--version")
 		if err == nil {
@@ -148,7 +152,7 @@ func (m *Manager) resolveYtdlp(ctx context.Context) (*ToolInfo, error) {
 				ExecutablePath:     managedCandidate,
 				VerificationStatus: VerificationStatusVerified,
 				Status:             StatusActive,
-				Provenance:         ProvenanceManaged,
+				Provenance:         ProvenanceManagedLegacy,
 				ProbedAt:           time.Now().UTC(),
 			}
 			m.recordTool(ctx, info)
@@ -436,7 +440,13 @@ func (m *Manager) RevalidateActiveRecords(ctx context.Context) error {
 
 // probeVersion executes a command with a bounded timeout and captures the first line of output.
 func (m *Manager) probeVersion(ctx context.Context, executable string, args ...string) (string, error) {
-	probeCtx, cancel := context.WithTimeout(ctx, m.probeTimeout)
+	return m.probeVersionTimeout(ctx, m.probeTimeout, executable, args...)
+}
+
+// probeVersionTimeout is probeVersion with an explicit bound, used for authenticated yt-dlp builds whose
+// self-extracting first start can exceed the default 3 s probe window.
+func (m *Manager) probeVersionTimeout(ctx context.Context, timeout time.Duration, executable string, args ...string) (string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := m.execCommandFn(probeCtx, executable, args...)
@@ -471,6 +481,11 @@ func (m *Manager) recordTool(ctx context.Context, info *ToolInfo) {
 	m.mu.Lock()
 	m.tools[info.Name] = info
 	m.mu.Unlock()
+
+	// Authenticated managed releases are owned by the managed ledger; generic observations never record them.
+	if info.VerificationStatus == VerificationStatusAuthenticated {
+		return
+	}
 
 	// Persist to durable tool_records if repository is present and tool has meaningful state
 	if m.execRepo != nil && (info.Status == StatusActive || info.Status == StatusUnreachable) && info.Name != "" {

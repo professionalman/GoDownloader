@@ -384,6 +384,20 @@ func (s *Scheduler) inFlightCount() int {
 	return len(s.inFlight)
 }
 
+// engineMaintenancePending reports whether the named engine is held for managed-tool maintenance (an activated
+// yt-dlp update awaiting backend restart). Its queued jobs must stay queued rather than fail on dispatch.
+func (s *Scheduler) engineMaintenancePending(name string) bool {
+	if s.engines == nil {
+		return false
+	}
+	eng, ok := s.engines.Get(name)
+	if !ok {
+		return false
+	}
+	mp, ok := eng.(interface{ MaintenancePending() bool })
+	return ok && mp.MaintenancePending()
+}
+
 func (s *Scheduler) releaseGovernorLease(jobID string) {
 	if s.governor != nil {
 		if s.governor.Release(jobID) {
@@ -427,6 +441,10 @@ func (s *Scheduler) schedule() {
 			for i := range candidates {
 				candidate := &candidates[i]
 				if s.isInFlight(candidate.JobID) {
+					continue
+				}
+				// A managed tool update awaiting restart holds the engine's usage gate: leave its jobs queued.
+				if s.engineMaintenancePending(candidate.Job.Engine) {
 					continue
 				}
 
@@ -502,6 +520,10 @@ func (s *Scheduler) schedule() {
 			return
 		}
 		if next == nil {
+			return
+		}
+		if s.engineMaintenancePending(next.Job.Engine) {
+			// Head job's engine awaits restart after a tool update; stop filling rather than spin on it.
 			return
 		}
 

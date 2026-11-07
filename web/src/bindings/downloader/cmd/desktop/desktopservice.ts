@@ -29,6 +29,9 @@ import * as storage$0 from "../../internal/storage/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as supportbundle$0 from "../../internal/supportbundle/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as toolmanager$0 from "../../internal/toolmanager/models.js";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
@@ -44,6 +47,13 @@ export function BulkAction(action: string, jobIDs: string[] | null): $Cancellabl
 
 export function CancelJob(id: string): $CancellablePromise<job$0.Job | null> {
     return $Call.ByID(673696146, id);
+}
+
+/**
+ * CheckYtdlpUpdate reports whether a newer stable yt-dlp release exists.
+ */
+export function CheckYtdlpUpdate(): $CancellablePromise<toolmanager$0.UpdateCheckResult | null> {
+    return $Call.ByID(3808624943);
 }
 
 export function CreateBatchJobs(inputsJSON: string): $CancellablePromise<job$0.CreateBatchResponse | null> {
@@ -173,8 +183,22 @@ export function GetTrackerSources(): $CancellablePromise<networkpolicy$0.Tracker
     return $Call.ByID(753764301);
 }
 
+/**
+ * GetYtdlpToolStatus returns the path-free managed yt-dlp status.
+ */
+export function GetYtdlpToolStatus(): $CancellablePromise<toolmanager$0.ManagedToolStatus | null> {
+    return $Call.ByID(206633410);
+}
+
 export function ImportMediaCookies(content: string): $CancellablePromise<mediaauth$0.Settings | null> {
     return $Call.ByID(3671726167, content);
+}
+
+/**
+ * InstallYtdlp installs the latest authenticated stable yt-dlp. Takes no parameters by design.
+ */
+export function InstallYtdlp(): $CancellablePromise<toolmanager$0.AcquisitionResult | null> {
+    return $Call.ByID(3428952607);
 }
 
 export function OpenFolder(): $CancellablePromise<void> {
@@ -293,6 +317,13 @@ export function UpdateSettings(settingsJSON: string): $CancellablePromise<settin
 
 export function UpdateTrackerSource(id: string, name: string, url: string, enabled: boolean, refreshIntervalSeconds: number): $CancellablePromise<networkpolicy$0.TrackerSource | null> {
     return $Call.ByID(1828869501, id, name, url, enabled, refreshIntervalSeconds);
+}
+
+/**
+ * UpdateYtdlp updates the managed yt-dlp to the latest authenticated stable release.
+ */
+export function UpdateYtdlp(): $CancellablePromise<toolmanager$0.AcquisitionResult | null> {
+    return $Call.ByID(46760019);
 }
 
 export function UploadTorrent(filename: string, base64Data: string, priority: string, categoryID: string, destinationDir: string, networkPolicyJSON: string, seedingPolicyJSON: string, trackers: string[] | null): $CancellablePromise<job$0.Job | null> {

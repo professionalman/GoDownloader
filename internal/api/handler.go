@@ -57,6 +57,7 @@ type Handler struct {
 	categoryRepo storage.ICategoryRepository
 	trackers     *tracker.Service
 	mediaAuth    *mediaauth.Service
+	tools        ManagedToolService
 }
 
 // NewHandler creates a new API handler.
@@ -496,7 +497,8 @@ func writeAppError(w http.ResponseWriter, err error) {
 		case job.ErrCapabilityNotSupported, job.ErrPrivateTorrentTrackerRejected:
 			httpStatus = http.StatusUnprocessableEntity
 		case job.ErrInvalidJobState, job.ErrNetworkSettingStateAmbiguous, job.ErrSeedingPolicyStateAmbiguous,
-			job.ErrTorrentAlreadyManaged, job.ErrTorrentAlreadyExistsExternally, job.ErrYtDlpUnavailable:
+			job.ErrTorrentAlreadyManaged, job.ErrTorrentAlreadyExistsExternally, job.ErrYtDlpUnavailable,
+			job.ErrYtDlpRestartRequired:
 			httpStatus = http.StatusConflict
 		case job.ErrNetworkSettingApplicationFailed, job.ErrSeedingPolicyApplicationFailed:
 			httpStatus = http.StatusServiceUnavailable

@@ -18,6 +18,9 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  YtdlpToolStatus,
+  ToolAcquisitionResult,
+  ToolUpdateCheck,
   SubtitleOptions,
   TorrentFile,
   TorrentFileSelection,
@@ -35,6 +38,7 @@ import {
   type CategoriesOperations,
   type TrackerOperations,
   type MediaAuthOperations,
+  type ToolsOperations,
   type SyncOperations,
   type DesktopPreferences,
   type DesktopPreferencesOperations,
@@ -516,6 +520,28 @@ class DesktopMediaAuthOperations implements MediaAuthOperations {
   }
 }
 
+class DesktopToolsOperations implements ToolsOperations {
+  async getYtdlpStatus(): Promise<YtdlpToolStatus> {
+    const res = await DesktopService.GetYtdlpToolStatus().catch(wrapIpcError);
+    return res as unknown as YtdlpToolStatus;
+  }
+
+  async installYtdlp(): Promise<ToolAcquisitionResult> {
+    const res = await DesktopService.InstallYtdlp().catch(wrapIpcError);
+    return res as unknown as ToolAcquisitionResult;
+  }
+
+  async updateYtdlp(): Promise<ToolAcquisitionResult> {
+    const res = await DesktopService.UpdateYtdlp().catch(wrapIpcError);
+    return res as unknown as ToolAcquisitionResult;
+  }
+
+  async checkYtdlpUpdate(): Promise<ToolUpdateCheck> {
+    const res = await DesktopService.CheckYtdlpUpdate().catch(wrapIpcError);
+    return res as unknown as ToolUpdateCheck;
+  }
+}
+
 class DesktopSyncOperations implements SyncOperations {
   async getSnapshot(): Promise<SyncSnapshot> {
     const res = await DesktopService.GetSyncSnapshot().catch(wrapIpcError);
@@ -566,6 +592,7 @@ export class DesktopBackendClient implements BackendClient {
   readonly tracker: TrackerOperations = new DesktopTrackerOperations();
   readonly mediaAuth: MediaAuthOperations = new DesktopMediaAuthOperations();
   readonly sync: SyncOperations = new DesktopSyncOperations();
+  readonly tools: ToolsOperations = new DesktopToolsOperations();
   readonly desktopPreferences: DesktopPreferencesOperations = new DesktopPreferencesOperationsImpl();
   readonly supportBundle: SupportBundleOperations = new SupportBundleOperationsImpl();
 }

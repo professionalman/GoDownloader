@@ -81,6 +81,12 @@ func (e *Engine) AcquireUse() (func(), error) {
 	return e.usageGate.AcquireUse()
 }
 
+// MaintenancePending reports whether managed-tool maintenance holds the gate exclusively, which after a
+// successful activation lasts until restart. New yt-dlp use is refused while it is true.
+func (e *Engine) MaintenancePending() bool {
+	return e.usageGate != nil && e.usageGate.IsExclusive()
+}
+
 // TryExclusive attempts to acquire exclusive maintenance access on the engine's usage gate.
 func (e *Engine) TryExclusive() (func(), error) {
 	if e.usageGate == nil {
@@ -615,12 +621,13 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 		stderrMu.Lock()
 		errMsg := "yt-dlp download failed"
 		for i := len(stderrLines) - 1; i >= 0; i-- {
-			cleaned := cleanError(stderrLines[i])
+			cleaned := cleanErrorLine(stderrLines[i])
 			if cleaned != "" && cleaned != "unknown error" {
 				errMsg = cleaned
 				break
 			}
 		}
+		errMsg = withJSRuntimeHint(strings.Join(stderrLines, "\n"), errMsg)
 		stderrMu.Unlock()
 		state.err = errMsg
 		log.Printf("ytdlp: job %s failed: %s", jobID, errMsg)

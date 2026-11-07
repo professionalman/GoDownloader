@@ -180,7 +180,30 @@ func (sm *SecurityManager) ValidateOrigin(r *http.Request) bool {
 	if sm.disabled {
 		return true
 	}
+	return sm.validateOriginHeaders(r)
+}
 
+// RequireAuthenticatedSensitiveAction guards endpoints whose effect is too sensitive for DISABLE_AUTH's blanket
+// bypass (downloading and activating an executable). Origin checks are not authentication: with authentication
+// disabled, any local process on the loopback interface could call these routes. They are therefore refused
+// outright when authentication is disabled; otherwise the session/CSRF middleware has already authenticated the
+// request and the origin is checked again here.
+func (sm *SecurityManager) RequireAuthenticatedSensitiveAction(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sm.disabled {
+			writeError(w, http.StatusForbidden, "AUTH_REQUIRED",
+				"managed tool installation is unavailable while authentication is disabled (DISABLE_AUTH)")
+			return
+		}
+		if !sm.validateOriginHeaders(r) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "cross-origin request forbidden")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (sm *SecurityManager) validateOriginHeaders(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		// If Origin is omitted, check Referer as a fallback for browser mutating requests

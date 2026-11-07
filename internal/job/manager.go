@@ -511,6 +511,9 @@ func (m *Manager) CreateWithOptions(ctx context.Context, source string, opts Cre
 				Message: "yt-dlp is unavailable. Install yt-dlp in Settings and restart GoDownloader to enable media downloads.",
 			}
 		}
+		if err := ytdlpMaintenanceError(eng); err != nil {
+			return nil, err
+		}
 
 		j.Type = TypeMedia
 		j.Status = StatusAnalyzing
@@ -769,6 +772,18 @@ func (m *Manager) attachCreationPolicy(ctx context.Context, j *Job, opts CreateO
 	return nil
 }
 
+// ytdlpMaintenanceError returns a typed restart-required error while managed yt-dlp maintenance holds the
+// engine's usage gate (an activated update awaits backend restart), so new media work is refused up front.
+func ytdlpMaintenanceError(eng IEngine) error {
+	if mp, ok := eng.(interface{ MaintenancePending() bool }); ok && mp.MaintenancePending() {
+		return &AppError{
+			Code:    ErrYtDlpRestartRequired,
+			Message: "yt-dlp was updated. Quit GoDownloader completely and start it again to use media downloads (closing the window to the tray does not restart it).",
+		}
+	}
+	return nil
+}
+
 // analyzeMedia runs yt-dlp analysis in the background and updates the job.
 func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -864,6 +879,12 @@ func (m *Manager) analyzeMedia(parentCtx context.Context, jobID, source string) 
 			log.Printf("analyzeMedia: job %s analysis was cancelled", jobID)
 			return
 		}
+		if ytdlpMaintenanceError(eng) != nil {
+			// A managed yt-dlp update was activated and awaits restart: leave the job ANALYZING so startup
+			// recovery resumes it, rather than failing it because of the tool update.
+			log.Printf("analyzeMedia: job %s deferred until restart (yt-dlp update pending)", jobID)
+			return
+		}
 		m.failMediaAnalysis(ctx, jobID, fmt.Sprintf("Media analysis failed: %v", err))
 		return
 	}
@@ -942,6 +963,11 @@ func (m *Manager) SelectFormat(ctx context.Context, id, formatID string, subtitl
 
 	if j.MediaInfo == nil {
 		return nil, &AppError{Code: ErrInvalidJobState, Message: "media analysis not complete yet"}
+	}
+	if eng, ok := m.engines.Get("ytdlp"); ok {
+		if err := ytdlpMaintenanceError(eng); err != nil {
+			return nil, err
+		}
 	}
 
 	// Validate format ID exists
@@ -2624,6 +2650,11 @@ func (m *Manager) Retry(ctx context.Context, id string) (*Job, error) {
 
 	// For media jobs, restart analysis
 	if j.Type == TypeMedia {
+		if eng, ok := m.engines.Get("ytdlp"); ok {
+			if err := ytdlpMaintenanceError(eng); err != nil {
+				return nil, err
+			}
+		}
 		if j.WorkDir != "" {
 			if _, err := os.Stat(j.WorkDir); err == nil {
 				if validateErr := storage.ValidateWorkDirMarker(j.WorkDir, j.ID); validateErr != nil {
@@ -3695,6 +3726,11 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	eng, ok := m.engines.Get(j.Engine)
 	if !ok {
 		return fmt.Errorf("engine %q not available", j.Engine)
+	}
+	// Race backstop for the scheduler's skip: if a tool update was activated after selection, leave the job
+	// queued and unchanged (it dispatches after restart) instead of failing it on a refused engine start.
+	if maintErr := ytdlpMaintenanceError(eng); maintErr != nil {
+		return &DispatchHandledError{Err: maintErr}
 	}
 
 	targetDir := j.DestinationDir

@@ -90,6 +90,30 @@ type ToolRecord struct {
 	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
+// Managed tool ledger statuses. At most one active and one last_known_good row exist per tool.
+const (
+	ManagedToolStatusActive        = "active"
+	ManagedToolStatusLastKnownGood = "last_known_good"
+	ManagedToolStatusRetired       = "retired"
+	ManagedToolStatusQuarantined   = "quarantined"
+)
+
+// ManagedToolRecord is an authenticated managed binary in the managed tool ledger. Only binaries whose
+// SHA-256 matched a signature-verified release manifest are ever recorded; FileName is the content-addressed
+// file name inside the managed store, never an absolute path.
+type ManagedToolRecord struct {
+	Name              string    `json:"name"`
+	SHA256            string    `json:"sha256"`
+	Version           string    `json:"version"`
+	ReleaseTag        string    `json:"releaseTag"`
+	FileName          string    `json:"fileName"`
+	SignerFingerprint string    `json:"signerFingerprint"`
+	Status            string    `json:"status"`
+	AuthenticatedAt   time.Time `json:"authenticatedAt"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
 // EventCursor tracks the durable sequence cursor for StateSync.
 type EventCursor struct {
 	Scope          string    `json:"scope"`

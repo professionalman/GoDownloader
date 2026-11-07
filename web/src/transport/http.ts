@@ -22,6 +22,9 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  YtdlpToolStatus,
+  ToolAcquisitionResult,
+  ToolUpdateCheck,
   SubtitleOptions,
   SelectFormatRequest,
   SyncSnapshot,
@@ -38,6 +41,7 @@ import {
   type CategoriesOperations,
   type TrackerOperations,
   type MediaAuthOperations,
+  type ToolsOperations,
   type SyncOperations,
 } from './types';
 
@@ -537,6 +541,24 @@ class HttpMediaAuthOperations implements MediaAuthOperations {
   }
 }
 
+class HttpToolsOperations implements ToolsOperations {
+  async getYtdlpStatus(): Promise<YtdlpToolStatus> {
+    return handleResponse<YtdlpToolStatus>(await authFetch(`${API_BASE}/tools/yt-dlp`));
+  }
+
+  async installYtdlp(): Promise<ToolAcquisitionResult> {
+    return handleResponse<ToolAcquisitionResult>(await authFetch(`${API_BASE}/tools/yt-dlp/install`, { method: 'POST' }));
+  }
+
+  async updateYtdlp(): Promise<ToolAcquisitionResult> {
+    return handleResponse<ToolAcquisitionResult>(await authFetch(`${API_BASE}/tools/yt-dlp/update`, { method: 'POST' }));
+  }
+
+  async checkYtdlpUpdate(): Promise<ToolUpdateCheck> {
+    return handleResponse<ToolUpdateCheck>(await authFetch(`${API_BASE}/tools/yt-dlp/check-update`, { method: 'POST' }));
+  }
+}
+
 export function connectSSE(
   onEvent: (eventType: string, job: Job, seq?: number) => void,
   onSyncRequired?: (payload: { cursor: number; reason: string }) => void,
@@ -610,6 +632,7 @@ export class HttpBackendClient implements BackendClient {
   readonly tracker: TrackerOperations = new HttpTrackerOperations();
   readonly mediaAuth: MediaAuthOperations = new HttpMediaAuthOperations();
   readonly sync: SyncOperations = new HttpSyncOperations();
+  readonly tools: ToolsOperations = new HttpToolsOperations();
 }
 
 /** Default singleton instance of the HTTP backend client */

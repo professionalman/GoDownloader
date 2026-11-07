@@ -473,3 +473,42 @@ export interface RecoverySummary {
   interruptedMediaJobs: number;
   issues?: RecoveryIssue[];
 }
+
+// ----------------------------------------------------------------------------
+// Managed tools (yt-dlp). Path-free by design: no executable paths or download URLs reach the UI.
+// ----------------------------------------------------------------------------
+
+export type YtdlpToolOwnership = 'managed' | 'legacy_managed_directory' | 'user_configured' | 'system_path' | 'none';
+
+export interface YtdlpToolStatus {
+  tool: string;
+  available: boolean;
+  version?: string;
+  ownership: YtdlpToolOwnership;
+  verificationStatus?: string;
+  authenticated: boolean;
+  managedVersion?: string;
+  restartRequired: boolean;
+  busy: boolean;
+  platformSupported: boolean;
+  canInstall: boolean;
+  canUpdate: boolean;
+  diagnostic?: string;
+}
+
+export interface ToolAcquisitionResult {
+  tool: string;
+  version: string;
+  ownership: string;
+  status: string;
+  alreadyCurrent: boolean;
+  restartRequired: boolean;
+}
+
+export interface ToolUpdateCheck {
+  tool: string;
+  currentVersion?: string;
+  latestVersion: string;
+  managed: boolean;
+  updateAvailable: boolean;
+}

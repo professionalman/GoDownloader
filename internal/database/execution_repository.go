@@ -506,6 +506,24 @@ func (r *SQLiteExecutionRepository) SaveToolRecord(ctx context.Context, rec *job
 	if rec.Status == "" {
 		rec.Status = "active"
 	}
+	// Authenticated managed provenance lives only in managed_tool_ledger; a generic observation may not claim it.
+	if rec.VerificationStatus == "authenticated_release" {
+		return fmt.Errorf("save tool record %s@%s: authenticated releases are recorded only in the managed ledger", rec.Name, rec.Version)
+	}
+
+	tx, err := r.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("save tool record %s@%s: begin: %w", rec.Name, rec.Version, err)
+	}
+	defer tx.Rollback()
+
+	// Keep at most one active observation per tool: a new active observation supersedes earlier ones.
+	if rec.Status == "active" {
+		if _, err := tx.ExecContext(ctx, `UPDATE tool_records SET status = 'deprecated', updated_at = ?
+			WHERE name = ? AND status = 'active' AND version <> ?`, rec.UpdatedAt, rec.Name, rec.Version); err != nil {
+			return fmt.Errorf("save tool record %s@%s: supersede active: %w", rec.Name, rec.Version, err)
+		}
+	}
 
 	query := `INSERT INTO tool_records (
 		name, version, platform_arch, ownership_mode, executable_path,
@@ -520,12 +538,14 @@ func (r *SQLiteExecutionRepository) SaveToolRecord(ctx context.Context, rec *job
 		status = excluded.status,
 		updated_at = excluded.updated_at`
 
-	_, err := r.db.conn.ExecContext(ctx, query,
+	if _, err := tx.ExecContext(ctx, query,
 		rec.Name, rec.Version, rec.PlatformArch, rec.OwnershipMode, rec.ExecutablePath,
 		rec.SHA256, rec.VerificationStatus, rec.Status, rec.CreatedAt, rec.UpdatedAt,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("save tool record %s@%s: %w", rec.Name, rec.Version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save tool record %s@%s: commit: %w", rec.Name, rec.Version, err)
 	}
 	return nil
 }

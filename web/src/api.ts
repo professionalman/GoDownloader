@@ -23,6 +23,9 @@ import type {
   RecoverySummary,
   RecoveryIssue,
   RecoveryIssueKind,
+  YtdlpToolStatus,
+  ToolAcquisitionResult,
+  ToolUpdateCheck,
 } from './types';
 import {
   ApiResponseError,
@@ -325,6 +328,38 @@ export async function getSyncSnapshot(): Promise<SyncSnapshot> {
  */
 export function subscribeEvents(options: EventSubscribeOptions): EventSubscription {
   return getBackendClient().sync.subscribeEvents(options);
+}
+
+// ----------------------------------------------------------------------------
+// Managed Tools Domain Facade
+// ----------------------------------------------------------------------------
+
+function toolsOps() {
+  const ops = getBackendClient().tools;
+  if (!ops) {
+    throw new Error('Managed tool operations are not available in this mode.');
+  }
+  return ops;
+}
+
+export function hasManagedToolSupport(): boolean {
+  return Boolean(getBackendClient().tools);
+}
+
+export async function getYtdlpToolStatus(): Promise<YtdlpToolStatus> {
+  return toolsOps().getYtdlpStatus();
+}
+
+export async function installYtdlp(): Promise<ToolAcquisitionResult> {
+  return toolsOps().installYtdlp();
+}
+
+export async function updateYtdlp(): Promise<ToolAcquisitionResult> {
+  return toolsOps().updateYtdlp();
+}
+
+export async function checkYtdlpUpdate(): Promise<ToolUpdateCheck> {
+  return toolsOps().checkYtdlpUpdate();
 }
 
 // ----------------------------------------------------------------------------

@@ -107,6 +107,9 @@ func (db *DB) migrate() error {
 	if err := db.migrateToV08Fnd1(); err != nil {
 		return fmt.Errorf("migrate to V0.8 FND-1 durable execution schema: %w", err)
 	}
+	if err := db.migrateToV091ManagedTools(); err != nil {
+		return fmt.Errorf("migrate to V0.9.1 managed tool ledger: %w", err)
+	}
 
 	return nil
 }

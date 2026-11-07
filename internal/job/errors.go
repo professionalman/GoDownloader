@@ -69,6 +69,7 @@ const (
 	ErrTorrentAlreadyManaged           = "TORRENT_ALREADY_MANAGED"
 	ErrTorrentAlreadyExistsExternally  = "TORRENT_ALREADY_EXISTS_EXTERNALLY"
 	ErrYtDlpUnavailable                = "YT_DLP_UNAVAILABLE"
+	ErrYtDlpRestartRequired            = "YT_DLP_RESTART_REQUIRED"
 )
 
 var (

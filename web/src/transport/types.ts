@@ -16,6 +16,9 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  YtdlpToolStatus,
+  ToolAcquisitionResult,
+  ToolUpdateCheck,
   SubtitleOptions,
   TorrentFile,
   TorrentFileSelection,
@@ -163,6 +166,14 @@ export interface MediaAuthOperations {
   deleteCookies(): Promise<MediaAuthSettings>;
 }
 
+/** Domain: Managed yt-dlp. Operations take no URLs, keys, checksums, or paths. */
+export interface ToolsOperations {
+  getYtdlpStatus(): Promise<YtdlpToolStatus>;
+  installYtdlp(): Promise<ToolAcquisitionResult>;
+  updateYtdlp(): Promise<ToolAcquisitionResult>;
+  checkYtdlpUpdate(): Promise<ToolUpdateCheck>;
+}
+
 /** Domain: State synchronization & live event subscription */
 export interface SyncOperations {
   getSnapshot(): Promise<SyncSnapshot>;
@@ -202,6 +213,7 @@ export interface BackendClient {
   readonly tracker: TrackerOperations;
   readonly mediaAuth: MediaAuthOperations;
   readonly sync: SyncOperations;
+  readonly tools?: ToolsOperations;
   readonly desktopPreferences?: DesktopPreferencesOperations;
   readonly supportBundle?: SupportBundleOperations;
 }
