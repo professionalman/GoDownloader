@@ -11,6 +11,10 @@ import (
 type IJobRepository interface {
 	Create(ctx context.Context, j *Job) error
 	Update(ctx context.Context, j *Job) error
+	// UpdateIfStatus writes the full job row only while the persisted status still equals expected. It returns
+	// false, nil (writing nothing) when another transition changed the status first. Lifecycle transitions that
+	// race each other (dispatch vs cancel) use it so the first committed transition wins.
+	UpdateIfStatus(ctx context.Context, j *Job, expected JobStatus) (bool, error)
 	DeleteJobCascade(ctx context.Context, jobID string) error
 	UpdateJobPriorityAndQueuePosition(ctx context.Context, jobID string, newPriority JobPriority, newPosition int64) error
 	GetByID(ctx context.Context, id string) (*Job, error)

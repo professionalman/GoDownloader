@@ -55,6 +55,7 @@ func TestDesktopService_Basics(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+	cfg.DataDir = filepath.Join(tmpDir, "data")
 
 	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 	if err != nil {
@@ -314,6 +315,7 @@ func TestDesktopService_DesktopPreferences(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+	cfg.DataDir = filepath.Join(tmpDir, "data")
 
 	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 	if err != nil {
@@ -456,6 +458,7 @@ func TestDesktopService_DiagnosticCommandDispatch(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "diag_dispatch_test.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+	cfg.DataDir = filepath.Join(tmpDir, "data")
 
 	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 	if err != nil {
@@ -547,6 +550,7 @@ func TestDesktopService_RestartRecovery_InterruptedMediaAcceptance(t *testing.T)
 	dbPath := filepath.Join(tmpDir, "test.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+	cfg.DataDir = filepath.Join(tmpDir, "data")
 
 	// Pre-populate DB with an active media job before App start
 	db, err := database.New(dbPath)
@@ -641,6 +645,7 @@ func TestDesktopService_ExportSupportBundle(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+	cfg.DataDir = filepath.Join(tmpDir, "data")
 
 	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 	if err != nil {

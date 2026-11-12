@@ -1,17 +1,22 @@
 package ytdlp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"downloader/internal/job"
 	"downloader/internal/networkpolicy"
+	"downloader/internal/process"
 )
 
 // ytdlpJSON is the raw JSON structure from yt-dlp --dump-json.
@@ -92,14 +97,9 @@ func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *netw
 
 	args = append(args, url)
 
-	cmd := exec.CommandContext(ctx, e.ytdlpPath, args...)
-	output, err := cmd.Output()
+	output, err := e.runAnalysisProcess(ctx, args)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := string(exitErr.Stderr)
-			return nil, fmt.Errorf("yt-dlp analysis failed: %s", cleanError(stderr))
-		}
-		return nil, fmt.Errorf("yt-dlp analysis failed: %w", err)
+		return nil, err
 	}
 
 	var raw ytdlpJSON
@@ -120,6 +120,64 @@ func (e *Engine) AnalyzeWithPolicy(ctx context.Context, url string, policy *netw
 		BestAudioFormat: bestAudio,
 		Subtitles:       subtitles,
 	}, nil
+}
+
+// analysisSeq gives each supervised analysis process a unique supervisor ID.
+var analysisSeq atomic.Uint64
+
+// analysisPipeDrainDelay bounds how long output collection may wait for pipe handles held by descendants after the
+// root process exited; the process tree is terminated during teardown regardless.
+const analysisPipeDrainDelay = 2 * time.Second
+
+// runAnalysisProcess runs yt-dlp as a supervised, application-owned process tree (Windows Job Object / Unix process
+// group) and returns its stdout. On cancellation, deadline or supervisor shutdown the whole tree is terminated, and
+// in every case this returns only after the root exited and the remaining tree was torn down, so the caller's
+// usage-gate reservation and analysis permit are released only once no yt-dlp process of this analysis remains.
+func (e *Engine) runAnalysisProcess(ctx context.Context, args []string) ([]byte, error) {
+	e.mu.RLock()
+	supervisor := e.supervisor
+	e.mu.RUnlock()
+	if supervisor == nil {
+		supervisor = process.NewSupervisor()
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(e.ytdlpPath, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = analysisPipeDrainDelay
+
+	proc, err := supervisor.StartOwned(ctx, cmd, process.ProcessSpec{
+		ID:      fmt.Sprintf("ytdlp-analysis-%d", analysisSeq.Add(1)),
+		Tool:    "yt-dlp",
+		Purpose: "analysis",
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("yt-dlp analysis cancelled: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("yt-dlp analysis failed: %w", err)
+	}
+	waitErr := proc.Wait()
+	if proc.WasTerminated() || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("yt-dlp analysis cancelled: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("yt-dlp analysis terminated: %w", process.ErrSupervisorClosed)
+	}
+	if errors.Is(waitErr, exec.ErrWaitDelay) {
+		// The root exited successfully but a descendant still held the output pipes; the root's output was
+		// collected and the descendant was terminated when the tree was torn down.
+		waitErr = nil
+	}
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			return nil, fmt.Errorf("yt-dlp analysis failed: %s", cleanError(stderr.String()))
+		}
+		return nil, fmt.Errorf("yt-dlp analysis failed: %w", waitErr)
+	}
+	return stdout.Bytes(), nil
 }
 
 // normalizeFormats converts raw yt-dlp formats into clean MediaFormat entries.

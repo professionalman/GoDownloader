@@ -1353,6 +1353,15 @@ func (w *toggleFailingUpdateJobRepoWrapper) Update(ctx context.Context, j *job.J
 	return w.IJobRepository.Update(ctx, j)
 }
 
+func (w *toggleFailingUpdateJobRepoWrapper) UpdateIfStatus(ctx context.Context, j *job.Job, expected job.JobStatus) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failUpdate {
+		return false, errors.New("simulated DB update failure")
+	}
+	return w.IJobRepository.UpdateIfStatus(ctx, j, expected)
+}
+
 func TestManager_SetPriority_AtomicSuccess(t *testing.T) {
 	db, jobRepo, queueRepo := setupSchedulerTestDB(t)
 	defer db.Close()

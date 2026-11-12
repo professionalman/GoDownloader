@@ -53,6 +53,18 @@ type Manager struct {
 	appliedLimits                   map[string]int64
 	terminalLocks                   map[string]*sync.Mutex
 	reconcileCancel                 context.CancelFunc
+	reconcilerRunning               atomic.Bool
+	// dispatching holds job IDs whose dispatch (engine start + DOWNLOADING transition) is in flight.
+	// cancelledDuringDispatch marks those whose cancellation committed meanwhile: the cancel then leaves the
+	// transfer-lease release to endDispatch, which runs after the dispatch stopped any engine it started.
+	// Both are guarded by mu, so exactly one side releases the lease after the engine is stopped.
+	dispatching             map[string]bool
+	cancelledDuringDispatch map[string]bool
+	// stateLocks holds per-job locks (see jobStateLock); guarded by mu.
+	stateLocks map[string]*sync.Mutex
+	// skipSharedDataCleanup disables startup deletion of stale work directories when this runtime cannot prove
+	// it owns the data directory (another runtime holds the data-directory cleanup lock).
+	skipSharedDataCleanup bool
 
 	monitor *Monitor
 
@@ -174,7 +186,7 @@ func (m *Manager) SetScheduler(s *Scheduler) {
 		s.SetEventBus(m.bus)
 		s.SetPublishFunc(m.publish)
 		s.SetEngineRegistry(m.engines)
-		s.SetAddActiveFunc(m.addActive)
+		s.SetAddActiveFunc(m.addActiveIfLive)
 		s.SetPrepareActiveJobFunc(m.prepareJobForActivation)
 		if gov != nil {
 			s.SetResourceGovernor(gov)
@@ -226,8 +238,8 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 	m.reconcileCancel = cancel
 	go m.runNetworkReconciler(reconcileCtx)
 
-	// 2. Clean up stale GoDownloader-owned workdirs on startup
-	if m.storageService != nil {
+	// 2. Clean up stale GoDownloader-owned workdirs on startup, only when this runtime owns the data directory.
+	if m.storageService != nil && !m.skipSharedDataCleanup {
 		allJobs, err := m.repo.List(ctx)
 		if err != nil {
 			log.Printf("startup: failed to list jobs for workdir cleanup: %v", err)
@@ -260,6 +272,31 @@ func (m *Manager) StartBackgroundTasks(ctx context.Context) {
 	// 5. Start progress monitor
 	m.monitor = NewMonitor(m, 1*time.Second)
 	m.monitor.Start(ctx)
+}
+
+// SetSharedDataCleanupAllowed controls whether startup removes stale work directories in the shared data
+// directory. It must be false when another runtime may own files there.
+func (m *Manager) SetSharedDataCleanupAllowed(allowed bool) {
+	m.skipSharedDataCleanup = !allowed
+}
+
+// BackgroundWorkerStatus reports which long-lived background loops are currently alive.
+type BackgroundWorkerStatus struct {
+	Scheduler  bool `json:"scheduler"`
+	Monitor    bool `json:"monitor"`
+	Reconciler bool `json:"reconciler"`
+}
+
+// BackgroundWorkers reports the liveness of the scheduler, progress monitor, and network reconciler loops.
+func (m *Manager) BackgroundWorkers() BackgroundWorkerStatus {
+	m.mu.RLock()
+	sched, mon := m.scheduler, m.monitor
+	m.mu.RUnlock()
+	return BackgroundWorkerStatus{
+		Scheduler:  sched != nil && sched.Running(),
+		Monitor:    mon.Running(),
+		Reconciler: m.reconcilerRunning.Load(),
+	}
 }
 
 // Stop stops background tasks, cancels active background analysis/metadata tasks, and shuts down subprocess engines.
@@ -2227,6 +2264,10 @@ func (m *Manager) cancel(ctx context.Context, id string, attempt int) (*Job, err
 	if j.Status == StatusAwaitingSelection {
 		return m.cancelAwaitingSelection(ctx, j, attempt)
 	}
+	// The cancellation commits only if the job is still in the state observed here. A concurrent dispatch that
+	// moved QUEUED -> DOWNLOADING first makes the conditional write fail; the cancel is then re-evaluated from the
+	// authoritative state, which now carries the engine ID to cancel.
+	observed := j.Status
 
 	// If job has an EngineID, cancel in engine first and enforce success
 	if j.EngineID != "" {
@@ -2254,10 +2295,23 @@ func (m *Manager) cancel(ctx context.Context, id string, attempt int) (*Job, err
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
 
-	// Persist CANCELLED status FIRST before deleting queue entry or publishing event
-	if err := m.repo.Update(ctx, j); err != nil {
+	// Persist CANCELLED status FIRST before deleting queue entry or publishing event. The commit, active-set
+	// removal and announcement run under the job's state lock so a concurrent engine observation (monitor tick) is
+	// applied entirely before or entirely after them, never in between.
+	stateLock := m.jobStateLock(id)
+	stateLock.Lock()
+	won, err := m.repo.UpdateIfStatus(ctx, j, observed)
+	if err != nil {
+		stateLock.Unlock()
 		log.Printf("Cancel: external cancellation succeeded for job %s but CANCELLED state persistence failed: %v", id, err)
 		return nil, &AppError{Code: ErrInternalError, Message: fmt.Sprintf("failed to persist cancel state: %v", err)}
+	}
+	if !won {
+		stateLock.Unlock()
+		if attempt >= maxCancelAttempts {
+			return nil, &AppError{Code: ErrInvalidJobState, Message: "job state changed during cancellation; retry the cancel"}
+		}
+		return m.cancel(ctx, id, attempt+1)
 	}
 
 	if m.queueRepo != nil {
@@ -2266,8 +2320,9 @@ func (m *Manager) cancel(ctx context.Context, id string, attempt int) (*Job, err
 		}
 	}
 
-	m.removeActive(id)
+	m.releaseCancelledJob(id, observed)
 	m.publish(EventJobCancelled, j)
+	stateLock.Unlock()
 	m.cleanupTerminalEngineState(j)
 
 	if j.Type == TypeMedia && m.storageService != nil && j.WorkDir != "" {
@@ -2996,6 +3051,24 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 	if j == nil || status == nil {
 		return
 	}
+	// j is a snapshot taken by the monitor; observed is the lifecycle state that snapshot saw. Every write below is
+	// conditional on the persisted state (see persistObservedState), and the whole observation is applied under the
+	// job's state lock so it cannot interleave with a cancellation's commit, active-set removal and announcement.
+	stateLock := m.jobStateLock(j.ID)
+	stateLock.Lock()
+	defer stateLock.Unlock()
+	observed := j.Status
+	persist := func() bool {
+		won, err := m.persistObservedState(ctx, j, observed)
+		if err != nil {
+			log.Printf("UpdateJobFromEngine: failed to persist %s for job %s: %v", j.Status, j.ID, err)
+			return false
+		}
+		if !won {
+			log.Printf("UpdateJobFromEngine: job %s left %s concurrently; stale %s observation dropped", j.ID, observed, j.Status)
+		}
+		return won
+	}
 	if j.Type == TypeTorrent && j.Status != StatusAwaitingSelection {
 		if j.TorrentInfo != nil && j.TorrentInfo.TotalSize > 0 && status.TotalBytes == j.TorrentInfo.TotalSize && j.TotalBytes > 0 && j.TotalBytes != j.TorrentInfo.TotalSize {
 			// Retain authoritative selected TotalBytes instead of reverting to full torrent size
@@ -3028,11 +3101,13 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				return
 			}
 			if prevStatus != StatusSeeding {
+				if !persist() {
+					return
+				}
 				if gov := m.GetResourceGovernor(); gov != nil {
 					gov.Release(j.ID)
 				}
-				_ = m.repo.Update(ctx, j)
-				m.addActive(j)
+				m.replaceActiveIfPresent(j)
 				m.publish(EventJobUpdated, j)
 				if m.scheduler != nil {
 					m.scheduler.Kick()
@@ -3048,8 +3123,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				j.Status = StatusFailed
 				j.Error = "media completed but engine output path was not provided"
 				j.UpdatedAt = time.Now()
-				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+				if !persist() {
 					return
 				}
 				m.removeActive(j.ID)
@@ -3070,8 +3144,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				j.Status = StatusFailed
 				j.Error = fmt.Sprintf("media output path %s is outside work directory", srcFile)
 				j.UpdatedAt = time.Now()
-				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+				if !persist() {
 					return
 				}
 				m.removeActive(j.ID)
@@ -3089,8 +3162,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 				j.Status = StatusFailed
 				j.Error = fmt.Sprintf("media output path %s does not exist or is a directory", srcFile)
 				j.UpdatedAt = time.Now()
-				if updateErr := m.repo.Update(ctx, j); updateErr != nil {
-					log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+				if !persist() {
 					return
 				}
 				m.removeActive(j.ID)
@@ -3127,8 +3199,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		if err := m.repo.Update(ctx, j); err != nil {
-			log.Printf("UpdateJobFromEngine: failed to update job %s to COMPLETED: %v", j.ID, err)
+		if !persist() {
 			return
 		}
 		m.removeActive(j.ID)
@@ -3151,8 +3222,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		if err := m.repo.Update(ctx, j); err != nil {
-			log.Printf("UpdateJobFromEngine: failed to persist FAILED status for job %s: %v", j.ID, err)
+		if !persist() {
 			return
 		}
 		m.removeActive(j.ID)
@@ -3174,8 +3244,7 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		if err := m.repo.Update(ctx, j); err != nil {
-			log.Printf("UpdateJobFromEngine: failed to persist CANCELLED status for job %s: %v", j.ID, err)
+		if !persist() {
 			return
 		}
 		m.removeActive(j.ID)
@@ -3198,7 +3267,9 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			j.SpeedBytesPerSecond = 0
 			j.ETASeconds = 0
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if !persist() {
+				return
+			}
 			m.removeActive(j.ID)
 			m.publish(EventJobUpdated, j)
 			if m.scheduler != nil {
@@ -3213,7 +3284,10 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 			j.SpeedBytesPerSecond = 0
 			j.ETASeconds = 0
 			j.UpdatedAt = time.Now()
-			m.repo.Update(ctx, j)
+			if !persist() {
+				return
+			}
+			m.replaceActiveIfPresent(j)
 			m.publish(EventJobUpdated, j)
 			if m.scheduler != nil {
 				m.scheduler.Kick()
@@ -3227,26 +3301,23 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 		}
 
 		if prevStatus != StatusSeeding {
+			if !persist() {
+				return
+			}
 			if gov := m.GetResourceGovernor(); gov != nil {
 				gov.Release(j.ID)
 			}
-			m.repo.Update(ctx, j)
-			m.addActive(j)
+			m.replaceActiveIfPresent(j)
 			m.publish(EventJobUpdated, j)
 			if m.scheduler != nil {
 				m.scheduler.Kick()
 			}
 		} else {
 			if persistNow {
-				m.repo.Update(ctx, j)
-				m.mu.Lock()
-				m.activeJobs[j.ID] = j
-				m.mu.Unlock()
-				m.publish(EventJobUpdated, j)
-			} else {
-				m.mu.Lock()
-				m.activeJobs[j.ID] = j
-				m.mu.Unlock()
+				if persist() && m.replaceActiveIfPresent(j) {
+					m.publish(EventJobUpdated, j)
+				}
+			} else if m.replaceActiveIfPresent(j) {
 				m.publishProgress(j)
 			}
 		}
@@ -3257,15 +3328,13 @@ func (m *Manager) UpdateJobFromEngine(ctx context.Context, j *Job, status *Engin
 	j.Status = StatusDownloading
 	j.UpdatedAt = time.Now()
 
-	// Update the active job in-memory
-	m.mu.Lock()
-	m.activeJobs[j.ID] = j
-	m.mu.Unlock()
-
+	// A progress observation refreshes only a job that is still active and never re-inserts one; a persisted tick
+	// additionally requires the row to still be in an engine-observable state.
 	if persistNow {
-		m.repo.Update(ctx, j)
-		m.publish(EventJobUpdated, j)
-	} else {
+		if persist() && m.replaceActiveIfPresent(j) {
+			m.publish(EventJobUpdated, j)
+		}
+	} else if m.replaceActiveIfPresent(j) {
 		m.publishProgress(j)
 	}
 }
@@ -3667,13 +3736,20 @@ func (m *Manager) persistDispatchFailure(ctx context.Context, j *Job, qj *Queued
 		j.NetworkReconcilePending = true
 	}
 
+	// Conditional on the state the dispatch observed: a cancellation that committed meanwhile is not overwritten.
+	expected := j.Status
 	j.Status = targetStatus
 	j.Error = dispatchErr.Error()
 	j.SpeedBytesPerSecond = 0
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
 
-	if err := m.repo.Update(ctx, j); err != nil {
+	won, err := m.repo.UpdateIfStatus(ctx, j, expected)
+	if err == nil && !won {
+		log.Printf("persistDispatchFailure: job %s changed state during dispatch; %s not persisted", j.ID, targetStatus)
+		return &DispatchHandledError{Err: dispatchErr}
+	}
+	if err != nil {
 		log.Printf("persistDispatchFailure: failed to persist %s for job %s: %v", targetStatus, j.ID, err)
 		return &DispatchPersistenceError{
 			JobID:        j.ID,
@@ -3700,6 +3776,30 @@ func (m *Manager) persistDispatchFailure(ctx context.Context, j *Job, qj *Queued
 	return &DispatchHandledError{Err: dispatchErr}
 }
 
+// abandonLostDispatch stops the engine work a dispatch started after another transition won the job. A cancelled
+// or deleted job is cancelled in the engine; a job moved to another live state (e.g. PAUSED) is paused, keeping its
+// partial data. Failures are logged and flagged for network reconciliation; they never resurrect the job.
+func (m *Manager) abandonLostDispatch(ctx context.Context, started *Job, eng IEngine) {
+	latest, _ := m.repo.GetByID(ctx, started.ID)
+	if started.EngineID != "" {
+		var stopErr error
+		if latest == nil || latest.Status == StatusCancelled || latest.Status == StatusFailed {
+			stopErr = eng.Cancel(ctx, started)
+		} else {
+			stopErr = eng.Pause(ctx, started)
+		}
+		if stopErr != nil {
+			log.Printf("dispatchQueuedJob: stopping engine for job %s after lost transition failed: %v", started.ID, stopErr)
+		}
+	}
+	if latest != nil && latest.Status == StatusCancelled && latest.Type == TypeMedia && m.storageService != nil && latest.WorkDir != "" {
+		// The cancel cleaned the work directory before the engine started writing into it.
+		if err := m.storageService.CleanupWorkDir(ctx, latest.ID, latest.WorkDir); err != nil {
+			log.Printf("dispatchQueuedJob: cleanup workdir after lost transition for job %s: %v", latest.ID, err)
+		}
+	}
+}
+
 // DispatchQueuedJob dispatches a queued job to its target engine.
 func (m *Manager) DispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	return m.dispatchQueuedJob(ctx, qj)
@@ -3710,6 +3810,11 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		return fmt.Errorf("queued job is nil")
 	}
 
+	// Registered before the job is read, so a cancellation that commits at any point after this read hands the
+	// transfer-lease release to endDispatch (after any engine started here is stopped).
+	m.beginDispatch(qj.JobID)
+	defer m.endDispatch(ctx, qj.JobID)
+
 	j, err := m.repo.GetByID(ctx, qj.JobID)
 	if err != nil || j == nil {
 		if m.queueRepo != nil {
@@ -3717,6 +3822,13 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		}
 		return fmt.Errorf("job %s not found: %v", qj.JobID, err)
 	}
+	if j.Status == StatusCancelled || j.Status == StatusCompleted || j.Status == StatusFailed {
+		// Cancelled (or otherwise finished) after the scheduler selected it: nothing to start.
+		return &DispatchHandledError{Err: fmt.Errorf("job %s is %s; dispatch skipped", j.ID, j.Status)}
+	}
+	// Linearization point: every state write below is conditional on the job still being in this observed state.
+	// Whichever of dispatch (-> DOWNLOADING / FAILED / PAUSED) and cancel (-> CANCELLED) commits first wins.
+	observed := j.Status
 
 	if err := m.hydrateTorrentState(ctx, j); err != nil {
 		log.Printf("dispatchQueuedJob: failed to hydrate torrent state for job %s: %v", j.ID, err)
@@ -3761,7 +3873,9 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		}
 		if j.TotalBytes != selBytes {
 			j.TotalBytes = selBytes
-			if err := m.repo.Update(ctx, j); err != nil {
+			if won, err := m.repo.UpdateIfStatus(ctx, j, observed); err == nil && !won {
+				return &DispatchHandledError{Err: fmt.Errorf("job %s changed state during dispatch", j.ID)}
+			} else if err != nil {
 				log.Printf("dispatchQueuedJob: failed to persist repaired TotalBytes for job %s: %v", j.ID, err)
 				targetStatus := StatusPaused
 				if qj.Action == QueueActionStart {
@@ -3802,6 +3916,11 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	execDir := targetDir
 	if j.Type == TypeMedia && j.WorkDir != "" {
 		execDir = j.WorkDir
+	}
+
+	if m.dispatchCancelled(j.ID) {
+		// Cancelled while preflight ran: do not start an engine for a job that is already CANCELLED.
+		return &DispatchHandledError{Err: fmt.Errorf("job %s cancelled during dispatch", j.ID)}
 	}
 
 	if qj.Action == QueueActionStart {
@@ -3853,7 +3972,8 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 	j.Status = StatusDownloading
 	j.Error = ""
 	j.UpdatedAt = time.Now()
-	if err := m.repo.Update(ctx, j); err != nil {
+	won, err := m.repo.UpdateIfStatus(ctx, j, observed)
+	if err != nil {
 		log.Printf("dispatchQueuedJob: update job %s status to DOWNLOADING failed: %v", j.ID, err)
 		return &DispatchPersistenceError{
 			JobID:    j.ID,
@@ -3862,6 +3982,12 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 			Kind:     DispatchFailureExternalExecutionPersistence,
 			Err:      err,
 		}
+	}
+	if !won {
+		// A concurrent transition (cancel, pause, delete) committed while the engine was starting. That
+		// transition is authoritative: stop the engine this dispatch started before the lease is released.
+		m.abandonLostDispatch(ctx, j, eng)
+		return &DispatchHandledError{Err: fmt.Errorf("job %s changed state during dispatch; engine start abandoned", j.ID)}
 	}
 
 	if m.execRepo != nil {
@@ -3892,8 +4018,16 @@ func (m *Manager) dispatchQueuedJob(ctx context.Context, qj *QueuedJob) error {
 		}
 	}
 
-	m.addActive(j)
-	m.publish(EventJobUpdated, j)
+	// Register and announce the running job under the state lock: a cancellation that committed after the
+	// DOWNLOADING write (and handed its lease release to endDispatch) is fully visible here, so a cancelled job is
+	// never re-inserted into the active set or announced as DOWNLOADING after its cancellation.
+	stateLock := m.jobStateLock(j.ID)
+	stateLock.Lock()
+	if !m.dispatchCancelled(j.ID) {
+		m.addActive(j)
+		m.publish(EventJobUpdated, j)
+	}
+	stateLock.Unlock()
 	return nil
 }
 
@@ -4123,6 +4257,134 @@ func (m *Manager) removeActive(id string) bool {
 		released = gov.ReleaseTransfer(id)
 	}
 	return hadActive || released
+}
+
+// jobStateLock returns the per-job lock that serializes applying an engine observation (monitor tick) with
+// committing and announcing a cancellation or dispatch for the same job. It orders in-memory active-set changes and
+// published events; it is never held while an engine is started or cancelled.
+func (m *Manager) jobStateLock(jobID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stateLocks == nil {
+		m.stateLocks = make(map[string]*sync.Mutex)
+	}
+	lock := m.stateLocks[jobID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.stateLocks[jobID] = lock
+	}
+	return lock
+}
+
+// engineObservable reports whether a persisted state belongs to a running, engine-owned execution whose row an
+// engine observation (progress, processing, seeding, completion, failure) may update.
+func engineObservable(s JobStatus) bool {
+	return s == StatusDownloading || s == StatusProcessing || s == StatusSeeding
+}
+
+// persistObservedState writes j (built from a snapshot whose lifecycle state was observed) only while the persisted
+// state still equals observed. If the row moved to another engine-observable state meanwhile (an in-memory snapshot
+// lagging a DOWNLOADING -> PROCESSING write, for example) the write is retried once against that state. It never
+// overwrites CANCELLED, COMPLETED, FAILED, PAUSED, QUEUED or a deleted row: it returns false and writes nothing.
+func (m *Manager) persistObservedState(ctx context.Context, j *Job, observed JobStatus) (bool, error) {
+	won, err := m.repo.UpdateIfStatus(ctx, j, observed)
+	if err != nil || won || !engineObservable(observed) {
+		return won, err
+	}
+	latest, getErr := m.repo.GetByID(ctx, j.ID)
+	if getErr != nil || latest == nil || latest.Status == observed || !engineObservable(latest.Status) {
+		return false, nil
+	}
+	return m.repo.UpdateIfStatus(ctx, j, latest.Status)
+}
+
+// addActiveIfLive registers j as active only if its persisted state is still engine-observable, checked under the
+// job's state lock. The scheduler's reconciler uses it after its conditional write, so a cancellation that commits
+// between that write and the registration can never leave a cancelled job in the active set.
+func (m *Manager) addActiveIfLive(j *Job) {
+	stateLock := m.jobStateLock(j.ID)
+	stateLock.Lock()
+	defer stateLock.Unlock()
+	if latest, err := m.repo.GetByID(context.Background(), j.ID); err == nil && latest != nil && engineObservable(latest.Status) {
+		m.addActive(j)
+	}
+}
+
+// replaceActiveIfPresent refreshes the in-memory active entry with j only if the job is still active, so a stale
+// observation can never re-insert a job that a cancellation (or any other transition) already removed.
+func (m *Manager) replaceActiveIfPresent(j *Job) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.activeJobs[j.ID]; !ok {
+		return false
+	}
+	m.activeJobs[j.ID] = j
+	return true
+}
+
+// beginDispatch registers jobID as being dispatched; every call is paired with endDispatch.
+func (m *Manager) beginDispatch(jobID string) {
+	m.mu.Lock()
+	if m.dispatching == nil {
+		m.dispatching = make(map[string]bool)
+	}
+	m.dispatching[jobID] = true
+	m.mu.Unlock()
+}
+
+// endDispatch closes the dispatch of jobID. If a cancellation committed while it was in flight, that cancel left the
+// transfer-lease release to this point, after the dispatch stopped any engine it started; it is released here. The
+// dispatch never announces a job whose cancellation it observed (see the state-locked tail of dispatchQueuedJob), so
+// the cancellation event published by Cancel remains the job's last event.
+func (m *Manager) endDispatch(ctx context.Context, jobID string) {
+	m.mu.Lock()
+	delete(m.dispatching, jobID)
+	cancelled := m.cancelledDuringDispatch[jobID]
+	delete(m.cancelledDuringDispatch, jobID)
+	m.mu.Unlock()
+	if cancelled {
+		m.removeActive(jobID)
+	}
+}
+
+// dispatchCancelled reports whether a cancellation committed while jobID's dispatch is in flight.
+func (m *Manager) dispatchCancelled(jobID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cancelledDuringDispatch[jobID]
+}
+
+// releaseCancelledJob drops a just-cancelled job from the active set and releases its transfer lease, unless an
+// unfinished dispatch still owns that lease:
+//   - its dispatch is still in flight: the dispatch may have started (or be starting) an engine that it stops only
+//     after observing the lost transition, so the release is handed to endDispatch;
+//   - the cancellation won against a state that was not yet running (observed QUEUED/PAUSED) while the scheduler
+//     still holds the job's reservation: the dispatch already returned without committing DOWNLOADING (handled,
+//     failed, or with an unpersisted engine start awaiting reconciliation), and every such scheduler outcome releases
+//     the lease itself — the reconciler only after stopping the engine the dispatch started.
+func (m *Manager) releaseCancelledJob(jobID string, observed JobStatus) {
+	m.mu.Lock()
+	sched := m.scheduler
+	m.mu.Unlock()
+	schedulerOwnsLease := sched != nil && !engineObservable(observed) && sched.isInFlight(jobID)
+
+	m.mu.Lock()
+	if schedulerOwnsLease && !m.dispatching[jobID] {
+		delete(m.activeJobs, jobID)
+		m.mu.Unlock()
+		return
+	}
+	if m.dispatching[jobID] {
+		if m.cancelledDuringDispatch == nil {
+			m.cancelledDuringDispatch = make(map[string]bool)
+		}
+		m.cancelledDuringDispatch[jobID] = true
+		delete(m.activeJobs, jobID)
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+	m.removeActive(jobID)
 }
 
 func (m *Manager) updateActiveJobFinalization(jobID, finalPath, name string) {

@@ -42,56 +42,15 @@ func main() {
 	// Diagnostic smoke test: verifies core runtime, deterministic data root, and shutdown
 	for _, arg := range os.Args[1:] {
 		if arg == "--diagnostic-smoke" {
-			dataRoot, err := ResolveDesktopDataRoot()
-			if err != nil {
+			if _, err := ResolveDesktopDataRoot(); err != nil {
 				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: data root: %v\n", err)
 				os.Exit(1)
 			}
-			dbPath := filepath.Join(dataRoot, "downloader_smoke.db")
-			defer os.Remove(dbPath)
-
-			cfg := config.New()
-			cfg.DownloadDir = filepath.Join(dataRoot, "downloads")
-			cfg.DataDir = filepath.Join(dataRoot, "data")
-			if err := cfg.EnsureDirectories(); err != nil {
-				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: directories: %v\n", err)
+			if err := runDiagnosticSmoke(); err != nil {
+				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: %v\n", err)
 				os.Exit(1)
 			}
-			appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: app.New: %v\n", err)
-				os.Exit(1)
-			}
-
-			startCtx, cancelStart := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := appInstance.Start(startCtx); err != nil {
-				cancelStart()
-				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: appInstance.Start: %v\n", err)
-				os.Exit(1)
-			}
-			cancelStart()
-
-			// Check domain services
-			if appInstance.Manager() == nil || appInstance.Settings() == nil || appInstance.EventBus() == nil {
-				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: missing core services\n")
-				os.Exit(1)
-			}
-
-			svc := NewDesktopService(appInstance, dataRoot)
-			if svc.GetBackendInstanceID() == "" {
-				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: invalid instance ID\n")
-				os.Exit(1)
-			}
-
-			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := appInstance.Shutdown(shutdownCtx); err != nil {
-				cancelShutdown()
-				fmt.Fprintf(os.Stderr, "SMOKE_TEST_FAILED: appInstance.Shutdown: %v\n", err)
-				os.Exit(1)
-			}
-			cancelShutdown()
-
-			fmt.Println("SMOKE_TEST_SUCCESS: runtime initialized, data root resolved, clean shutdown")
+			fmt.Println("SMOKE_TEST_SUCCESS: runtime initialized, data root resolved, background workers alive, clean shutdown")
 			return
 		}
 	}
@@ -194,25 +153,16 @@ func main() {
 	cfg.DownloadDir = filepath.Join(dataRoot, "downloads")
 	cfg.DataDir = filepath.Join(dataRoot, "data")
 
-	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
+	// The core's background workers live for the whole process (until Quit), not just for initialization.
+	core, err := startDesktopCore(cfg, dbPath)
 	if err != nil {
 		if errors.Is(err, app.ErrRuntimeAlreadyOwned) {
 			showNativeCollisionError()
 			os.Exit(1)
 		}
-		log.Fatalf("Fatal: failed to construct application core: %v", err)
+		log.Fatalf("Fatal: failed to start application core: %v", err)
 	}
-
-	if err := cfg.EnsureDirectories(); err != nil {
-		log.Fatalf("Fatal: failed to initialize desktop directories: %v", err)
-	}
-
-	startCtx, cancelStart := context.WithTimeout(context.Background(), 15*time.Second)
-	if err := appInstance.Start(startCtx); err != nil {
-		cancelStart()
-		log.Fatalf("Fatal: failed to start application runtime: %v", err)
-	}
-	cancelStart()
+	appInstance := core.App()
 
 	// Load persisted close-to-tray preference into desktop lifecycle coordinator
 	if st := appInstance.Settings(); st != nil {
@@ -411,10 +361,8 @@ func main() {
 
 	runErr := wailsApp.Run()
 
-	// Shutdown application runtime upon exit
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelShutdown()
-	_ = appInstance.Shutdown(shutdownCtx)
+	// Shutdown application runtime upon exit (idempotent with the tray Quit path) and end the worker lifetime.
+	_ = core.Shutdown(5 * time.Second)
 
 	if runErr != nil {
 		log.Fatalf("Desktop application terminated with error: %v", runErr)

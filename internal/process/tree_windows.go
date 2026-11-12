@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -146,7 +147,7 @@ func resumeProcess(pid uint32) error {
 func (t *windowsProcessTree) terminate() error {
 	t.closeOnce.Do(func() {
 		if t.jobHandle != 0 && t.jobHandle != windows.InvalidHandle {
-			_ = windows.TerminateJobObject(t.jobHandle, 1)
+			terminateJobAndWait(t.jobHandle, jobDrainTimeout)
 			_ = windows.CloseHandle(t.jobHandle)
 			t.jobHandle = 0
 		}
@@ -154,13 +155,106 @@ func (t *windowsProcessTree) terminate() error {
 	return nil
 }
 
+// close releases the job after the root process exited. Descendants the root left running (for example the
+// re-executed child of a PyInstaller onefile yt-dlp.exe) are terminated and awaited before the handle is closed,
+// so when close returns no process of this tree remains — callers may then release the tool binary for updates.
+// KILL_ON_JOB_CLOSE remains the backstop if the bounded wait expires.
 func (t *windowsProcessTree) close() error {
 	var closeErr error
 	t.closeOnce.Do(func() {
 		if t.jobHandle != 0 && t.jobHandle != windows.InvalidHandle {
+			if jobActiveProcesses(t.jobHandle) > 0 {
+				terminateJobAndWait(t.jobHandle, jobDrainTimeout)
+			}
 			closeErr = windows.CloseHandle(t.jobHandle)
 			t.jobHandle = 0
 		}
 	})
 	return closeErr
+}
+
+// jobDrainTimeout bounds how long tree teardown waits for terminated processes to leave the job.
+const jobDrainTimeout = 5 * time.Second
+
+// jobObjectBasicAccountingInformation mirrors JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
+type jobObjectBasicAccountingInformation struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+// jobActiveProcesses returns the number of live processes in the job, or 0 if it cannot be queried.
+func jobActiveProcesses(job windows.Handle) uint32 {
+	var info jobObjectBasicAccountingInformation
+	if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil {
+		return 0
+	}
+	return info.ActiveProcesses
+}
+
+// maxJobProcessIDs bounds the job's process-ID list query (an analysis or download tree has a handful of members).
+const maxJobProcessIDs = 256
+
+// jobObjectBasicProcessIDList mirrors JOBOBJECT_BASIC_PROCESS_ID_LIST with a fixed-capacity ID array.
+type jobObjectBasicProcessIDList struct {
+	NumberOfAssignedProcesses uint32
+	NumberOfProcessIdsInList  uint32
+	ProcessIDList             [maxJobProcessIDs]uintptr
+}
+
+// openJobMembers opens SYNCHRONIZE handles to the processes currently in the job. Each handle is kept only if
+// IsProcessInJob confirms membership, so a PID that exited and was reused by an unrelated process is never awaited.
+// Nothing outside the job is touched: no process is enumerated system-wide and none is terminated here.
+func openJobMembers(job windows.Handle) []windows.Handle {
+	var list jobObjectBasicProcessIDList
+	if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicProcessIdList,
+		uintptr(unsafe.Pointer(&list)), uint32(unsafe.Sizeof(list)), nil); err != nil && err != windows.ERROR_MORE_DATA {
+		return nil
+	}
+	n := int(list.NumberOfProcessIdsInList)
+	if n > maxJobProcessIDs {
+		n = maxJobProcessIDs
+	}
+	handles := make([]windows.Handle, 0, n)
+	for i := 0; i < n; i++ {
+		h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(list.ProcessIDList[i]))
+		if err != nil {
+			continue // already gone
+		}
+		if in, err := isProcessInJob(h, job); err != nil || !in {
+			_ = windows.CloseHandle(h)
+			continue
+		}
+		handles = append(handles, h)
+	}
+	return handles
+}
+
+// terminateJobAndWait terminates every process in the job and waits, bounded by timeout, until each has actually
+// exited (its process object is signaled) and the job reports no active process.
+func terminateJobAndWait(job windows.Handle, timeout time.Duration) {
+	members := openJobMembers(job)
+	defer func() {
+		for _, h := range members {
+			_ = windows.CloseHandle(h)
+		}
+	}()
+	_ = windows.TerminateJobObject(job, 1)
+	deadline := time.Now().Add(timeout)
+	for _, h := range members {
+		remaining := time.Until(deadline)
+		if remaining < 0 {
+			remaining = 0
+		}
+		_, _ = windows.WaitForSingleObject(h, uint32(remaining/time.Millisecond))
+	}
+	for jobActiveProcesses(job) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 }

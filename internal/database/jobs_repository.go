@@ -116,6 +116,17 @@ func (r *SQLiteJobRepository) Create(ctx context.Context, j *job.Job) error {
 
 // Update updates an existing job in the database.
 func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
+	_, err := r.updateJob(ctx, j, nil)
+	return err
+}
+
+// UpdateIfStatus updates the full job row only if its persisted status equals expected, as one SQL statement.
+// It returns false, nil when the status changed concurrently (nothing is written).
+func (r *SQLiteJobRepository) UpdateIfStatus(ctx context.Context, j *job.Job, expected job.JobStatus) (bool, error) {
+	return r.updateJob(ctx, j, &expected)
+}
+
+func (r *SQLiteJobRepository) updateJob(ctx context.Context, j *job.Job, expected *job.JobStatus) (bool, error) {
 	mediaInfoJSON := ""
 	if j.MediaInfo != nil {
 		if data, err := json.Marshal(j.MediaInfo); err == nil {
@@ -130,7 +141,7 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 	}
 	networkPolicyJSON, marshalErr := json.Marshal(j.NetworkPolicy)
 	if marshalErr != nil {
-		return fmt.Errorf("marshal network policy: %w", marshalErr)
+		return false, fmt.Errorf("marshal network policy: %w", marshalErr)
 	}
 	query := `UPDATE jobs SET
 		source=?, name=?, status=?, total_bytes=?, completed_bytes=?, progress=?,
@@ -140,7 +151,7 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 		updated_at=?, engine_cleanup_pending=?, network_policy_json=?,
 		effective_download_limit_bps=?, effective_upload_limit_bps=?, network_reconcile_pending=?
 		WHERE id=?`
-	_, err := r.db.conn.ExecContext(ctx, query,
+	args := []any{
 		j.Source, j.Name, j.Status, j.TotalBytes, j.CompletedBytes, j.Progress,
 		j.SpeedBytesPerSecond, j.ETASeconds, j.Error, j.Engine, j.EngineID,
 		j.Type, mediaInfoJSON, j.Priority, j.BatchID,
@@ -148,11 +159,23 @@ func (r *SQLiteJobRepository) Update(ctx context.Context, j *job.Job) error {
 		j.UpdatedAt, j.EngineCleanupPending, string(networkPolicyJSON),
 		j.EffectiveDownloadLimitBytesPerSecond, j.EffectiveUploadLimitBytesPerSecond,
 		j.NetworkReconcilePending, j.ID,
-	)
-	if err != nil {
-		return fmt.Errorf("update job: %w", err)
 	}
-	return nil
+	if expected != nil {
+		query += ` AND status=?`
+		args = append(args, *expected)
+	}
+	res, err := r.db.conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("update job: %w", err)
+	}
+	if expected == nil {
+		return true, nil
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("update job rows affected: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // UpdateJobPriorityAndQueuePosition updates a job's priority and its queue position in a single transaction.

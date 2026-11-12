@@ -337,6 +337,8 @@ func containsString(values []string, target string) bool {
 }
 
 func (m *Manager) runNetworkReconciler(ctx context.Context) {
+	m.reconcilerRunning.Store(true)
+	defer m.reconcilerRunning.Store(false)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {

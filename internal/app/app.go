@@ -55,6 +55,7 @@ type App struct {
 	resourceGovernor  *job.ResourceGovernor
 	scheduler         *job.Scheduler
 	runtimeGuard      io.Closer
+	cleanupOwner      io.Closer // data-directory cleanup ownership lock; nil when another runtime holds it
 
 	// Lifecycle state coordination
 	mu            sync.Mutex
@@ -110,6 +111,32 @@ func (a *App) MediaAuth() *mediaauth.Service {
 // EventBus returns the application event bus required by host event adapters.
 func (a *App) EventBus() *events.InMemoryBus {
 	return a.bus
+}
+
+// RuntimeWorkerStatus reports the liveness of the runtime's long-lived background loops.
+type RuntimeWorkerStatus struct {
+	job.BackgroundWorkerStatus
+	Tracker bool `json:"tracker"`
+}
+
+// BackgroundWorkers reports whether the scheduler, progress monitor, network reconciler, and tracker runner
+// loops are alive. After Start they must stay alive until Shutdown.
+func (a *App) BackgroundWorkers() RuntimeWorkerStatus {
+	a.mu.Lock()
+	manager, trackerDone := a.manager, a.trackerDone
+	a.mu.Unlock()
+	st := RuntimeWorkerStatus{}
+	if manager != nil {
+		st.BackgroundWorkerStatus = manager.BackgroundWorkers()
+	}
+	if trackerDone != nil {
+		select {
+		case <-trackerDone:
+		default:
+			st.Tracker = true
+		}
+	}
+	return st
 }
 
 // Registry returns the engine registry.

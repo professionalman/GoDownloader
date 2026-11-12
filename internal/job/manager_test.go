@@ -260,6 +260,9 @@ type fakeJobRepository struct {
 	selectErr                     error
 	beforeSelectMediaFormat       func()
 	beforeCancelAwaitingSelection func()
+	// beforeUpdateIfStatus runs outside the repository lock immediately before a conditional update, giving
+	// dispatch/cancel race tests a deterministic interleaving point.
+	beforeUpdateIfStatus func(j *Job, expected JobStatus)
 }
 
 func newFakeJobRepository() *fakeJobRepository {
@@ -286,6 +289,25 @@ func (f *fakeJobRepository) Update(ctx context.Context, j *Job) error {
 	jCopy := *j
 	f.jobs[j.ID] = &jCopy
 	return nil
+}
+
+func (f *fakeJobRepository) UpdateIfStatus(ctx context.Context, j *Job, expected JobStatus) (bool, error) {
+	if hook := f.beforeUpdateIfStatus; hook != nil {
+		hook(j, expected)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return false, f.updateErr
+	}
+	cur, exists := f.jobs[j.ID]
+	if !exists || cur.Status != expected {
+		// Mirrors SQLite: a deleted row or a changed status matches no row and writes nothing.
+		return false, nil
+	}
+	jCopy := *j
+	f.jobs[j.ID] = &jCopy
+	return true, nil
 }
 
 func (f *fakeJobRepository) DeleteJobCascade(ctx context.Context, jobID string) error {
@@ -2315,6 +2337,8 @@ type fakeQueueRepo struct {
 	entries    map[string]*QueueEntry
 	getErr     error
 	nextPosErr error
+	// onDelete, when set, runs before an entry is deleted (a deterministic interleaving point for race tests).
+	onDelete func(jobID string)
 }
 
 func (f *fakeQueueRepo) Enqueue(ctx context.Context, entry *QueueEntry) error {
@@ -2331,6 +2355,9 @@ func (f *fakeQueueRepo) Get(ctx context.Context, jobID string) (*QueueEntry, err
 	return f.entries[jobID], nil
 }
 func (f *fakeQueueRepo) Delete(ctx context.Context, jobID string) error {
+	if hook := f.onDelete; hook != nil {
+		hook(jobID)
+	}
 	delete(f.entries, jobID)
 	return nil
 }
@@ -2395,6 +2422,9 @@ func (f *failingUpdateJobRepo) Create(ctx context.Context, j *Job) error {
 }
 func (f *failingUpdateJobRepo) Update(ctx context.Context, j *Job) error {
 	return errors.New("simulated DB update failure")
+}
+func (f *failingUpdateJobRepo) UpdateIfStatus(ctx context.Context, j *Job, expected JobStatus) (bool, error) {
+	return false, errors.New("simulated DB update failure")
 }
 func (f *failingUpdateJobRepo) CompleteMediaAnalysis(ctx context.Context, jobID, title string, info *MediaInfo) (bool, error) {
 	return false, errors.New("simulated DB update failure")

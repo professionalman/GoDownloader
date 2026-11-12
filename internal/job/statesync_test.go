@@ -277,6 +277,8 @@ func TestStateSync_ProgressTicksEphemeralVsDurable(t *testing.T) {
 	if err := jobRepo.Create(ctx, j); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
+	// Engine progress applies only to a running (active) job, as registered by dispatch.
+	mgr.AddActiveForTest(j)
 
 	cursorBefore := mgr.GetCurrentCursor(ctx)
 

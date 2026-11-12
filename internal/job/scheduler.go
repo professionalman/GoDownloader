@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -76,6 +77,14 @@ type Scheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// running is true while the dispatch loop goroutine is alive.
+	running atomic.Bool
+}
+
+// Running reports whether the scheduler dispatch loop goroutine is alive.
+func (s *Scheduler) Running() bool {
+	return s.running.Load()
 }
 
 // NewScheduler creates a new Scheduler instance.
@@ -276,6 +285,8 @@ func (s *Scheduler) Kick() {
 
 func (s *Scheduler) loop() {
 	defer s.wg.Done()
+	s.running.Store(true)
+	defer s.running.Store(false)
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -304,6 +315,11 @@ func (s *Scheduler) reserveInFlight(id string, action QueueAction) bool {
 		Action: action,
 	}
 	return true
+}
+
+// isTerminalStatus reports whether a persisted lifecycle state is final.
+func isTerminalStatus(st JobStatus) bool {
+	return st == StatusCancelled || st == StatusCompleted || st == StatusFailed
 }
 
 func (s *Scheduler) releaseInFlight(id string) {
@@ -583,6 +599,14 @@ func (s *Scheduler) reconcileStatePersistence(ctx context.Context, res DispatchR
 		log.Printf("scheduler: state reconciliation failed to fetch job %s: %v", res.JobID, err)
 		return
 	}
+	observed := current.Status
+	if isTerminalStatus(observed) {
+		// A cancellation (or other terminal transition) committed meanwhile and is authoritative.
+		log.Printf("scheduler: state reconciliation for job %s superseded by %s", current.ID, observed)
+		s.releaseInFlight(current.ID)
+		s.releaseGovernorLease(current.ID)
+		return
+	}
 
 	current.Status = res.TargetStatus
 	current.Error = res.TargetError
@@ -590,8 +614,9 @@ func (s *Scheduler) reconcileStatePersistence(ctx context.Context, res DispatchR
 	current.ETASeconds = 0
 	current.UpdatedAt = time.Now()
 
-	if updateErr := s.repo.Update(ctx, current); updateErr != nil {
-		log.Printf("scheduler: state reconciliation failed to persist %s state for job %s: %v", res.TargetStatus, res.JobID, updateErr)
+	if won, updateErr := s.repo.UpdateIfStatus(ctx, current, observed); updateErr != nil || !won {
+		// On a lost conditional write the next reconciliation round re-reads the authoritative state.
+		log.Printf("scheduler: state reconciliation did not persist %s state for job %s (won=%v): %v", res.TargetStatus, res.JobID, won, updateErr)
 		return
 	}
 
@@ -637,6 +662,23 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 		return
 	}
 
+	observed := current.Status
+	if isTerminalStatus(observed) {
+		// The job was cancelled (or otherwise finished) while its dispatch's DOWNLOADING write was unpersisted, so
+		// the cancellation never knew the engine ID. Stop the engine this reservation started, then release the
+		// lease that the cancellation left to this reservation.
+		if current.EngineID != "" {
+			if cancelErr := eng.Cancel(ctx, current); cancelErr != nil {
+				log.Printf("scheduler: external reconciliation failed to stop engine for %s job %s: %v", observed, current.ID, cancelErr)
+				return
+			}
+		}
+		log.Printf("scheduler: external reconciliation for job %s superseded by %s; engine execution stopped", current.ID, observed)
+		s.releaseInFlight(current.ID)
+		s.releaseGovernorLease(current.ID)
+		return
+	}
+
 	status, err := eng.Status(ctx, current)
 	if err != nil {
 		log.Printf("scheduler: external reconciliation engine Status query failed for job %s: %v", res.JobID, err)
@@ -653,9 +695,9 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 	case StatusDownloading:
 		current.Status = StatusDownloading
 		current.UpdatedAt = now
-		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+		if won, updateErr := s.repo.UpdateIfStatus(ctx, current, observed); updateErr != nil || !won {
 			log.Printf("scheduler: external reconciliation failed to persist DOWNLOADING for job %s: %v", res.JobID, updateErr)
-			return
+			return // a lost conditional write is retried next round against the authoritative state
 		}
 		if s.prepareActiveJobFn != nil {
 			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
@@ -676,9 +718,9 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 	case StatusProcessing:
 		current.Status = StatusProcessing
 		current.UpdatedAt = now
-		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+		if won, updateErr := s.repo.UpdateIfStatus(ctx, current, observed); updateErr != nil || !won {
 			log.Printf("scheduler: external reconciliation failed to persist PROCESSING for job %s: %v", res.JobID, updateErr)
-			return
+			return // a lost conditional write is retried next round against the authoritative state
 		}
 		if s.prepareActiveJobFn != nil {
 			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
@@ -699,9 +741,9 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 	case StatusSeeding:
 		current.Status = StatusSeeding
 		current.UpdatedAt = now
-		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+		if won, updateErr := s.repo.UpdateIfStatus(ctx, current, observed); updateErr != nil || !won {
 			log.Printf("scheduler: external reconciliation failed to persist SEEDING for job %s: %v", res.JobID, updateErr)
-			return
+			return // a lost conditional write is retried next round against the authoritative state
 		}
 		if s.prepareActiveJobFn != nil {
 			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
@@ -722,9 +764,9 @@ func (s *Scheduler) reconcileExternalExecution(ctx context.Context, res Dispatch
 	case StatusCompleted:
 		current.Status = StatusDownloading
 		current.UpdatedAt = now
-		if updateErr := s.repo.Update(ctx, current); updateErr != nil {
+		if won, updateErr := s.repo.UpdateIfStatus(ctx, current, observed); updateErr != nil || !won {
 			log.Printf("scheduler: external reconciliation failed to restore DOWNLOADING for completed job %s: %v", res.JobID, updateErr)
-			return
+			return // a lost conditional write is retried next round against the authoritative state
 		}
 		if s.prepareActiveJobFn != nil {
 			if prepErr := s.prepareActiveJobFn(ctx, current); prepErr != nil {
@@ -814,6 +856,9 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 
 		log.Printf("scheduler: engine failed for job %s (action=%s): %v", next.JobID, next.Action, dispatchErr)
 		now := time.Now()
+		// current was read before dispatch; persist the failure only if no other transition (e.g. a cancel)
+		// committed during the dispatch.
+		observed := current.Status
 
 		if next.Action == QueueActionStart {
 			targetErr := fmt.Sprintf("failed to start queued download: %v", dispatchErr)
@@ -822,7 +867,13 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 			current.SpeedBytesPerSecond = 0
 			current.ETASeconds = 0
 			current.UpdatedAt = now
-			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
+			won, updateErr := s.repo.UpdateIfStatus(s.ctx, current, observed)
+			if updateErr == nil && !won {
+				log.Printf("scheduler: job %s changed state during dispatch; FAILED not persisted", next.JobID)
+				s.releaseGovernorLease(next.JobID)
+				return nil
+			}
+			if updateErr != nil {
 				log.Printf("scheduler: failed to persist FAILED state for job %s: %v", next.JobID, updateErr)
 				releaseReservation = false
 				s.markReservationDirtyState(next.JobID, next.Action, StatusFailed, targetErr)
@@ -848,7 +899,13 @@ func (s *Scheduler) dispatchSingle(next *QueuedJob) error {
 			current.SpeedBytesPerSecond = 0
 			current.ETASeconds = 0
 			current.UpdatedAt = now
-			if updateErr := s.repo.Update(s.ctx, current); updateErr != nil {
+			won, updateErr := s.repo.UpdateIfStatus(s.ctx, current, observed)
+			if updateErr == nil && !won {
+				log.Printf("scheduler: job %s changed state during dispatch; PAUSED not persisted", next.JobID)
+				s.releaseGovernorLease(next.JobID)
+				return nil
+			}
+			if updateErr != nil {
 				log.Printf("scheduler: failed to persist PAUSED state for job %s: %v", next.JobID, updateErr)
 				releaseReservation = false
 				s.markReservationDirtyState(next.JobID, next.Action, StatusPaused, targetErr)

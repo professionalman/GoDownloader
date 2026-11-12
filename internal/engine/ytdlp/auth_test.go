@@ -39,10 +39,11 @@ func (m *mockAuthProvider) PrepareAuthArgs(ctx context.Context) ([]string, func(
 	}
 
 	cleanup := func() {
-		m.cleanupRan.Store(true)
 		if m.tempFile != "" {
 			_ = os.Remove(m.tempFile)
 		}
+		// Signal only after the cleanup's effect is complete, so observers of cleanupRan never see it early.
+		m.cleanupRan.Store(true)
 	}
 
 	return m.args, cleanup, nil

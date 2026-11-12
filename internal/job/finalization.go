@@ -105,14 +105,22 @@ func findRenamedArtifact(destDir, originalDestPath string, expectedSize int64, e
 }
 
 // failJobWithReason marks a job as FAILED with the given reason, updates DB, cleans up active state, and kicks scheduler.
+// The write is conditional on the state j was observed in, so it cannot overwrite a cancellation or another
+// transition that committed after the observation (startup recovery passes a freshly read row, so it is unaffected).
 func (m *Manager) failJobWithReason(ctx context.Context, j *Job, reason string) {
+	observed := j.Status
 	j.Status = StatusFailed
 	j.Error = reason
 	j.SpeedBytesPerSecond = 0
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
-	if updateErr := m.repo.Update(ctx, j); updateErr != nil {
+	won, updateErr := m.persistObservedState(ctx, j, observed)
+	if updateErr != nil {
 		log.Printf("failJobWithReason: failed to persist FAILED status for job %s: %v", j.ID, updateErr)
+		return
+	}
+	if !won {
+		log.Printf("failJobWithReason: job %s left %s concurrently; FAILED not persisted", j.ID, observed)
 		return
 	}
 	m.removeActive(j.ID)
@@ -125,6 +133,8 @@ func (m *Manager) failJobWithReason(ctx context.Context, j *Job, reason string) 
 
 // finalizeMediaArtifact orchestrates durable journaled finalization for completed media downloads.
 func (m *Manager) finalizeMediaArtifact(ctx context.Context, j *Job, srcFile string, expectedSize int64) {
+	// observed is the live state the completion observation was made in; the COMPLETED commit is conditional on it.
+	observed := j.Status
 	targetPath := filepath.Join(j.DestinationDir, filepath.Base(srcFile))
 	if m.storageService != nil {
 		resolved, err := m.storageService.ResolveFinalPath(srcFile, j.DestinationDir, storage.FilenameConflictPolicy(j.ConflictPolicy))
@@ -227,10 +237,20 @@ func (m *Manager) finalizeMediaArtifact(ctx context.Context, j *Job, srcFile str
 	j.SpeedBytesPerSecond = 0
 	j.ETASeconds = 0
 	j.UpdatedAt = time.Now()
-	if err := m.repo.Update(ctx, j); err != nil {
+	won, err := m.persistObservedState(ctx, j, observed)
+	if err != nil {
 		log.Printf("finalizeMediaArtifact: failed to update job %s to COMPLETED: %v", j.ID, err)
 		if rec != nil && m.execRepo != nil {
 			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, fmt.Sprintf("db commit error: %v", err))
+		}
+		return
+	}
+	if !won {
+		// Another transition (e.g. a pause or delete that does not take the job state lock) committed first; it
+		// stays authoritative. The validated artifact remains at its final path and the journal records the outcome.
+		log.Printf("finalizeMediaArtifact: job %s left %s concurrently; COMPLETED not persisted", j.ID, observed)
+		if rec != nil && m.execRepo != nil {
+			_ = m.execRepo.UpdateFinalizationPhase(ctx, rec.ID, FinalizationPhaseFailed, "job state changed before commit")
 		}
 		return
 	}

@@ -51,6 +51,7 @@ func TestAutostartIntegration_RealWindowsRegistry(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "autostart_test.db")
 	cfg := config.New()
 	cfg.DownloadDir = filepath.Join(tmpDir, "downloads")
+	cfg.DataDir = filepath.Join(tmpDir, "data")
 
 	appInstance, err := app.New(context.Background(), cfg, app.WithDBPath(dbPath))
 	if err != nil {

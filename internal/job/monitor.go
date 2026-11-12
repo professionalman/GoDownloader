@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,9 @@ type Monitor struct {
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// running is true while the monitoring loop goroutine is alive.
+	running atomic.Bool
 
 	// Track last DB persist time per job for tiered persistence
 	mu                  sync.Mutex
@@ -63,8 +67,15 @@ func (m *Monitor) Stop() {
 	m.wg.Wait()
 }
 
+// Running reports whether the monitoring loop goroutine is alive.
+func (m *Monitor) Running() bool {
+	return m != nil && m.running.Load()
+}
+
 func (m *Monitor) run(ctx context.Context) {
 	defer m.wg.Done()
+	m.running.Store(true)
+	defer m.running.Store(false)
 
 	baseInterval := 250 * time.Millisecond
 	if m.interval > 0 && m.interval < baseInterval {
@@ -174,17 +185,30 @@ func (m *Monitor) recordFailure(ctx context.Context, j *Job, errMsg string) {
 		}
 
 		log.Printf("monitor: job %s exceeded max status query failures (%d), marking failed", j.ID, count)
+		// The read above and this write are not atomic: commit FAILED only if the job is still in the state this
+		// snapshot observed, under the job's state lock, so a cancellation committed meanwhile is never overwritten.
+		stateLock := m.manager.jobStateLock(j.ID)
+		stateLock.Lock()
+		observed := j.Status
 		j.Status = StatusFailed
 		j.Error = "Engine lost connection or task disappeared after repeated status check failures."
 		j.SpeedBytesPerSecond = 0
 		j.ETASeconds = 0
 		j.UpdatedAt = time.Now()
-		if err := m.manager.repo.Update(ctx, j); err != nil {
-			log.Printf("monitor: failed to persist FAILED status for job %s: %v", j.ID, err)
+		won, err := m.manager.persistObservedState(ctx, j, observed)
+		if err != nil || !won {
+			stateLock.Unlock()
+			if err != nil {
+				log.Printf("monitor: failed to persist FAILED status for job %s: %v", j.ID, err)
+			} else {
+				log.Printf("monitor: job %s left %s concurrently; FAILED not persisted", j.ID, observed)
+				m.CleanupJob(j.ID)
+			}
 			return
 		}
 		m.manager.removeActive(j.ID)
 		m.manager.publish(EventJobFailed, j)
+		stateLock.Unlock()
 		m.manager.cleanupTerminalEngineState(j)
 		m.CleanupJob(j.ID)
 		if m.manager.scheduler != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"path/filepath"
 	"time"
@@ -73,6 +74,20 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 		_ = guard.Close()
 	})
 
+	// 0b. Data-directory cleanup ownership. The runtime guard is keyed on the database, so another runtime with a
+	// different database (e.g. a diagnostic run) may share this DataDir. Startup cleanup of shared scratch (stale
+	// media work directories, auth exports) can only prove ownership while holding this lock; a runtime that
+	// cannot take it preserves those files instead of deleting another runtime's in-progress work.
+	var cleanupOwner io.Closer
+	if g, gErr := runtimeguard.Acquire(filepath.Join(cfg.DataDir, "cleanup-owner")); gErr == nil {
+		cleanupOwner = g
+		cleanup.add(func() {
+			_ = g.Close()
+		})
+	} else {
+		log.Printf("startup cleanup of shared data directory disabled: %v", gErr)
+	}
+
 	// 1. Initialize SQLite Database
 	db, err := database.New(opt.dbPath)
 	if err != nil {
@@ -130,8 +145,10 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 
 	// 5. Initialize media auth service & perform startup stale temp cleanup
 	mediaAuthService := mediaauth.NewService(settingsRepo, secretStore, filepath.Join(cfg.DataDir, "tmp", "auth"))
-	if err := mediaAuthService.CleanupStaleTempFiles(); err != nil {
-		log.Printf("media auth startup cleanup: %v", err)
+	if cleanupOwner != nil {
+		if err := mediaAuthService.CleanupStaleTempFiles(); err != nil {
+			log.Printf("media auth startup cleanup: %v", err)
+		}
 	}
 
 	// 6. Initialize storage service
@@ -195,6 +212,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 	manager.SetQueueRepository(queueRepo)
 	manager.SetSettingsService(settingsService)
 	manager.SetStorageService(storageService)
+	manager.SetSharedDataCleanupAllowed(cleanupOwner != nil)
 	manager.SetCategoryRepository(catRepo)
 	manager.SetTrackerEntryProvider(trackerService)
 	manager.SetExecutionRepository(execRepo)
@@ -233,6 +251,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 		resourceGovernor:  resourceGovernor,
 		scheduler:         scheduler,
 		runtimeGuard:      guard,
+		cleanupOwner:      cleanupOwner,
 	}
 
 	success = true
@@ -306,6 +325,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	supervisor := a.processSupervisor
 	db := a.db
 	guard := a.runtimeGuard
+	cleanupOwner := a.cleanupOwner
 	a.mu.Unlock()
 
 	var errs []error
@@ -345,6 +365,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if guard != nil {
 		if err := guard.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("runtime guard close: %w", err))
+		}
+	}
+	if cleanupOwner != nil {
+		if err := cleanupOwner.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("data directory cleanup lock close: %w", err))
 		}
 	}
 

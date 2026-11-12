@@ -952,6 +952,7 @@ func TestMediaCompletion_PersistenceFailureRetriesTerminalState(t *testing.T) {
 		UpdatedAt:      time.Now(),
 	}
 	jobRepo.Create(ctx, j)
+	mgr.AddActiveForTest(j) // a running job, as registered by dispatch
 
 	bus := mgr.bus.(*fakeEventBus)
 	ch := bus.Subscribe()
@@ -980,7 +981,9 @@ func TestMediaCompletion_PersistenceFailureRetriesTerminalState(t *testing.T) {
 
 	// Second attempt: DB persistence succeeds
 	jobRepo.updateErr = nil
-	mgr.UpdateJobFromEngine(ctx, j, status, true)
+	// The monitor's next tick works on a fresh snapshot of the still-active job (the failed write changed nothing).
+	retrySnapshot := mgr.GetActiveJobs()[j.ID]
+	mgr.UpdateJobFromEngine(ctx, retrySnapshot, status, true)
 
 	var ev Event
 	select {
@@ -1018,6 +1021,7 @@ func TestMediaFailure_PersistenceFailureRetriesTerminalState(t *testing.T) {
 		UpdatedAt:      time.Now(),
 	}
 	jobRepo.Create(ctx, j)
+	mgr.AddActiveForTest(j) // a running job, as registered by dispatch
 
 	bus := mgr.bus.(*fakeEventBus)
 	ch := bus.Subscribe()
@@ -1038,7 +1042,9 @@ func TestMediaFailure_PersistenceFailureRetriesTerminalState(t *testing.T) {
 
 	// Second attempt: DB update succeeds
 	jobRepo.updateErr = nil
-	mgr.UpdateJobFromEngine(ctx, j, status, true)
+	// The monitor's next tick works on a fresh snapshot of the still-active job (the failed write changed nothing).
+	retrySnapshot := mgr.GetActiveJobs()[j.ID]
+	mgr.UpdateJobFromEngine(ctx, retrySnapshot, status, true)
 
 	var ev Event
 	select {
@@ -1071,6 +1077,7 @@ func TestMediaCancelled_PersistenceFailureRetriesTerminalState(t *testing.T) {
 		UpdatedAt:      time.Now(),
 	}
 	jobRepo.Create(ctx, j)
+	mgr.AddActiveForTest(j) // a running job, as registered by dispatch
 
 	bus := mgr.bus.(*fakeEventBus)
 	ch := bus.Subscribe()
@@ -1091,7 +1098,9 @@ func TestMediaCancelled_PersistenceFailureRetriesTerminalState(t *testing.T) {
 
 	// Second attempt: DB update succeeds
 	jobRepo.updateErr = nil
-	mgr.UpdateJobFromEngine(ctx, j, status, true)
+	// The monitor's next tick works on a fresh snapshot of the still-active job (the failed write changed nothing).
+	retrySnapshot := mgr.GetActiveJobs()[j.ID]
+	mgr.UpdateJobFromEngine(ctx, retrySnapshot, status, true)
 
 	var ev Event
 	select {
@@ -1513,6 +1522,7 @@ func TestMediaCompletion_PersistenceFailurePreservesTerminalEngineState(t *testi
 		UpdatedAt:      time.Now(),
 	}
 	jobRepo.Create(ctx, j)
+	mgr.AddActiveForTest(j) // a running job, as registered by dispatch
 
 	cleanEng := &fakeCleanupEngine{
 		statusMap: map[string]*EngineStatus{
@@ -1545,8 +1555,10 @@ func TestMediaCompletion_PersistenceFailurePreservesTerminalEngineState(t *testi
 	// Recover DB
 	jobRepo.updateErr = nil
 
-	// Second attempt succeeds
-	mgr.UpdateJobFromEngine(ctx, j, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
+	// Second attempt succeeds. The monitor's next tick works on a fresh snapshot of the still-active job; the
+	// failed write changed nothing.
+	retrySnapshot := mgr.GetActiveJobs()[j.ID]
+	mgr.UpdateJobFromEngine(ctx, retrySnapshot, &EngineStatus{Status: StatusCompleted, Progress: 100}, true)
 
 	if !cleanEng.cleaned[j.ID] {
 		t.Errorf("ICleanupableEngine.Cleanup expected after DB recovery and persistence success")
@@ -2991,6 +3003,14 @@ func (t *toggleMarkerFailJobRepo) Update(ctx context.Context, j *Job) error {
 		return errors.New("simulated DB update failure on clearing EngineCleanupPending")
 	}
 	return t.IJobRepository.Update(ctx, j)
+}
+
+func (t *toggleMarkerFailJobRepo) UpdateIfStatus(ctx context.Context, j *Job, expected JobStatus) (bool, error) {
+	t.updateCount++
+	if t.failSecondUpdate && !j.EngineCleanupPending && j.Status == StatusCompleted {
+		return false, errors.New("simulated DB update failure on clearing EngineCleanupPending")
+	}
+	return t.IJobRepository.UpdateIfStatus(ctx, j, expected)
 }
 
 func TestTorrentCompletion_CleanupMarkerPersistenceFailureDoesNotPublishCompleted(t *testing.T) {

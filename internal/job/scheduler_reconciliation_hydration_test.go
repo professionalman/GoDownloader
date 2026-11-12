@@ -26,6 +26,16 @@ func (r *failingUpdateJobRepository) Update(ctx context.Context, j *Job) error {
 	return r.IJobRepository.Update(ctx, j)
 }
 
+// UpdateIfStatus applies the same injected persistence failures to conditional lifecycle writes.
+func (r *failingUpdateJobRepository) UpdateIfStatus(ctx context.Context, j *Job, expected JobStatus) (bool, error) {
+	r.updateCalls++
+	if r.failUpdateCount > 0 {
+		r.failUpdateCount--
+		return false, fmt.Errorf("%w: simulated persistence failure", ErrDispatchPersistenceFailed)
+	}
+	return r.IJobRepository.UpdateIfStatus(ctx, j, expected)
+}
+
 func setupReconciliationTestEnv(t *testing.T, initialStatus JobStatus, policy networkpolicy.SeedingPolicy) (*Manager, *Scheduler, *failingUpdateJobRepository, *fakeTorrentRepository, *fakeTorrentEngine, *Job) {
 	t.Helper()
 	jobRepo := newFakeJobRepository()
