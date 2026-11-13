@@ -59,6 +59,67 @@ jobs:
       - name: Build server
         run: go build -o "$RUNNER_TEMP/godownloader-server.exe" ./cmd/server
 
+      # NSIS is not part of the hosted Windows image. Without it the NSIS-backed packaging regression tests skip, and a
+      # plain `go test` still reports the package as ok. Install the pinned compiler and put it on PATH for every
+      # later step (including the full and race test runs).
+      - name: Install NSIS (pinned)
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.12.0 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed (choco exit $LASTEXITCODE)" }
+          $roots = @(${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ }
+          $makensis = $roots | ForEach-Object { Join-Path $_ 'NSIS\makensis.exe' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $makensis) {
+            $makensis = Get-ChildItem -Path $roots -Filter makensis.exe -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $makensis) { throw "makensis.exe not found after installing NSIS" }
+          $version = (& $makensis /VERSION | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "makensis.exe is not executable (exit $LASTEXITCODE)" }
+          if ($version -ne 'v3.12') { throw "unexpected NSIS version '$version' (expected v3.12)" }
+          Write-Output "makensis: $makensis ($version)"
+          Split-Path -Parent $makensis | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      # The packaging tests are launched from bash (like the other test steps); their machine-readable results are
+      # saved and checked in the next step.
+      - name: Run NSIS packaging regression tests
+        run: |
+          set +e
+          go test -count=1 -json -run '^TestPackaging_' ./build/ > "$RUNNER_TEMP/packaging-tests.json"
+          echo $? > "$RUNNER_TEMP/packaging-tests.exit"
+          exit 0
+
+      - name: Require every packaging test to execute and pass
+        shell: pwsh
+        run: |
+          $expected = @(
+            'TestPackaging_DefaultOutputDirectory',
+            'TestPackaging_CustomDirectoryWithSpacesIgnoresDefaultFolder',
+            'TestPackaging_MissingExecutableFailsBeforePackaging',
+            'TestPackaging_MissingOutputDirectoryFails',
+            'TestPackaging_InstallerScriptRequiresExplicitBinDir',
+            'TestPackaging_TaskfileStepsAgreeOnArtifactLocations',
+            'TestPackaging_ManifestHashesTheSelectedArtifacts'
+          )
+          $goExit = [int](Get-Content -LiteralPath "$env:RUNNER_TEMP/packaging-tests.exit")
+          $results = @{}
+          foreach ($text in (Get-Content -LiteralPath "$env:RUNNER_TEMP/packaging-tests.json")) {
+            if (-not $text.StartsWith('{')) { Write-Output $text; continue }
+            $e = $text | ConvertFrom-Json
+            if ($e.Action -eq 'output' -and $e.Output) { Write-Host -NoNewline $e.Output }
+            if ($e.Test -and -not $e.Test.Contains('/') -and $e.Action -in @('pass', 'fail', 'skip')) { $results[$e.Test] = $e.Action }
+          }
+          Write-Output ''
+          Write-Output 'Packaging test results:'
+          foreach ($name in $expected) { Write-Output ('  {0,-7} {1}' -f ($results[$name] ?? 'missing').ToUpper(), $name) }
+          foreach ($name in ($results.Keys | Where-Object { $_ -notin $expected } | Sort-Object)) {
+            Write-Output ('  {0,-7} {1} (not in the expected inventory)' -f $results[$name].ToUpper(), $name)
+          }
+          $notPassed = @($results.Keys | Where-Object { $results[$_] -ne 'pass' }) + @($expected | Where-Object { -not $results.ContainsKey($_) })
+          if ($goExit -ne 0 -or $notPassed.Count -gt 0) {
+            throw "Packaging tests did not all execute and pass (go test exit $goExit; not passed: $($notPassed -join ', '))."
+          }
+          Write-Output "All $($expected.Count) expected packaging tests executed and passed (none skipped)."
+
       - name: Run unit tests
         run: go test -count=1 ./...
 
