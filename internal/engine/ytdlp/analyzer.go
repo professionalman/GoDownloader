@@ -304,6 +304,28 @@ var jsRuntimeMarkers = []string{
 // install or manage JavaScript runtimes and never enables remote challenge-solver downloads.
 const jsRuntimeHint = " (This site may require a JavaScript runtime for yt-dlp, such as Deno. GoDownloader does not install it: install a supported runtime, make sure it is on PATH, and retry.)"
 
+// ffmpegMissingMarkers are lower-case yt-dlp messages for a missing FFmpeg or FFprobe.
+var ffmpegMissingMarkers = []string{
+	"ffmpeg is not installed",
+	"ffmpeg not found",
+	"ffprobe not found",
+	"ffprobe and ffmpeg not found",
+}
+
+// ffmpegHint is appended to yt-dlp failures caused by a missing FFmpeg/FFprobe. GoDownloader does not install them.
+const ffmpegHint = " (This download needs FFmpeg and FFprobe, which GoDownloader does not install: install FFmpeg with FFprobe in the same folder, restart GoDownloader, and check Settings → Dependencies, which shows where yt-dlp looks for them.)"
+
+// withFFmpegHint appends ffmpegHint when output reports a missing FFmpeg or FFprobe.
+func withFFmpegHint(output, msg string) string {
+	lower := strings.ToLower(output)
+	for _, marker := range ffmpegMissingMarkers {
+		if strings.Contains(lower, marker) {
+			return msg + ffmpegHint
+		}
+	}
+	return msg
+}
+
 // withJSRuntimeHint appends jsRuntimeHint to msg when the yt-dlp output indicates a missing JavaScript runtime.
 func withJSRuntimeHint(output, msg string) string {
 	lower := strings.ToLower(output)
@@ -316,7 +338,7 @@ func withJSRuntimeHint(output, msg string) string {
 }
 
 func cleanError(stderr string) string {
-	return withJSRuntimeHint(stderr, cleanErrorLine(stderr))
+	return withFFmpegHint(stderr, withJSRuntimeHint(stderr, cleanErrorLine(stderr)))
 }
 
 func cleanErrorLine(stderr string) string {

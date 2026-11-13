@@ -22,6 +22,7 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  MediaDependencyStatus,
   YtdlpToolStatus,
   ToolAcquisitionResult,
   ToolUpdateCheck,
@@ -544,6 +545,10 @@ class HttpMediaAuthOperations implements MediaAuthOperations {
 class HttpToolsOperations implements ToolsOperations {
   async getYtdlpStatus(): Promise<YtdlpToolStatus> {
     return handleResponse<YtdlpToolStatus>(await authFetch(`${API_BASE}/tools/yt-dlp`));
+  }
+
+  async getMediaDependencies(): Promise<MediaDependencyStatus> {
+    return handleResponse<MediaDependencyStatus>(await authFetch(`${API_BASE}/tools/media-dependencies`));
   }
 
   async installYtdlp(): Promise<ToolAcquisitionResult> {

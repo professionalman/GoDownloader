@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,11 @@ type Manager struct {
 	mu              sync.RWMutex
 	tools           map[string]*ToolInfo
 	configuredPaths map[string]string
+
+	// engineFFmpegPath is the FFmpeg executable the media engine was configured with at startup ("" = none, so the
+	// engine passes no --ffmpeg-location); engineFFmpegKnown reports whether the host recorded it.
+	engineFFmpegPath  string
+	engineFFmpegKnown bool
 
 	// Hooks for testing
 	lookPathFn    func(file string) (string, error)
@@ -453,8 +459,18 @@ func (m *Manager) probeVersionTimeout(ctx context.Context, timeout time.Duration
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Bound the wait for output pipes after the probe is killed: a child the probed program started could otherwise
+	// keep the pipes open and stretch the probe far past its timeout.
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = time.Second
+	}
 
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The probe exited successfully; only a descendant kept the pipes open. Its output was collected.
+		err = nil
+	}
+	if err != nil {
 		if probeCtx.Err() == context.DeadlineExceeded {
 			return "", ErrToolProbeTimeout
 		}

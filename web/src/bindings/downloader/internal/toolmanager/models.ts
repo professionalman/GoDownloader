@@ -14,6 +14,34 @@ export interface AcquisitionResult {
 }
 
 /**
+ * ExternalDependencyStatus is the path-free status of one externally managed executable.
+ */
+export interface ExternalDependencyStatus {
+    "tool": string;
+    "state": string;
+    "available": boolean;
+    "version"?: string;
+    "ownership": string;
+    "source": string;
+    "diagnostic"?: string;
+
+    /**
+     * RestartRequired is set when the tool became usable after startup: the running media engine still uses the
+     * executable resolved at startup, so a restart is needed to use it.
+     */
+    "restartRequired": boolean;
+}
+
+/**
+ * JavaScriptRuntimeStatus reports whether yt-dlp's default JavaScript runtime (Deno) is discoverable on PATH.
+ */
+export interface JavaScriptRuntimeStatus {
+    "detected": boolean;
+    "runtime"?: string;
+    "diagnostic": string;
+}
+
+/**
  * ManagedToolStatus is the public, path-free yt-dlp status used by the Settings UI.
  */
 export interface ManagedToolStatus {
@@ -33,6 +61,17 @@ export interface ManagedToolStatus {
 }
 
 /**
+ * MediaDependencyStatus aggregates the media toolchain the Settings UI shows.
+ */
+export interface MediaDependencyStatus {
+    "ytdlp": ManagedToolStatus;
+    "ffmpeg": ExternalDependencyStatus;
+    "ffprobe": ExternalDependencyStatus;
+    "javascriptRuntime": JavaScriptRuntimeStatus;
+    "workflows": WorkflowReadiness[] | null;
+}
+
+/**
  * UpdateCheckResult reports stable update availability without changing anything.
  */
 export interface UpdateCheckResult {
@@ -41,4 +80,16 @@ export interface UpdateCheckResult {
     "latestVersion": string;
     "managed": boolean;
     "updateAvailable": boolean;
+}
+
+/**
+ * WorkflowReadiness states whether a media workflow's required tools are available.
+ */
+export interface WorkflowReadiness {
+    "id": string;
+    "label": string;
+    "requires": string[] | null;
+    "ready": boolean;
+    "advisory": boolean;
+    "diagnostic"?: string;
 }

@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	kernel32          = windows.NewLazySystemDLL("kernel32.dll")
+	kernel32           = windows.NewLazySystemDLL("kernel32.dll")
 	procIsProcessInJob = kernel32.NewProc("IsProcessInJob")
 )
 

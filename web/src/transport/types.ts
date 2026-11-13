@@ -16,6 +16,7 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  MediaDependencyStatus,
   YtdlpToolStatus,
   ToolAcquisitionResult,
   ToolUpdateCheck,
@@ -172,6 +173,7 @@ export interface ToolsOperations {
   installYtdlp(): Promise<ToolAcquisitionResult>;
   updateYtdlp(): Promise<ToolAcquisitionResult>;
   checkYtdlpUpdate(): Promise<ToolUpdateCheck>;
+  getMediaDependencies(): Promise<MediaDependencyStatus>;
 }
 
 /** Domain: State synchronization & live event subscription */

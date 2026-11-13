@@ -27,35 +27,39 @@ var ErrRuntimeAlreadyOwned = runtimeguard.ErrRuntimeAlreadyOwned
 // It owns the database, repositories, secure store, background services,
 // engines, process supervision, event bus, job manager, and scheduler.
 type App struct {
-	cfg               *config.Config
-	db                *database.DB
-	repo              *database.SQLiteJobRepository
-	queueRepo         *database.SQLiteQueueRepository
-	settingsRepo      *database.SQLiteSettingsRepository
-	secretRepo        *database.SQLiteSecretRepository
-	trackerRepo       *database.SQLiteTrackerRepository
-	catRepo           *storage.SQLiteCategoryRepository
-	execRepo          *database.SQLiteExecutionRepository
-	torrentRepo       *database.SQLiteTorrentRepository
+	cfg          *config.Config
+	db           *database.DB
+	repo         *database.SQLiteJobRepository
+	queueRepo    *database.SQLiteQueueRepository
+	settingsRepo *database.SQLiteSettingsRepository
+	secretRepo   *database.SQLiteSecretRepository
+	trackerRepo  *database.SQLiteTrackerRepository
+	catRepo      *storage.SQLiteCategoryRepository
+	execRepo     *database.SQLiteExecutionRepository
+	torrentRepo  *database.SQLiteTorrentRepository
 
-	keyMgr            *securestore.MasterKeyManager
-	secretStore       *securestore.Store
-	settingsService   *settings.SettingsService
+	keyMgr          *securestore.MasterKeyManager
+	secretStore     *securestore.Store
+	settingsService *settings.SettingsService
 
 	toolMgr           *toolmanager.Manager
 	storageService    *storage.StorageService
 	mediaAuthService  *mediaauth.Service
 	processSupervisor *process.Supervisor
 
-	registry          *engine.Registry
-	bus               *events.InMemoryBus
-	trackerService    *tracker.Service
+	registry       *engine.Registry
+	bus            *events.InMemoryBus
+	trackerService *tracker.Service
 
-	manager           *job.Manager
-	resourceGovernor  *job.ResourceGovernor
-	scheduler         *job.Scheduler
-	runtimeGuard      io.Closer
-	cleanupOwner      io.Closer // data-directory cleanup ownership lock; nil when another runtime holds it
+	manager          *job.Manager
+	resourceGovernor *job.ResourceGovernor
+	scheduler        *job.Scheduler
+	runtimeGuard     io.Closer
+	cleanupOwner     io.Closer // data-directory cleanup ownership lock; nil when another runtime holds it
+
+	// stopManager stops the job manager's background workers during Shutdown. It defaults to manager.Stop; tests
+	// replace it to simulate a worker that does not exit.
+	stopManager func()
 
 	// Lifecycle state coordination
 	mu            sync.Mutex

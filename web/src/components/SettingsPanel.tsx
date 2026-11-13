@@ -35,6 +35,7 @@ import { cx } from '../downloadUi';
 import { PowerSettingsPanel } from './PowerSettingsPanel';
 import { MediaAuthPanel } from './MediaAuthPanel';
 import { YtdlpToolPanel } from './YtdlpToolPanel';
+import { MediaDependenciesPanel } from './MediaDependenciesPanel';
 
 interface SettingsPanelProps {
   settings: AppSettings | null;
@@ -383,6 +384,7 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
               <div className="space-y-4">
                 <SectionTitle title="Dependencies" description="Read-only results reported by the backend. Secrets are never displayed." />
                 {hasManagedToolSupport() && <YtdlpToolPanel />}
+                {hasManagedToolSupport() && <MediaDependenciesPanel />}
                 {settings?.applicationResults?.length ? (
                   <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                     {settings.applicationResults.map((result, index) => (

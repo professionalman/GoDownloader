@@ -27,17 +27,17 @@ import (
 // Manager is the central orchestrator for job lifecycle management.
 // All state transitions go through the Manager.
 type Manager struct {
-	repo           IJobRepository
-	engines        IEngineRegistry
-	bus            IEventBus
-	downloadDir    string
-	dataDir        string
-	torrentRepo    ITorrentRepository
-	queueRepo      IQueueRepository
-	execRepo       IExecutionRepository
-	settings       *settings.SettingsService
-	storageService storage.IStorageService
-	categoryRepo   storage.ICategoryRepository
+	repo             IJobRepository
+	engines          IEngineRegistry
+	bus              IEventBus
+	downloadDir      string
+	dataDir          string
+	torrentRepo      ITorrentRepository
+	queueRepo        IQueueRepository
+	execRepo         IExecutionRepository
+	settings         *settings.SettingsService
+	storageService   storage.IStorageService
+	categoryRepo     storage.ICategoryRepository
 	trackerEntries   ITrackerEntryProvider
 	scheduler        *Scheduler
 	resourceGovernor *ResourceGovernor
@@ -299,21 +299,48 @@ func (m *Manager) BackgroundWorkers() BackgroundWorkerStatus {
 	}
 }
 
-// Stop stops background tasks, cancels active background analysis/metadata tasks, and shuts down subprocess engines.
-func (m *Manager) Stop() {
+// SignalStop asks every background worker to stop without waiting for any of them: it cancels the scheduler and
+// network reconciler, stops the resource governor, closes the monitor's stop channel, and cancels active analysis
+// and metadata tasks. It never blocks and is idempotent, so a shutdown that cannot wait for a stuck worker still
+// stops all the others.
+func (m *Manager) SignalStop() {
 	if m.reconcileCancel != nil {
 		m.reconcileCancel()
 	}
 	if m.scheduler != nil {
-		m.scheduler.Stop()
+		m.scheduler.signalStop()
 	}
 	if gov := m.GetResourceGovernor(); gov != nil {
 		gov.Stop()
 	}
 	if m.monitor != nil {
+		m.monitor.signalStop()
+	}
+	m.cancelActiveWork()
+}
+
+// Stop stops background tasks, cancels active background analysis/metadata tasks, and shuts down subprocess engines.
+// It signals every worker first (SignalStop) and then waits for the scheduler and monitor loops to exit.
+func (m *Manager) Stop() {
+	m.SignalStop()
+	if m.scheduler != nil {
+		m.scheduler.Stop()
+	}
+	if m.monitor != nil {
 		m.monitor.Stop()
 	}
+	m.cancelActiveWork()
 
+	if eng, ok := m.engines.Get("ytdlp"); ok {
+		if sEng, ok := eng.(IShutdownableEngine); ok {
+			sEng.Shutdown()
+		}
+	}
+}
+
+// cancelActiveWork cancels registered active and analysis tasks. Analysis workers stay registered until they exit;
+// they own and release their permits.
+func (m *Manager) cancelActiveWork() {
 	m.mu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(m.activeCancels)+len(m.activeAnalysisWorkers))
 	for id, cancel := range m.activeCancels {
@@ -330,12 +357,6 @@ func (m *Manager) Stop() {
 
 	for _, cancel := range cancels {
 		cancel()
-	}
-
-	if eng, ok := m.engines.Get("ytdlp"); ok {
-		if sEng, ok := eng.(IShutdownableEngine); ok {
-			sEng.Shutdown()
-		}
 	}
 }
 

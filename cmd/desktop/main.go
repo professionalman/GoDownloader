@@ -14,6 +14,7 @@ import (
 
 	"downloader/build"
 	"downloader/internal/app"
+	"downloader/internal/buildinfo"
 	"downloader/internal/config"
 	"downloader/web"
 
@@ -25,6 +26,15 @@ import (
 var globalCoreInitCount int64
 
 func main() {
+	// Provenance flag: print the binary's build identity (version, source commit, platform, configuration) as JSON.
+	for _, arg := range os.Args[1:] {
+		if arg == "--print-build-info" {
+			out, _ := json.MarshalIndent(buildinfo.Current(), "", "  ")
+			fmt.Println(string(out))
+			return
+		}
+	}
+
 	// Diagnostic flag: print CWD and resolved DATA_ROOT for verification
 	for _, arg := range os.Args[1:] {
 		if arg == "--print-data-root" {
@@ -140,6 +150,14 @@ func main() {
 	// =========================================================================
 	// PRIMARY PROCESS EXECUTION BEYOND THIS POINT
 	// =========================================================================
+
+	// The window needs the WebView2 Runtime. Without it Wails only logs an error and shows no window, while the tray
+	// and background runtime would keep running as if healthy — so refuse to start before the core exists.
+	if proceed, msg := webView2StartupDecision(detectWebView2()); !proceed {
+		log.Println("Desktop: Microsoft Edge WebView2 Runtime not found; startup aborted before the core runtime.")
+		showWebView2MissingError(msg)
+		os.Exit(1)
+	}
 
 	atomic.AddInt64(&globalCoreInitCount, 1)
 

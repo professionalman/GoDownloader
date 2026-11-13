@@ -155,6 +155,14 @@ export function GetMediaAuthSettings(): $CancellablePromise<mediaauth$0.Settings
     return $Call.ByID(1992411246);
 }
 
+/**
+ * GetMediaDependencyStatus returns the path-free status of yt-dlp, FFmpeg, FFprobe and the JavaScript runtime with
+ * per-workflow readiness. Read-only: nothing is installed or changed.
+ */
+export function GetMediaDependencyStatus(): $CancellablePromise<toolmanager$0.MediaDependencyStatus | null> {
+    return $Call.ByID(632333922);
+}
+
 export function GetQueueSnapshot(): $CancellablePromise<job$0.QueueSnapshot | null> {
     return $Call.ByID(3910836674);
 }

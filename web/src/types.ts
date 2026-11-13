@@ -505,6 +505,38 @@ export interface ToolAcquisitionResult {
   restartRequired: boolean;
 }
 
+export type MediaDependencyState = 'available' | 'missing' | 'invalid' | 'probe_failed';
+export type MediaDependencySource = 'user_configured' | 'system_path' | 'alongside_ffmpeg' | 'none';
+
+/** Path-free status of an externally managed media tool (FFmpeg, FFprobe). */
+export interface ExternalDependencyStatus {
+  tool: string;
+  state: MediaDependencyState;
+  available: boolean;
+  version?: string;
+  ownership: string;
+  source: MediaDependencySource;
+  diagnostic?: string;
+  restartRequired: boolean;
+}
+
+export interface MediaWorkflowReadiness {
+  id: string;
+  label: string;
+  requires: string[];
+  ready: boolean;
+  advisory: boolean;
+  diagnostic?: string;
+}
+
+export interface MediaDependencyStatus {
+  ytdlp: YtdlpToolStatus;
+  ffmpeg: ExternalDependencyStatus;
+  ffprobe: ExternalDependencyStatus;
+  javascriptRuntime: { detected: boolean; runtime?: string; diagnostic: string };
+  workflows: MediaWorkflowReadiness[];
+}
+
 export interface ToolUpdateCheck {
   tool: string;
   currentVersion?: string;

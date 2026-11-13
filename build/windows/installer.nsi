@@ -47,7 +47,7 @@ Function .onInit
     Call CheckWebView2
     Pop $0
     ${If} $0 != "1"
-        MessageBox MB_ICONSTOP|MB_OK "Microsoft Edge WebView2 Runtime (version 86.0.616.0 or higher) is required to run GoDownloader.$\r$\nPlease install the Evergreen WebView2 Runtime from Microsoft and re-run setup." /SD IDOK
+        MessageBox MB_ICONSTOP|MB_OK "GoDownloader needs the Microsoft Edge WebView2 Runtime, but it was not found on this computer.$\r$\n$\r$\nInstall the Evergreen WebView2 Runtime from Microsoft (https://developer.microsoft.com/microsoft-edge/webview2/), then run setup again." /SD IDOK
         Abort
     ${EndIf}
 
@@ -61,43 +61,23 @@ Function .onInit
 FunctionEnd
 
 Function CheckWebView2
-    ; Search HKCU and HKLM in both standard and Wow6432 views for EBWebView
-    ; UUID: {F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}
-    SetRegView 64
-    ReadRegStr $1 HKCU "Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "EBWebView"
-    ${If} $1 != ""
-        Push "1"
-        Return
-    ${EndIf}
-
-    ReadRegStr $1 HKLM "Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "EBWebView"
-    ${If} $1 != ""
-        Push "1"
-        Return
-    ${EndIf}
-
+    ; Microsoft-documented detection ("Detect if a WebView2 Runtime is already installed"): the Evergreen
+    ; WebView2 Runtime is installed when the `pv` (REG_SZ) value of its EdgeUpdate client key
+    ; {F3017226-FE2A-4295-8BDF-00C3A9A7E4C5} holds a version other than empty or 0.0.0.0, either per-machine
+    ; (HKLM through the 32-bit registry view: WOW6432Node on 64-bit Windows, the native key on 32-bit Windows)
+    ; or per-user (HKCU). No minimum version is checked.
     SetRegView 32
-    ReadRegStr $1 HKCU "Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "EBWebView"
+    ReadRegStr $1 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+    SetRegView default
     ${If} $1 != ""
+    ${AndIf} $1 != "0.0.0.0"
         Push "1"
         Return
     ${EndIf}
 
-    ReadRegStr $1 HKLM "Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "EBWebView"
+    ReadRegStr $1 HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
     ${If} $1 != ""
-        Push "1"
-        Return
-    ${EndIf}
-
-    ; Also check Microsoft Edge WebView2 installed key in Uninstall
-    ReadRegStr $1 HKLM "Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge WebView2" "Version"
-    ${If} $1 != ""
-        Push "1"
-        Return
-    ${EndIf}
-
-    ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge WebView2" "Version"
-    ${If} $1 != ""
+    ${AndIf} $1 != "0.0.0.0"
         Push "1"
         Return
     ${EndIf}

@@ -1,6 +1,7 @@
 package ytdlp
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -148,5 +149,22 @@ func TestSelectBestAudioFormat(t *testing.T) {
 	bestApprox := selectBestAudioFormat(rawApprox, normApprox)
 	if bestApprox == nil || bestApprox.FormatID != "140" || bestApprox.FileSize != 5900000 {
 		t.Fatalf("expected best audio format 140 with approx size 5900000, got %+v", bestApprox)
+	}
+}
+
+// A missing FFmpeg/FFprobe reported by yt-dlp produces an actionable message instead of a generic failure.
+func TestWithFFmpegHint(t *testing.T) {
+	for _, stderr := range []string{
+		"ERROR: You have requested merging of multiple formats but ffmpeg is not installed. Aborting due to --abort-on-error",
+		"ERROR: Postprocessing: ffprobe and ffmpeg not found. Please install or provide the path using --ffmpeg-location",
+		"ERROR: ffmpeg not found. Please install or provide the path using --ffmpeg-location",
+	} {
+		got := withFFmpegHint(stderr, cleanErrorLine(stderr))
+		if !strings.Contains(got, "needs FFmpeg and FFprobe") || !strings.Contains(got, "Settings → Dependencies") {
+			t.Errorf("no FFmpeg guidance for %q: %q", stderr, got)
+		}
+	}
+	if got := withFFmpegHint("ERROR: Unsupported URL", "Unsupported URL"); got != "Unsupported URL" {
+		t.Errorf("unrelated error changed: %q", got)
 	}
 }

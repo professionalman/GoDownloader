@@ -262,6 +262,12 @@ func (s *Scheduler) Start(parentCtx context.Context) {
 
 // Stop terminates the scheduler background loop cleanly.
 func (s *Scheduler) Stop() {
+	s.signalStop()
+	s.wg.Wait()
+}
+
+// signalStop cancels the scheduler loop and its reconciliation retries without waiting. Idempotent.
+func (s *Scheduler) signalStop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -271,7 +277,6 @@ func (s *Scheduler) Stop() {
 		s.reconciliationRetryTimer = nil
 	}
 	s.mu.Unlock()
-	s.wg.Wait()
 }
 
 // Kick signals the scheduler to check for available capacity and process queued jobs.

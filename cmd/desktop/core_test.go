@@ -189,3 +189,44 @@ func TestDiagnosticSmokeUsesIsolatedWorkspace(t *testing.T) {
 		t.Fatalf("smoke database not created inside the workspace: %v", err)
 	}
 }
+
+// Close-to-tray followed by Quit (through the real lifecycle coordinator): hiding keeps the runtime alive, the tray
+// Quit path shuts it down once (repeated Quit requests are ignored), and a relaunch on the same database starts a
+// fresh runtime.
+func TestDesktopCoreCloseToTrayThenQuitThenRelaunch(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "downloader.db")
+	core, err := startDesktopCore(coreTestConfig(t, root), dbPath)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !waitWorkersAlive(core.App(), 2*time.Second) {
+		t.Fatalf("workers not alive: %+v", core.App().BackgroundWorkers())
+	}
+	lc := NewDesktopLifecycle()
+	lc.SetWailsContext(nil, nil, core.App())
+	lc.SetTrayConfigured(true)
+	lc.SetCloseToTray(true)
+
+	lc.HandleWindowClosing(nil, nil)
+	assertAllWorkersAlive(t, core.App(), "after close-to-tray")
+
+	lc.RequestQuit()
+	lc.RequestQuit() // a second Quit must not run a second teardown
+	if !lc.IsQuitting() {
+		t.Fatal("Quit not recorded")
+	}
+	if w := core.App().BackgroundWorkers(); w.Scheduler || w.Monitor || w.Reconciler || w.Tracker {
+		t.Fatalf("workers still alive after Quit: %+v", w)
+	}
+	_ = core.Shutdown(5 * time.Second) // main's idempotent final shutdown
+
+	relaunched, err := startDesktopCore(coreTestConfig(t, root), dbPath)
+	if err != nil {
+		t.Fatalf("relaunch after Quit: %v", err)
+	}
+	defer relaunched.Shutdown(5 * time.Second)
+	if !waitWorkersAlive(relaunched.App(), 2*time.Second) {
+		t.Fatalf("relaunched workers not alive: %+v", relaunched.App().BackgroundWorkers())
+	}
+}

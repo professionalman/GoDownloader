@@ -32,6 +32,17 @@ func (s *DesktopService) GetYtdlpToolStatus() (*toolmanager.ManagedToolStatus, e
 	return &st, nil
 }
 
+// GetMediaDependencyStatus returns the path-free status of yt-dlp, FFmpeg, FFprobe and the JavaScript runtime with
+// per-workflow readiness. Read-only: nothing is installed or changed.
+func (s *DesktopService) GetMediaDependencyStatus() (*toolmanager.MediaDependencyStatus, error) {
+	tm, err := s.toolManager()
+	if err != nil {
+		return nil, err
+	}
+	st := tm.MediaDependencies(context.Background())
+	return &st, nil
+}
+
 // InstallYtdlp installs the latest authenticated stable yt-dlp. Takes no parameters by design.
 func (s *DesktopService) InstallYtdlp() (*toolmanager.AcquisitionResult, error) {
 	tm, err := s.toolManager()

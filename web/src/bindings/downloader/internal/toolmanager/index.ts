@@ -3,6 +3,10 @@
 
 export type {
     AcquisitionResult,
+    ExternalDependencyStatus,
+    JavaScriptRuntimeStatus,
     ManagedToolStatus,
-    UpdateCheckResult
+    MediaDependencyStatus,
+    UpdateCheckResult,
+    WorkflowReadiness
 } from "./models.js";

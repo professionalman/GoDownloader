@@ -177,6 +177,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) 
 		resolvedFFmpegPath = ffmpegInfo.ExecutablePath
 	}
 
+	// Record what the media engine is configured with, so dependency diagnostics report what yt-dlp will actually
+	// use (it receives --ffmpeg-location only when an FFmpeg was resolved here).
+	toolMgr.SetEngineFFmpegPath(resolvedFFmpegPath)
 	ytdlpEng := ytdlp.NewEngine(resolvedYtdlpPath, resolvedFFmpegPath)
 	ytdlpEng.SetAuthProvider(mediaAuthService)
 	ytdlpEng.SetProcessSupervisor(processSupervisor)
@@ -293,14 +296,30 @@ func (a *App) Start(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown gracefully terminates the application runtime in reverse dependency order:
-//  1. Cancels and drains runtime-owned background goroutines (TrackerService)
-//  2. Manager.Stop() (stops scheduler, reconciler, monitor, active tasks, ytdlp subprocess)
-//  3. ProcessSupervisor.Shutdown(ctx) (terminates remaining owned process trees via Win32 Job Objects)
-//  4. Database.Close() (closes SQLite connection strictly after manager and supervisor persistence completes)
+// ErrShutdownIncomplete reports that a graceful-shutdown phase did not finish within its deadline. The remaining
+// mandatory cleanup (process-tree termination, database close, ownership-lock release) still ran.
+var ErrShutdownIncomplete = errors.New("graceful shutdown incomplete")
+
+// shutdownCleanupGrace bounds the mandatory process-tree cleanup when the caller's deadline was already consumed by
+// an earlier phase, so owned processes are still terminated before the database and ownership locks are released.
+const shutdownCleanupGrace = 3 * time.Second
+
+// Shutdown terminates the application runtime in reverse dependency order, bounded by ctx:
+//  1. Cancels and drains runtime-owned background goroutines (TrackerService) — waits at most until ctx is done.
+//  2. Manager.SignalStop() (non-blocking: scheduler, reconciler, monitor, governor, active tasks) followed by
+//     Manager.Stop() — waits at most until ctx is done (or a short grace if ctx was already exhausted). A worker that
+//     does not exit in time (for example blocked in an engine call) is abandoned and ErrShutdownIncomplete is
+//     reported; it is never waited for indefinitely.
+//  3. ProcessSupervisor.Shutdown — always runs. If ctx is already exhausted it gets its own bounded grace
+//     (shutdownCleanupGrace), so owned process trees are still terminated.
+//  4. Database.Close() — always runs. New statements are refused afterwards; a statement an abandoned worker already
+//     started may still complete on its connection after Close returns (database/sql closes in-use connections when
+//     they are released). In the desktop and server hosts the process exits right after Shutdown; any unpersisted
+//     step of an abandoned worker is reconciled by durable recovery on the next start.
+//  5. Runtime ownership and cleanup-ownership locks are released after the database is closed.
 //
-// Shutdown is concurrency-safe and strictly idempotent: repeated or concurrent calls wait for the active
-// teardown and receive the same outcome without running duplicate teardown passes.
+// Shutdown is concurrency-safe and idempotent: concurrent callers join the active teardown and return its outcome
+// (bounded by the owner's deadline), and repeated calls return the recorded outcome without a duplicate pass.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.mu.Lock()
 	if a.stopped {
@@ -311,6 +330,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if a.stopping {
 		done := a.shutdownDone
 		a.mu.Unlock()
+		// Joiners never return while the shared teardown is still running (they must not act as if the runtime were
+		// stopped while the database and ownership locks are still held). The owner's teardown is itself bounded by
+		// the owner's deadline plus the cleanup grace, so this wait is bounded whenever the owner passed one.
 		<-done
 		a.mu.Lock()
 		err := a.shutdownErr
@@ -322,6 +344,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	trackerCancel := a.trackerCancel
 	trackerDone := a.trackerDone
 	manager := a.manager
+	stopManager := a.stopManager
 	supervisor := a.processSupervisor
 	db := a.db
 	guard := a.runtimeGuard
@@ -342,14 +365,43 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Step 2: Stop Manager and background loops
+	// Step 2: Stop Manager and background loops, bounded by ctx. Every worker is signalled synchronously first
+	// (non-blocking), so one worker stuck in an engine call cannot keep the monitor, reconciler or active tasks
+	// running; only the wait for them is bounded. If ctx was already exhausted (for example by the tracker drain),
+	// the wait still gets its own short grace rather than none.
 	if manager != nil {
-		manager.Stop()
+		manager.SignalStop()
+		if stopManager == nil {
+			stopManager = manager.Stop
+		}
+		waitCtx := ctx
+		if ctx.Err() != nil {
+			graceCtx, cancelGrace := context.WithTimeout(context.Background(), shutdownCleanupGrace)
+			defer cancelGrace()
+			waitCtx = graceCtx
+		}
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			stopManager()
+		}()
+		select {
+		case <-stopped:
+		case <-waitCtx.Done():
+			log.Printf("shutdown: background workers did not stop before the deadline; continuing with mandatory cleanup")
+			errs = append(errs, fmt.Errorf("%w: background workers did not stop before the shutdown deadline", ErrShutdownIncomplete))
+		}
 	}
 
-	// Step 3: Shutdown ProcessSupervisor with timeout context
+	// Step 3: Shutdown ProcessSupervisor. Owned process trees are terminated even if ctx is already exhausted.
 	if supervisor != nil {
-		if err := supervisor.Shutdown(ctx); err != nil {
+		supCtx := ctx
+		if ctx.Err() != nil {
+			graceCtx, cancelGrace := context.WithTimeout(context.Background(), shutdownCleanupGrace)
+			defer cancelGrace()
+			supCtx = graceCtx
+		}
+		if err := supervisor.Shutdown(supCtx); err != nil {
 			errs = append(errs, fmt.Errorf("process supervisor shutdown: %w", err))
 		}
 	}

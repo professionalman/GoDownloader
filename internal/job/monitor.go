@@ -14,7 +14,9 @@ type Monitor struct {
 	interval time.Duration
 
 	stopCh chan struct{}
-	wg     sync.WaitGroup
+	// stopOnce makes Stop idempotent (a second Stop must not close stopCh again).
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 
 	// running is true while the monitoring loop goroutine is alive.
 	running atomic.Bool
@@ -63,8 +65,13 @@ func (m *Monitor) Start(ctx context.Context) {
 
 // Stop stops the monitoring loop and waits for it to finish.
 func (m *Monitor) Stop() {
-	close(m.stopCh)
+	m.signalStop()
 	m.wg.Wait()
+}
+
+// signalStop closes the stop channel without waiting for the loop. Idempotent.
+func (m *Monitor) signalStop() {
+	m.stopOnce.Do(func() { close(m.stopCh) })
 }
 
 // Running reports whether the monitoring loop goroutine is alive.

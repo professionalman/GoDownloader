@@ -47,6 +47,13 @@ func (f *fakeToolService) CheckYtdlpUpdate(context.Context) (*toolmanager.Update
 	return &toolmanager.UpdateCheckResult{Tool: "yt-dlp", LatestVersion: "2026.10.26"}, nil
 }
 
+func (f *fakeToolService) MediaDependencies(context.Context) toolmanager.MediaDependencyStatus {
+	return toolmanager.MediaDependencyStatus{
+		FFmpeg:  toolmanager.ExternalDependencyStatus{Tool: "ffmpeg", State: "missing", Ownership: "external_user", Source: "none", Diagnostic: "FFmpeg was not found."},
+		FFprobe: toolmanager.ExternalDependencyStatus{Tool: "ffprobe", State: "available", Available: true, Ownership: "external_user", Source: "system_path"},
+	}
+}
+
 func setupToolsRouter(t *testing.T, svc api.ManagedToolService) (http.Handler, *api.SecurityManager) {
 	return setupToolsRouterWithAuth(t, svc, false)
 }
@@ -86,6 +93,7 @@ func TestToolsAPI_RequiresSessionAndCSRF(t *testing.T) {
 	router, sec := setupToolsRouter(t, svc)
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/tools/yt-dlp"},
+		{http.MethodGet, "/api/v1/tools/media-dependencies"},
 		{http.MethodPost, "/api/v1/tools/yt-dlp/install"},
 		{http.MethodPost, "/api/v1/tools/yt-dlp/update"},
 		{http.MethodPost, "/api/v1/tools/yt-dlp/check-update"},
@@ -201,5 +209,21 @@ func TestToolsAPI_TypedErrors(t *testing.T) {
 				t.Fatal("internal error detail leaked to the client")
 			}
 		})
+	}
+}
+
+// The media-dependency status is read-only and served to an authenticated session.
+func TestToolsAPI_MediaDependencies(t *testing.T) {
+	router, sec := setupToolsRouter(t, &fakeToolService{})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, toolsRequest(http.MethodGet, "/api/v1/tools/media-dependencies", sec, true))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"ffmpeg":{"tool":"ffmpeg","state":"missing"`, `"ffprobe":{"tool":"ffprobe","state":"available"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
 	}
 }

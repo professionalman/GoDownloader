@@ -2,6 +2,7 @@ package buildinfo
 
 import (
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strings"
 )
@@ -16,6 +17,14 @@ var Commit = ""
 // Date is the build date timestamp, optionally injected via -ldflags.
 var Date = ""
 
+// Modified is "true" when the injected Commit was built from a working tree with uncommitted changes, "false"
+// when it was clean, and empty when not injected. It is only consulted together with an injected Commit.
+var Modified = ""
+
+// Configuration names the build configuration (for example "production"), injected via -ldflags. Empty means a
+// development build.
+var Configuration = ""
+
 var hexRevisionRegex = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 
 // Info represents truthful build identity information.
@@ -23,6 +32,13 @@ type Info struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`
 	Dirty   bool   `json:"dirty"`
+	// Platform is the compile target (GOOS/GOARCH) of the running binary.
+	Platform string `json:"platform"`
+	// Configuration is the build configuration ("production" for packaged builds, "development" otherwise).
+	Configuration string `json:"configuration"`
+	// CommitSource tells how Commit was obtained: "injected" (release build metadata), "vcs" (Go toolchain VCS
+	// stamping), or "none".
+	CommitSource string `json:"commitSource"`
 }
 
 // sanitizeRevision validates that the revision is a bounded hexadecimal commit hash.
@@ -45,6 +61,11 @@ func Current() Info {
 	v := strings.TrimSpace(Version)
 	c := strings.TrimSpace(Commit)
 	dirty := false
+	source := "none"
+	if c != "" {
+		source = "injected"
+		dirty = strings.TrimSpace(Modified) == "true"
+	}
 
 	readInfo, ok := debug.ReadBuildInfo()
 	if ok && readInfo != nil {
@@ -63,6 +84,7 @@ func Current() Info {
 				switch setting.Key {
 				case "vcs.revision":
 					c = setting.Value
+					source = "vcs"
 				case "vcs.modified":
 					if setting.Value == "true" {
 						dirty = true
@@ -77,13 +99,24 @@ func Current() Info {
 	}
 
 	sanitizedCommit := sanitizeRevision(c)
-	if sanitizedCommit != "unknown" && dirty {
+	if sanitizedCommit == "unknown" {
+		source = "none"
+		dirty = false
+	} else if dirty {
 		sanitizedCommit += "-dirty"
 	}
 
+	config := strings.TrimSpace(Configuration)
+	if config == "" {
+		config = "development"
+	}
+
 	return Info{
-		Version: v,
-		Commit:  sanitizedCommit,
-		Dirty:   dirty,
+		Version:       v,
+		Commit:        sanitizedCommit,
+		Dirty:         dirty,
+		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+		Configuration: config,
+		CommitSource:  source,
 	}
 }

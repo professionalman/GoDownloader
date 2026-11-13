@@ -4,28 +4,44 @@ on:
   push:
     branches:
       - main
+      - dev
       - feat/v0.7-lovable-integration
       - feat/v0.7.1-authenticated-media
       - feat/v0.7.2-subtitles
   pull_request:
     branches:
       - main
+      - dev
       - feat/v0.7-lovable-integration
       - feat/v0.7.1-authenticated-media
       - feat/v0.7.2-subtitles
 
+# Verification only: read-only token, no packaging, signing, or publication.
+permissions:
+  contents: read
+
 jobs:
   backend:
-    name: Go Backend Verification
-    runs-on: ubuntu-latest
+    # The product is a Windows desktop application: the desktop host links Wails' Windows webview backend, and the
+    # Job Object process-tree tests are Windows-only. The Windows runner also provides the C toolchain that the
+    # Go race detector (cgo) requires.
+    name: Go Backend Verification (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Keep repository line endings (LF) for gofmt
+        run: git config --global core.autocrlf false
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
 
       - name: Verify gofmt formatting
@@ -40,11 +56,21 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+      - name: Build server
+        run: go build -o "$RUNNER_TEMP/godownloader-server.exe" ./cmd/server
+
       - name: Run unit tests
         run: go test -count=1 ./...
 
+      - name: Show C toolchain used by the race detector
+        run: |
+          go env CC CGO_ENABLED
+          gcc --version
+
       - name: Run unit tests with race detector
-        run: go test -count=1 -race ./...
+        env:
+          CGO_ENABLED: '1'
+        run: go test -count=1 -race -timeout 30m ./...
 
   frontend:
     name: Web Frontend Verification

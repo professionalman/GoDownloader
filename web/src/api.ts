@@ -23,6 +23,7 @@ import type {
   RecoverySummary,
   RecoveryIssue,
   RecoveryIssueKind,
+  MediaDependencyStatus,
   YtdlpToolStatus,
   ToolAcquisitionResult,
   ToolUpdateCheck,
@@ -348,6 +349,10 @@ export function hasManagedToolSupport(): boolean {
 
 export async function getYtdlpToolStatus(): Promise<YtdlpToolStatus> {
   return toolsOps().getYtdlpStatus();
+}
+
+export async function getMediaDependencyStatus(): Promise<MediaDependencyStatus> {
+  return toolsOps().getMediaDependencies();
 }
 
 export async function installYtdlp(): Promise<ToolAcquisitionResult> {

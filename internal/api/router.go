@@ -94,6 +94,7 @@ func NewRouter(cfg *config.Config, manager *job.Manager, sseHandler *events.SSEH
 
 	// Managed yt-dlp (authenticated acquisition). Same session/origin protection as every /api/v1 route.
 	api.HandleFunc("/tools/yt-dlp", h.GetYtdlpTool).Methods("GET")
+	api.HandleFunc("/tools/media-dependencies", h.GetMediaDependencies).Methods("GET")
 	// Mutations require the authentication system (refused under DISABLE_AUTH) plus an allowed origin.
 	api.Handle("/tools/yt-dlp/install", secManager.RequireAuthenticatedSensitiveAction(http.HandlerFunc(h.InstallYtdlpTool))).Methods("POST")
 	api.Handle("/tools/yt-dlp/update", secManager.RequireAuthenticatedSensitiveAction(http.HandlerFunc(h.UpdateYtdlpTool))).Methods("POST")

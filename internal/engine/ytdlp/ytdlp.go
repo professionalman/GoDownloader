@@ -627,7 +627,8 @@ func (e *Engine) runDownload(ctx context.Context, jobID string, state *downloadS
 				break
 			}
 		}
-		errMsg = withJSRuntimeHint(strings.Join(stderrLines, "\n"), errMsg)
+		joined := strings.Join(stderrLines, "\n")
+		errMsg = withFFmpegHint(joined, withJSRuntimeHint(joined, errMsg))
 		stderrMu.Unlock()
 		state.err = errMsg
 		log.Printf("ytdlp: job %s failed: %s", jobID, errMsg)

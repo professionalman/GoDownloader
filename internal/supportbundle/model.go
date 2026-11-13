@@ -219,9 +219,9 @@ type SafeQueueSettings struct {
 }
 
 type SafeStorageSettings struct {
-	MinimumFreeSpaceBytes int64 `json:"minimumFreeSpaceBytes"`
+	MinimumFreeSpaceBytes int64  `json:"minimumFreeSpaceBytes"`
 	DefaultConflictPolicy string `json:"defaultConflictPolicy"`
-	OverridesPresent      bool  `json:"overridesPresent"`
+	OverridesPresent      bool   `json:"overridesPresent"`
 }
 
 type SafeProxySettings struct {

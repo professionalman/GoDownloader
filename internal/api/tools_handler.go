@@ -14,6 +14,7 @@ type ManagedToolService interface {
 	InstallYtdlp(ctx context.Context) (*toolmanager.AcquisitionResult, error)
 	UpdateYtdlp(ctx context.Context) (*toolmanager.AcquisitionResult, error)
 	CheckYtdlpUpdate(ctx context.Context) (*toolmanager.UpdateCheckResult, error)
+	MediaDependencies(ctx context.Context) toolmanager.MediaDependencyStatus
 }
 
 // SetManagedToolService wires the managed tool service.
@@ -50,6 +51,15 @@ func (h *Handler) GetYtdlpTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, h.tools.YtdlpStatus(r.Context()))
+}
+
+// GetMediaDependencies handles GET /api/v1/tools/media-dependencies: read-only, path-free status of yt-dlp, FFmpeg,
+// FFprobe and the JavaScript runtime, with per-workflow readiness. It installs or changes nothing.
+func (h *Handler) GetMediaDependencies(w http.ResponseWriter, r *http.Request) {
+	if !h.requireTools(w) {
+		return
+	}
+	writeJSON(w, http.StatusOK, h.tools.MediaDependencies(r.Context()))
 }
 
 // InstallYtdlpTool handles POST /api/v1/tools/yt-dlp/install.

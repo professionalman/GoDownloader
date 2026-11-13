@@ -18,6 +18,7 @@ import type {
   TrackerSource,
   MediaAuthSettings,
   UpdateMediaAuthPayload,
+  MediaDependencyStatus,
   YtdlpToolStatus,
   ToolAcquisitionResult,
   ToolUpdateCheck,
@@ -524,6 +525,11 @@ class DesktopToolsOperations implements ToolsOperations {
   async getYtdlpStatus(): Promise<YtdlpToolStatus> {
     const res = await DesktopService.GetYtdlpToolStatus().catch(wrapIpcError);
     return res as unknown as YtdlpToolStatus;
+  }
+
+  async getMediaDependencies(): Promise<MediaDependencyStatus> {
+    const res = await DesktopService.GetMediaDependencyStatus().catch(wrapIpcError);
+    return res as unknown as MediaDependencyStatus;
   }
 
   async installYtdlp(): Promise<ToolAcquisitionResult> {
