@@ -47,7 +47,9 @@ tasks:
           ARCH: '{{.ARCH}}'
           DEV: "false"
     cmds:
-      - cmd: powershell -Command "if (Get-Command makensis -ErrorAction SilentlyContinue) { makensis build/windows/installer.nsi } elseif (Test-Path 'C:\Program Files (x86)\NSIS\makensis.exe') { & 'C:\Program Files (x86)\NSIS\makensis.exe' build/windows/installer.nsi } elseif (Test-Path 'C:\Program Files\NSIS\makensis.exe') { & 'C:\Program Files\NSIS\makensis.exe' build/windows/installer.nsi } else { Write-Error 'makensis not found'; exit 1 }"
+      # NSIS reads the executable from, and writes the installer to, the same {{.BIN_DIR}} the desktop build used and
+      # the manifest step hashes (passed to makensis as an absolute /DBIN_DIR; installer.nsi has no default).
+      - cmd: powershell -NoProfile -ExecutionPolicy Bypass -File build/windows/package-installer.ps1 -BinDir "{{.BIN_DIR}}" -AppName "{{.APP_NAME}}" -InstallerName "GoDownloader-0.9.1-beta-windows-amd64-setup.exe"
         platforms: [windows]
       # Traceability record for the produced artifacts: version, source commit, file names, SHA-256 digests and the
       # build invocation. It is neither a signature nor a bit-for-bit reproducibility claim.

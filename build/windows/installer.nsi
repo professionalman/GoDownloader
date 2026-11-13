@@ -5,8 +5,10 @@
 !include "x64.nsh"
 !include "LogicLib.nsh"
 
+; BIN_DIR must be given explicitly (makensis /DBIN_DIR=<absolute output directory>). There is deliberately no default:
+; a fallback directory could package a stale executable and overwrite an unrelated installer.
 !ifndef BIN_DIR
-    !define BIN_DIR "..\..\bin"
+    !error "BIN_DIR is not defined: run makensis /DBIN_DIR=<output directory> (see build/windows/package-installer.ps1)"
 !endif
 
 Name "GoDownloader"
