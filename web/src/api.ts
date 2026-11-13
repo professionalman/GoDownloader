@@ -394,6 +394,21 @@ export function hasSupportBundle(): boolean {
   return Boolean(getBackendClient().supportBundle);
 }
 
+/**
+ * Version of the running application build, as embedded in the executable. Returns null when the backend cannot
+ * report one (for example the browser/HTTP mode) or the call fails, so callers show no version instead of a guess.
+ */
+export async function getAppVersion(): Promise<string | null> {
+  try {
+    const ops = getBackendClient().appInfo;
+    if (!ops) return null;
+    const version = (await ops.getVersion())?.trim();
+    return version || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function exportSupportBundle(): Promise<SupportBundleExportResult | null> {
   const ops = getBackendClient().supportBundle;
   return ops ? ops.exportBundle() : null;

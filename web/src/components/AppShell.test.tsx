@@ -34,6 +34,7 @@ vi.mock('../api', async () => {
       items: [],
     }),
     getSettings: vi.fn().mockResolvedValue(null),
+    getAppVersion: vi.fn().mockResolvedValue(null),
     subscribeEvents: vi.fn((options: import('../transport/types').EventSubscribeOptions) => {
       appHarness.sseCallback = (eventType: string, job: Job) => options.onEvent(eventType, job);
       if (options.onConnected) sse.listeners.set('open', options.onConnected);
@@ -88,6 +89,7 @@ describe('AppShell', () => {
     vi.clearAllMocks();
     vi.mocked(api.getJobs).mockResolvedValue([]);
     vi.mocked(api.createJob).mockReset();
+    vi.mocked(api.getAppVersion).mockResolvedValue(null);
   });
 
   it('renders state-based desktop and compact navigation with counts and settings', () => {
@@ -100,6 +102,7 @@ describe('AppShell', () => {
         downloadCount={7}
         queueCount={2}
         connectionState="connected"
+        appVersion="0.9.1"
         onViewModeChange={onViewModeChange}
         onOpenSettings={onOpenSettings}
       >
@@ -112,13 +115,79 @@ describe('AppShell', () => {
     expect(within(desktopNav).getByRole('button', { name: /Downloads/ })).toHaveAttribute('aria-current', 'page');
     expect(within(desktopNav).getByLabelText('7 downloads')).toBeInTheDocument();
     expect(within(compactNav).getByLabelText('2 queue')).toBeInTheDocument();
-    expect(screen.getByText('Version 0.7')).toBeInTheDocument();
-    expect(within(compactNav).getByText('v0.7')).toBeInTheDocument();
+    expect(screen.getByText('Version 0.9.1')).toBeInTheDocument();
+    expect(within(compactNav).getByText('v0.9.1')).toBeInTheDocument();
+    expect(screen.queryByText(/0\.7/)).not.toBeInTheDocument();
 
     fireEvent.click(within(desktopNav).getByRole('button', { name: /Queue/ }));
     expect(onViewModeChange).toHaveBeenCalledWith('queue');
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  describe('build version label', () => {
+    const shellProps = {
+      viewMode: 'downloads' as const,
+      downloadCount: 0,
+      queueCount: 0,
+      connectionState: 'connected' as const,
+      onViewModeChange: vi.fn(),
+      onOpenSettings: vi.fn(),
+      children: <div />,
+    };
+    const compactNav = () => screen.getByRole('navigation', { name: 'Compact navigation' });
+
+    it('follows the supplied build version in both layouts', () => {
+      const { rerender } = render(<AppShell {...shellProps} appVersion="0.9.1" />);
+      expect(within(compactNav()).getByText('v0.9.1')).toBeInTheDocument();
+      expect(screen.getByText('Version 0.9.1')).toBeInTheDocument();
+
+      rerender(<AppShell {...shellProps} appVersion="1.4.0" />);
+      expect(within(compactNav()).getByText('v1.4.0')).toBeInTheDocument();
+      expect(screen.getByText('Version 1.4.0')).toBeInTheDocument();
+      expect(screen.queryByText(/0\.9\.1/)).not.toBeInTheDocument();
+    });
+
+    it('does not double the prefix when the build version already starts with v', () => {
+      render(<AppShell {...shellProps} appVersion="v2.0.0" />);
+      expect(within(compactNav()).getByText('v2.0.0')).toBeInTheDocument();
+      expect(screen.getByText('Version 2.0.0')).toBeInTheDocument();
+    });
+
+    it.each([undefined, null, '', '   '])('shows no version label while the version is unknown (%j)', (appVersion) => {
+      const { container } = render(<AppShell {...shellProps} appVersion={appVersion} />);
+      expect(container.querySelector('.shell-compact-version')).toBeNull();
+      expect(screen.queryByText(/^Version/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/v?\d+\.\d+/)).not.toBeInTheDocument();
+    });
+
+    it('shows a development build identity as reported', () => {
+      render(<AppShell {...shellProps} appVersion="(devel)" />);
+      expect(screen.getAllByText('(devel)')).toHaveLength(2);
+      expect(screen.queryByText(/^Version/)).not.toBeInTheDocument();
+    });
+
+    it('App shows the version reported by the running build, and nothing before it arrives', async () => {
+      let resolveVersion!: (version: string | null) => void;
+      vi.mocked(api.getAppVersion).mockImplementation(() => new Promise((resolve) => {
+        resolveVersion = resolve;
+      }));
+      render(<App />);
+      expect(screen.queryByText(/^Version/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^v\d/)).not.toBeInTheDocument();
+
+      await act(async () => resolveVersion('3.2.1'));
+      expect(await screen.findByText('Version 3.2.1')).toBeInTheDocument();
+      expect(within(compactNav()).getByText('v3.2.1')).toBeInTheDocument();
+    });
+
+    it('App shows no version when the build cannot report one', async () => {
+      vi.mocked(api.getAppVersion).mockResolvedValue(null);
+      render(<App />);
+      await waitFor(() => expect(api.getAppVersion).toHaveBeenCalled());
+      expect(screen.queryByText(/^Version/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^v\d/)).not.toBeInTheDocument();
+    });
   });
 
   it('projects only the supplied EventSource lifecycle state', () => {

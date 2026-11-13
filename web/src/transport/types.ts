@@ -206,6 +206,12 @@ export interface SupportBundleOperations {
   exportBundle(): Promise<SupportBundleExportResult>;
 }
 
+/** Domain: identity of the running application build */
+export interface AppInfoOperations {
+  /** Version embedded in the running executable (for example "0.9.1"; "(devel)" for development builds). */
+  getVersion(): Promise<string>;
+}
+
 /** Complete transport-neutral client interface */
 export interface BackendClient {
   readonly jobs: JobsOperations;
@@ -218,4 +224,5 @@ export interface BackendClient {
   readonly tools?: ToolsOperations;
   readonly desktopPreferences?: DesktopPreferencesOperations;
   readonly supportBundle?: SupportBundleOperations;
+  readonly appInfo?: AppInfoOperations;
 }

@@ -25,6 +25,7 @@ import { useJobSelection } from './hooks/useJobSelection';
 import {
   getJobs,
   getSyncSnapshot,
+  getAppVersion,
   getRecoverySummary,
   type RecoverySummary,
   createJob,
@@ -61,6 +62,7 @@ function App() {
   const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const {
     selectedIds,
     setSelectedIds,
@@ -94,6 +96,19 @@ function App() {
     } catch {
       // ignore
     }
+  }, []);
+
+  // The version label comes from the running build; nothing is shown until (or unless) it is known.
+  useEffect(() => {
+    let cancelled = false;
+    void getAppVersion()
+      .then((version) => {
+        if (!cancelled) setAppVersion(version);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Fetch initial authoritative data on mount
@@ -526,6 +541,7 @@ function App() {
         downloadCount={jobs.length}
         queueCount={queueSnapshot?.queuedDownloads ?? 0}
         connectionState={connectionState}
+        appVersion={appVersion}
         onViewModeChange={setViewMode}
         onOpenSettings={() => setShowSettings(true)}
       >

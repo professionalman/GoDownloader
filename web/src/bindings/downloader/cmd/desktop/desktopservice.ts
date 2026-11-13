@@ -103,6 +103,15 @@ export function ExportSupportBundle(): $CancellablePromise<supportbundle$0.Suppo
     return $Call.ByID(3790769118);
 }
 
+/**
+ * GetAppVersion returns the version embedded in the running executable (the same build identity that
+ * --print-build-info and the support bundle report), so the UI never carries its own version string.
+ * Development builds report "(devel)".
+ */
+export function GetAppVersion(): $CancellablePromise<string> {
+    return $Call.ByID(3801962238);
+}
+
 export function GetBackendInstanceID(): $CancellablePromise<string> {
     return $Call.ByID(80028127);
 }

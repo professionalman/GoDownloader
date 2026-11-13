@@ -45,6 +45,7 @@ import {
   type DesktopPreferencesOperations,
   type SupportBundleExportResult,
   type SupportBundleOperations,
+  type AppInfoOperations,
 } from './types';
 
 /** Error translation converting Go [ERROR_CODE] error prefixes into typed ApiResponseError */
@@ -589,6 +590,12 @@ class SupportBundleOperationsImpl implements SupportBundleOperations {
   }
 }
 
+class DesktopAppInfoOperations implements AppInfoOperations {
+  async getVersion(): Promise<string> {
+    return DesktopService.GetAppVersion().catch(wrapIpcError);
+  }
+}
+
 /** DesktopBackendClient coordinates all domains via native Wails v3 IPC and Events */
 export class DesktopBackendClient implements BackendClient {
   readonly jobs: JobsOperations = new DesktopJobsOperations();
@@ -601,6 +608,7 @@ export class DesktopBackendClient implements BackendClient {
   readonly tools: ToolsOperations = new DesktopToolsOperations();
   readonly desktopPreferences: DesktopPreferencesOperations = new DesktopPreferencesOperationsImpl();
   readonly supportBundle: SupportBundleOperations = new SupportBundleOperationsImpl();
+  readonly appInfo: AppInfoOperations = new DesktopAppInfoOperations();
 }
 
 /** Singleton instance of the desktop backend client */

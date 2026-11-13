@@ -9,6 +9,11 @@ interface AppShellProps {
   downloadCount: number;
   queueCount: number;
   connectionState: ConnectionState;
+  /**
+   * Version reported by the running application build (never hard-coded here). While it is loading, or when the
+   * backend cannot report one, no version label is shown.
+   */
+  appVersion?: string | null;
   onViewModeChange: (viewMode: ViewMode) => void;
   onOpenSettings: () => void;
   children: ReactNode;
@@ -31,15 +36,27 @@ const connectionCopy: Record<ConnectionState, { label: string; tone: string }> =
   reconnecting: { label: 'Reconnecting', tone: 'bg-warning' },
 };
 
+/**
+ * Labels for the build version: "v0.9.1" / "Version 0.9.1" for a numbered release; a non-numeric identity such as
+ * "(devel)" is shown as reported; nothing when the version is unknown.
+ */
+function versionLabels(appVersion?: string | null): { compact: string; full: string } | null {
+  const version = appVersion?.trim().replace(/^v(?=\d)/i, '');
+  if (!version) return null;
+  return /^\d/.test(version) ? { compact: `v${version}`, full: `Version ${version}` } : { compact: version, full: version };
+}
+
 function Navigation({
   compact = false,
   viewMode,
   downloadCount,
   queueCount,
+  appVersion,
   onViewModeChange,
-}: Pick<AppShellProps, 'viewMode' | 'downloadCount' | 'queueCount' | 'onViewModeChange'> & {
+}: Pick<AppShellProps, 'viewMode' | 'downloadCount' | 'queueCount' | 'appVersion' | 'onViewModeChange'> & {
   compact?: boolean;
 }) {
+  const version = versionLabels(appVersion);
   const items = [
     { id: 'downloads' as const, label: 'Downloads', icon: Download, count: downloadCount },
     { id: 'queue' as const, label: 'Queue', icon: ListOrdered, count: queueCount },
@@ -69,7 +86,7 @@ function Navigation({
           </button>
         );
       })}
-      {compact && <span className="shell-compact-version">v0.7</span>}
+      {compact && version && <span className="shell-compact-version">{version.compact}</span>}
     </nav>
   );
 }
@@ -93,11 +110,13 @@ export function AppShell({
   downloadCount,
   queueCount,
   connectionState,
+  appVersion,
   onViewModeChange,
   onOpenSettings,
   children,
 }: AppShellProps) {
   const copy = viewCopy[viewMode];
+  const version = versionLabels(appVersion);
 
   return (
     <div className="shell-root">
@@ -113,12 +132,13 @@ export function AppShell({
           viewMode={viewMode}
           downloadCount={downloadCount}
           queueCount={queueCount}
+          appVersion={appVersion}
           onViewModeChange={onViewModeChange}
         />
 
         <div className="shell-sidebar-footer">
           <p>GoDownloader</p>
-          <span>Version 0.7</span>
+          {version && <span>{version.full}</span>}
         </div>
       </aside>
 
@@ -144,6 +164,7 @@ export function AppShell({
             viewMode={viewMode}
             downloadCount={downloadCount}
             queueCount={queueCount}
+            appVersion={appVersion}
             onViewModeChange={onViewModeChange}
           />
         </header>

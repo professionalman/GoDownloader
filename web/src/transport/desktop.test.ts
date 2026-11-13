@@ -73,6 +73,7 @@ vi.mock('../bindings/downloader/cmd/desktop/desktopservice', () => ({
   SetCloseToTray: vi.fn(),
   SetAutostart: vi.fn(),
   ExportSupportBundle: vi.fn(),
+  GetAppVersion: vi.fn(),
 }));
 
 describe('Desktop Transport Layer', () => {
@@ -550,6 +551,17 @@ describe('Desktop Transport Layer', () => {
       await expect(
         desktopBackendClient.desktopPreferences?.setAutostart(true)
       ).rejects.toThrow('permission denied');
+    });
+  });
+
+  describe('appInfo domain', () => {
+    it('returns the version reported by the executable build identity', async () => {
+      vi.mocked(DesktopService.GetAppVersion).mockResolvedValue('0.9.1' as any);
+      await expect(desktopBackendClient.appInfo.getVersion()).resolves.toBe('0.9.1');
+
+      vi.mocked(DesktopService.GetAppVersion).mockResolvedValue('1.4.0' as any);
+      await expect(desktopBackendClient.appInfo.getVersion()).resolves.toBe('1.4.0');
+      expect(DesktopService.GetAppVersion).toHaveBeenCalledTimes(2);
     });
   });
 
