@@ -84,6 +84,32 @@ describe('MediaDependenciesPanel', () => {
     expect(screen.getByText('Unavailable until FFmpeg is ready.')).toBeInTheDocument();
   });
 
+  it('shows the backend workflow diagnostics verbatim for one, two and three missing tools', async () => {
+    // The panel renders the backend's sentence as-is; the backend builds it grammatically (Sandbox finding D-2).
+    vi.mocked(api.getMediaDependencyStatus).mockResolvedValue(
+      status({
+        workflows: [
+          { id: 'media_analysis', label: 'Analyze media links', requires: ['yt-dlp'], ready: false, advisory: false, diagnostic: 'Unavailable until yt-dlp is ready.' },
+          { id: 'merge_video_audio', label: 'Download best quality', requires: ['yt-dlp', 'ffmpeg', 'ffprobe'], ready: false, advisory: false, diagnostic: 'Unavailable until yt-dlp, FFmpeg, and FFprobe are ready.' },
+          { id: 'subtitle_postprocessing', label: 'Embed subtitles', requires: ['yt-dlp', 'ffmpeg', 'ffprobe'], ready: false, advisory: false, diagnostic: 'Unavailable until FFmpeg and FFprobe are ready.' },
+        ],
+      }),
+    );
+    render(<MediaDependenciesPanel />);
+    expect(within(await screen.findByLabelText('Analyze media links: not ready')).getByText('Unavailable until yt-dlp is ready.')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Download best quality: not ready')).getByText('Unavailable until yt-dlp, FFmpeg, and FFprobe are ready.')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Embed subtitles: not ready')).getByText('Unavailable until FFmpeg and FFprobe are ready.')).toBeInTheDocument();
+    expect(screen.queryByText(/ and FFmpeg and /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/FFprobe is ready/)).not.toBeInTheDocument();
+  });
+
+  it('shows no diagnostic for a ready workflow', async () => {
+    vi.mocked(api.getMediaDependencyStatus).mockResolvedValue(status());
+    render(<MediaDependenciesPanel />);
+    expect(await screen.findByLabelText('Download best quality: ready')).toBeInTheDocument();
+    expect(screen.queryByText(/Unavailable until/)).not.toBeInTheDocument();
+  });
+
   it('distinguishes an unusable executable and a pending restart', async () => {
     vi.mocked(api.getMediaDependencyStatus).mockResolvedValue(
       status({

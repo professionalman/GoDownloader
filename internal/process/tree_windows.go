@@ -58,6 +58,9 @@ func (t *windowsProcessTree) setup(cmd *exec.Cmd) error {
 	// Create the process suspended so that zero instructions of application code
 	// or child-spawning logic execute prior to Job Object containment.
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	// Owned tools are console programs; the GUI-subsystem desktop host has no console for them to share, so run them
+	// without a console window (their own console children inherit the hidden console).
+	HideConsoleWindow(cmd)
 	return nil
 }
 

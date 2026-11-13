@@ -98,7 +98,11 @@ jobs:
             'TestPackaging_MissingOutputDirectoryFails',
             'TestPackaging_InstallerScriptRequiresExplicitBinDir',
             'TestPackaging_TaskfileStepsAgreeOnArtifactLocations',
-            'TestPackaging_ManifestHashesTheSelectedArtifacts'
+            'TestPackaging_ManifestHashesTheSelectedArtifacts',
+            'TestPackaging_ProductionLinkerFlagsProduceGUISubsystem',
+            'TestPackaging_ManifestRefusesConsoleSubsystemExecutable',
+            'TestPackaging_ManifestRefusesInvalidExecutable',
+            'TestPackaging_ManifestCapturesBuildInfoFromGUIExecutable'
           )
           $goExit = [int](Get-Content -LiteralPath "$env:RUNNER_TEMP/packaging-tests.exit")
           $results = @{}

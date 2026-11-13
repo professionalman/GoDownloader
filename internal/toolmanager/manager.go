@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"downloader/internal/job"
+	"downloader/internal/process"
 )
 
 // Manager manages external tool discovery, probing, provenance, and durability.
@@ -456,6 +457,9 @@ func (m *Manager) probeVersionTimeout(ctx context.Context, timeout time.Duration
 	defer cancel()
 
 	cmd := m.execCommandFn(probeCtx, executable, args...)
+	// Probed tools are console programs; without this the GUI-subsystem desktop host would flash a console window for
+	// every version probe.
+	process.HideConsoleWindow(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

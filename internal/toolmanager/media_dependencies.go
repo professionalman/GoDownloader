@@ -281,7 +281,8 @@ type requirement struct {
 	name string
 }
 
-// missingRequirements names the requirements that are not ready, or returns "" when all are.
+// missingRequirements names the requirements that are not ready, or returns "" when all are:
+// "Unavailable until FFmpeg is ready.", "… yt-dlp and FFmpeg are ready.", "… yt-dlp, FFmpeg, and FFprobe are ready."
 func missingRequirements(reqs ...requirement) string {
 	var names []string
 	for _, r := range reqs {
@@ -289,10 +290,16 @@ func missingRequirements(reqs ...requirement) string {
 			names = append(names, r.name)
 		}
 	}
-	if len(names) == 0 {
+	switch len(names) {
+	case 0:
 		return ""
+	case 1:
+		return "Unavailable until " + names[0] + " is ready."
+	case 2:
+		return "Unavailable until " + names[0] + " and " + names[1] + " are ready."
+	default:
+		return "Unavailable until " + strings.Join(names[:len(names)-1], ", ") + ", and " + names[len(names)-1] + " are ready."
 	}
-	return "Unavailable until " + strings.Join(names, " and ") + " is ready."
 }
 
 // mediaWorkflows derives per-workflow readiness. Requirements follow yt-dlp's documented dependencies: FFmpeg and

@@ -33,7 +33,9 @@ tasks:
       # Release builds should pass GO_TRIMPATH=-trimpath to keep build-machine source paths out of the binary. It is
       # opt-in because -trimpath forces runtime/cgo to be rebuilt, which needs a working cgo toolchain.
       GO_TRIMPATH: '{{.GO_TRIMPATH | default ""}}'
-      BUILD_FLAGS: '{{if eq .DEV "true"}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production -buildvcs=false {{.GO_TRIMPATH}} -ldflags="-w -s -X downloader/internal/buildinfo.Version=0.9.1 -X downloader/internal/buildinfo.Commit={{.GIT_COMMIT}} -X downloader/internal/buildinfo.Modified={{.GIT_MODIFIED}} -X downloader/internal/buildinfo.Configuration=production"{{end}}'
+      # -H windowsgui links the production executable for the Windows GUI subsystem (PE subsystem 2), so launching it
+      # opens no console window. write-build-manifest.ps1 refuses a console-subsystem executable as a candidate.
+      BUILD_FLAGS: '{{if eq .DEV "true"}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production -buildvcs=false {{.GO_TRIMPATH}} -ldflags="-w -s -H windowsgui -X downloader/internal/buildinfo.Version=0.9.1 -X downloader/internal/buildinfo.Commit={{.GIT_COMMIT}} -X downloader/internal/buildinfo.Modified={{.GIT_MODIFIED}} -X downloader/internal/buildinfo.Configuration=production"{{end}}'
     env:
       GOOS: windows
       CGO_ENABLED: '1'

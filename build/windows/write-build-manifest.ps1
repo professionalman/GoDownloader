@@ -9,8 +9,12 @@
 
   The script refuses (exits non-zero, writes nothing) when:
     - an artifact is missing;
-    - no desktop executable is given, or it does not contain the --print-build-info flag (a stale or foreign binary
-      is never executed: an old build that does not know the flag would start the full application instead);
+    - no desktop executable is given;
+    - the desktop executable is not a well-formed PE image, or is not linked for the Windows GUI subsystem
+      (PE subsystem 2); a console-subsystem build (3) opens a console window next to the application. This header
+      check runs before the executable is ever started;
+    - the desktop executable does not contain the --print-build-info flag (a stale or foreign binary is never
+      executed: an old build that does not know the flag would start the full application instead);
     - the provenance probe does not finish within the timeout;
     - the embedded commit differs from the repository HEAD (stale or foreign build);
     - the executable claims a clean build but the working tree is modified (mislabelled build);
@@ -59,6 +63,38 @@ function Test-ContainsAscii([string]$path, [string]$marker) {
     return $false
 }
 
+# Returns the Subsystem field of a PE image's optional header (2 = WINDOWS_GUI, 3 = WINDOWS_CUI console). Only the
+# headers are read, every offset is bounds-checked against the file length, and anything that is not a well-formed
+# PE32/PE32+ image is refused. The file is never executed.
+function Get-PESubsystem([string]$path) {
+    $name = Split-Path -Leaf $path
+    $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $reader = New-Object System.IO.BinaryReader($stream)
+        $length = $stream.Length
+        if ($length -lt 64) { throw "$name is not a valid PE executable (too small); refusing." }
+        if ($reader.ReadUInt16() -ne 0x5A4D) { throw "$name is not a valid PE executable (no MZ header); refusing." }
+        $stream.Position = 0x3C
+        $peOffset = [int64]$reader.ReadUInt32()
+        # PE signature (4) + COFF file header (20) + optional header up to and including Subsystem (68 + 2).
+        if ($peOffset -lt 64 -or ($peOffset + 4 + 20 + 70) -gt $length) {
+            throw "$name is not a valid PE executable (PE header out of bounds); refusing."
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) { throw "$name is not a valid PE executable (no PE signature); refusing." }
+        $stream.Position = $peOffset + 4 + 16
+        if ($reader.ReadUInt16() -lt 70) { throw "$name is not a valid PE executable (optional header too small); refusing." }
+        $stream.Position = $peOffset + 24
+        $magic = $reader.ReadUInt16()
+        if ($magic -ne 0x10B -and $magic -ne 0x20B) { throw "$name is not a valid PE executable (unknown optional header); refusing." }
+        # Subsystem is at offset 68 of the optional header in both PE32 and PE32+.
+        $stream.Position = $peOffset + 24 + 68
+        return [int]$reader.ReadUInt16()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 # Runs the executable's provenance probe with a timeout. Only this script's own child process is ever terminated.
 function Get-EmbeddedBuildInfo([string]$path, [int]$timeoutSeconds) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -93,6 +129,11 @@ foreach ($path in $Artifacts) {
 $appExe = $items | Where-Object { $_.Extension -eq '.exe' -and $_.Name -notmatch '-setup\.exe$' } | Select-Object -First 1
 if ($null -eq $appExe) {
     throw "No desktop executable among the artifacts; its embedded build identity is required."
+}
+$subsystem = Get-PESubsystem $appExe.FullName
+if ($subsystem -ne 2) {
+    $kind = if ($subsystem -eq 3) { 'console, WINDOWS_CUI' } else { 'not WINDOWS_GUI' }
+    throw "$($appExe.Name) is not a Windows GUI executable (PE subsystem $subsystem, $kind; expected 2, WINDOWS_GUI); refusing."
 }
 if (-not (Test-ContainsAscii $appExe.FullName '--print-build-info')) {
     throw "$($appExe.Name) does not support --print-build-info (stale or foreign build); refusing to execute it."

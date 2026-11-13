@@ -9,6 +9,7 @@ package build
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"debug/pe"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -250,7 +251,8 @@ func TestPackaging_TaskfileStepsAgreeOnArtifactLocations(t *testing.T) {
 }
 
 // helperSource answers --print-build-info like the desktop executable (it contains the flag literal the manifest
-// script requires before executing anything) and is used as the packaged payload.
+// script requires before executing anything) and is used as the packaged payload. When PROBE_MARKER is set it also
+// records that it was executed.
 const helperSource = `package main
 
 import (
@@ -259,11 +261,224 @@ import (
 )
 
 func main() {
+	if marker := os.Getenv("PROBE_MARKER"); marker != "" {
+		_ = os.WriteFile(marker, []byte("executed"), 0o644)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--print-build-info" {
 		fmt.Printf("{\"version\":\"0.9.1\",\"commit\":\"%s\",\"dirty\":false,\"platform\":\"windows/amd64\",\"configuration\":\"production\",\"commitSource\":\"injected\"}\n", os.Getenv("FAKE_COMMIT"))
 	}
 }
 `
+
+// buildHelper compiles helperSource to exe with the given -ldflags ("" for none). "-H windowsgui" links it for the
+// Windows GUI subsystem like the production desktop executable; without it Go links a console program.
+func buildHelper(t *testing.T, exe, ldflags string) {
+	t.Helper()
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "main.go"), []byte(helperSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"build", "-o", exe}
+	if ldflags != "" {
+		args = append(args, "-ldflags="+ldflags)
+	}
+	build := exec.Command("go", append(args, "main.go")...)
+	build.Dir = src
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("cannot build helper: %v %s", err, out)
+	}
+}
+
+// peSubsystem reads the Subsystem field of a compiled executable's PE optional header with debug/pe.
+func peSubsystem(t *testing.T, path string) uint16 {
+	t.Helper()
+	f, err := pe.Open(path)
+	if err != nil {
+		t.Fatalf("%s is not a PE image: %v", filepath.Base(path), err)
+	}
+	defer f.Close()
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader64:
+		return oh.Subsystem
+	case *pe.OptionalHeader32:
+		return oh.Subsystem
+	}
+	t.Fatalf("%s has no optional header", filepath.Base(path))
+	return 0
+}
+
+// runManifest runs write-build-manifest.ps1 from cwd for the given artifacts and extra environment.
+func runManifest(t *testing.T, cwd, outFile string, env []string, artifacts ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", repoFile(t, "write-build-manifest.ps1"),
+		"-Version", "0.9.1", "-Invocation", "packaging-test", "-ProbeTimeoutSeconds", "10",
+		"-Artifacts", strings.Join(artifacts, ","), "-OutFile", outFile)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// productionLdflags returns the -ldflags value of the Taskfile's production (non-DEV) desktop build, with the
+// template variables filled in.
+func productionLdflags(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(repoFile(t, "Taskfile.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`BUILD_FLAGS: '\{\{if eq \.DEV "true"\}\}[^\n]*?\{\{else\}\}([^\n]*?)\{\{end\}\}'`).FindStringSubmatch(string(data))
+	if m == nil {
+		t.Fatal("production BUILD_FLAGS not found in Taskfile.yml")
+	}
+	ld := regexp.MustCompile(`-ldflags="([^"]*)"`).FindStringSubmatch(m[1])
+	if ld == nil {
+		t.Fatalf("production BUILD_FLAGS has no -ldflags: %s", m[1])
+	}
+	flags := strings.NewReplacer("{{.GIT_COMMIT}}", strings.Repeat("0", 40), "{{.GIT_MODIFIED}}", "false").Replace(ld[1])
+	if strings.Contains(flags, "{{") {
+		t.Fatalf("unexpected template variable in production ldflags: %s", flags)
+	}
+	return flags
+}
+
+// The production linker flags, applied to a real compiled executable, produce a Windows GUI-subsystem image (no
+// console window). Removing -H windowsgui from the Taskfile makes this fail with subsystem 3 (console).
+func TestPackaging_ProductionLinkerFlagsProduceGUISubsystem(t *testing.T) {
+	flags := productionLdflags(t)
+	for _, keep := range []string{"-w", "-s", "buildinfo.Version=0.9.1", "buildinfo.Commit=", "buildinfo.Modified=", "buildinfo.Configuration=production"} {
+		if !strings.Contains(flags, keep) {
+			t.Errorf("production ldflags lost %q: %s", keep, flags)
+		}
+	}
+	exe := filepath.Join(t.TempDir(), "GoDownloader.exe")
+	buildHelper(t, exe, flags)
+	if got := peSubsystem(t, exe); got != pe.IMAGE_SUBSYSTEM_WINDOWS_GUI {
+		t.Fatalf("production linker flags produce PE subsystem %d, want %d (WINDOWS_GUI); ldflags: %s", got, pe.IMAGE_SUBSYSTEM_WINDOWS_GUI, flags)
+	}
+}
+
+// A console-subsystem executable can never become a release candidate: the manifest gate refuses it from its PE
+// header alone, before executing it, and writes no manifest.
+func TestPackaging_ManifestRefusesConsoleSubsystemExecutable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "candidate out dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "GoDownloader.exe")
+	buildHelper(t, exe, "-w -s")
+	if got := peSubsystem(t, exe); got != pe.IMAGE_SUBSYSTEM_WINDOWS_CUI {
+		t.Fatalf("fixture is subsystem %d, want a console (3) build", got)
+	}
+	marker := filepath.Join(t.TempDir(), "executed")
+	mf := filepath.Join(dir, "manifest.json")
+	out, err := runManifest(t, t.TempDir(), mf, []string{"PROBE_MARKER=" + marker, "FAKE_COMMIT=" + strings.Repeat("a", 40)}, exe)
+	if err == nil || !strings.Contains(out, "is not a Windows GUI executable (PE subsystem 3") {
+		t.Fatalf("console-subsystem executable accepted: err=%v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(mf); !os.IsNotExist(statErr) {
+		t.Fatal("a manifest was written for a console-subsystem executable")
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatal("the console-subsystem executable was executed before being refused")
+	}
+}
+
+// A file that is not a well-formed PE image is refused by the header check (and never executed).
+func TestPackaging_ManifestRefusesInvalidExecutable(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string][]byte{
+		"not-pe":    []byte(strings.Repeat("not a PE image --print-build-info ", 64)),
+		"truncated": append([]byte("MZ"), make([]byte, 30)...),
+		"bad-lfanew": func() []byte {
+			b := make([]byte, 256)
+			b[0], b[1] = 'M', 'Z'
+			b[0x3C], b[0x3D], b[0x3E], b[0x3F] = 0xFF, 0xFF, 0xFF, 0x7F // e_lfanew far past the end of the file
+			return b
+		}(),
+	}
+	for name, content := range cases {
+		exe := filepath.Join(dir, name, "GoDownloader.exe")
+		if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(exe, content, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mf := filepath.Join(dir, name, "manifest.json")
+		out, err := runManifest(t, dir, mf, nil, exe)
+		if err == nil || !strings.Contains(out, "is not a valid PE executable") {
+			t.Errorf("%s: invalid executable accepted: err=%v\n%s", name, err, out)
+		}
+		if _, statErr := os.Stat(mf); !os.IsNotExist(statErr) {
+			t.Errorf("%s: a manifest was written", name)
+		}
+	}
+}
+
+// A GUI-subsystem executable's --print-build-info output is still captured by the manifest probe (redirected
+// standard output), parsed, and checked against HEAD. Runs without NSIS.
+func TestPackaging_ManifestCapturesBuildInfoFromGUIExecutable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=packaging-test", "-c", "user.email=packaging-test@invalid", "-c", "core.autocrlf=false"}, args...)...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.WriteFile(filepath.Join(root, "README"), []byte("fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("init", "-q")
+	git("add", "README")
+	git("commit", "-q", "-m", "fixture")
+	head := git("rev-parse", "HEAD")
+
+	dir := filepath.Join(t.TempDir(), "candidate out dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "GoDownloader.exe")
+	buildHelper(t, exe, "-w -s -H windowsgui")
+	if got := peSubsystem(t, exe); got != pe.IMAGE_SUBSYSTEM_WINDOWS_GUI {
+		t.Fatalf("fixture is subsystem %d, want GUI (2)", got)
+	}
+	mf := filepath.Join(dir, "manifest.json")
+	if out, err := runManifest(t, root, mf, []string{"FAKE_COMMIT=" + head}, exe); err != nil {
+		t.Fatalf("manifest for a GUI-subsystem executable: %v\n%s", err, out)
+	}
+	raw, err := os.ReadFile(mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		ReleaseCandidate bool `json:"releaseCandidate"`
+		Source           struct {
+			EmbeddedBuildInfo struct {
+				Version       string `json:"version"`
+				Commit        string `json:"commit"`
+				Dirty         bool   `json:"dirty"`
+				Configuration string `json:"configuration"`
+			} `json:"embeddedBuildInfo"`
+			EmbeddedCommitMatchesHead bool `json:"embeddedCommitMatchesHead"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("manifest JSON: %v\n%s", err, raw)
+	}
+	bi := m.Source.EmbeddedBuildInfo
+	if !m.ReleaseCandidate || !m.Source.EmbeddedCommitMatchesHead || bi.Version != "0.9.1" || bi.Commit != head || bi.Dirty || bi.Configuration != "production" {
+		t.Fatalf("build info not captured from the GUI-subsystem executable: %s", raw)
+	}
+}
 
 // 7, 9. End to end in a clean disposable git repository: package into a custom directory with spaces, write the
 // manifest for the same two artifacts, and check its hashes against the files. Stale provenance is refused.
@@ -289,17 +504,11 @@ func TestPackaging_ManifestHashesTheSelectedArtifacts(t *testing.T) {
 	head := git("rev-parse", "HEAD")
 
 	custom := filepath.Join(t.TempDir(), "candidate out dir")
-	src := t.TempDir()
-	if err := os.WriteFile(filepath.Join(src, "main.go"), []byte(helperSource), 0o644); err != nil {
+	if err := os.MkdirAll(custom, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	exe := filepath.Join(custom, "GoDownloader.exe")
-	build := exec.Command("go", "build", "-o", exe, "main.go")
-	build.Dir = src
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Skipf("cannot build helper: %v %s", err, out)
-	}
+	buildHelper(t, exe, "-H windowsgui") // GUI subsystem, like the production desktop executable
 	if out, err := runPackage(t, root, nsi, custom); err != nil {
 		t.Fatalf("package: %v\n%s", err, out)
 	}
@@ -307,13 +516,7 @@ func TestPackaging_ManifestHashesTheSelectedArtifacts(t *testing.T) {
 	manifest := func(commit string) (string, error) {
 		mf := filepath.Join(custom, "manifest.json")
 		_ = os.Remove(mf)
-		cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", repoFile(t, "write-build-manifest.ps1"),
-			"-Version", "0.9.1", "-Invocation", "packaging-test", "-ProbeTimeoutSeconds", "10",
-			"-Artifacts", exe+","+filepath.Join(custom, installerName), "-OutFile", mf)
-		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "FAKE_COMMIT="+commit)
-		out, err := cmd.CombinedOutput()
-		return string(out), err
+		return runManifest(t, root, mf, []string{"FAKE_COMMIT=" + commit}, exe, filepath.Join(custom, installerName))
 	}
 
 	if out, err := manifest(head); err != nil {

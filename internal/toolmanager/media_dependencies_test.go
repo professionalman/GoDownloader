@@ -333,3 +333,50 @@ func TestMediaDependencies_PathFree(t *testing.T) {
 		t.Fatalf("status leaks a path: %s", data)
 	}
 }
+
+// The workflow diagnostic lists every missing tool in a grammatical sentence, whatever the number missing.
+func TestMissingRequirements_Wording(t *testing.T) {
+	y, f, p := requirement{false, "yt-dlp"}, requirement{false, "FFmpeg"}, requirement{false, "FFprobe"}
+	ready := func(r requirement) requirement { r.ok = true; return r }
+	cases := []struct {
+		name string
+		reqs []requirement
+		want string
+	}{
+		{"all ready", []requirement{ready(y), ready(f), ready(p)}, ""},
+		{"one missing", []requirement{ready(y), f, ready(p)}, "Unavailable until FFmpeg is ready."},
+		{"two missing", []requirement{y, f, ready(p)}, "Unavailable until yt-dlp and FFmpeg are ready."},
+		{"three missing", []requirement{y, f, p}, "Unavailable until yt-dlp, FFmpeg, and FFprobe are ready."},
+		{"single requirement missing", []requirement{y}, "Unavailable until yt-dlp is ready."},
+		{"no requirements", nil, ""},
+	}
+	for _, c := range cases {
+		if got := missingRequirements(c.reqs...); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The clean-machine case observed in Windows Sandbox acceptance (D-2): nothing installed.
+func TestMediaWorkflows_NothingInstalledWording(t *testing.T) {
+	var st MediaDependencyStatus
+	got := map[string]string{}
+	for _, w := range mediaWorkflows(st) {
+		got[w.ID] = w.Diagnostic
+	}
+	want := map[string]string{
+		"media_analysis":          "Unavailable until yt-dlp is ready.",
+		"merge_video_audio":       "Unavailable until yt-dlp, FFmpeg, and FFprobe are ready.",
+		"subtitle_postprocessing": "Unavailable until yt-dlp, FFmpeg, and FFprobe are ready.",
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s: got %q, want %q", id, got[id], w)
+		}
+	}
+	for id, d := range got {
+		if strings.Contains(d, " and FFmpeg and ") || strings.Contains(d, "FFprobe is ready") {
+			t.Errorf("%s: ungrammatical diagnostic %q", id, d)
+		}
+	}
+}
